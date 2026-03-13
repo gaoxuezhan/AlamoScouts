@@ -17,3 +17,10 @@ yarn-debug.log*
 yarn-error.log*
 
 scripts_make_flowchart.py
+
+apps/proxy-pool-service/data/*.db
+apps/proxy-pool-service/data/*.db-shm
+apps/proxy-pool-service/data/*.db-wal
+apps/proxy-pool-service/data/soak-*.md
+apps/proxy-pool-service/data/soak-*.jsonl
+apps/proxy-pool-service/data/soak-live.*

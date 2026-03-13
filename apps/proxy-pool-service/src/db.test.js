@@ -1,0 +1,345 @@
+﻿const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { ProxyHubDb } = require('./db');
+
+function createDb({ snapshotRetentionDays = 7 } = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxyhub-db-'));
+    const dbPath = path.join(dir, 'proxyhub-test.db');
+    const config = {
+        storage: {
+            dbPath,
+            snapshotRetentionDays,
+        },
+    };
+
+    const db = new ProxyHubDb(config);
+    return { db, dir, dbPath };
+}
+
+function cleanup(handle) {
+    handle.db.close();
+    fs.rmSync(handle.dir, { recursive: true, force: true });
+}
+
+test('db should create tables and return null latest snapshot initially', () => {
+    const h = createDb();
+    assert.equal(h.db.getLatestSnapshot(), null);
+    cleanup(h);
+});
+
+test('upsertSourceBatch should insert and touch existing records', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    const first = h.db.upsertSourceBatch(
+        [{ ip: '1.1.1.1', port: 80, protocol: 'http' }],
+        () => '苍隼-北辰-01',
+        'srcA',
+        'batchA',
+        now,
+    );
+    assert.deepEqual(first, { inserted: 1, touched: 0 });
+
+    const second = h.db.upsertSourceBatch(
+        [{ ip: '1.1.1.1', port: 80, protocol: 'http' }],
+        () => '不会用到',
+        'srcB',
+        'batchB',
+        now,
+    );
+    assert.deepEqual(second, { inserted: 0, touched: 1 });
+
+    const proxy = h.db.getProxyByKey('1.1.1.1:80:http');
+    assert.equal(proxy.source, 'srcB');
+    assert.equal(h.db.isDisplayNameAvailable('苍隼-北辰-01'), false);
+    assert.equal(h.db.isDisplayNameAvailable('不存在'), true);
+
+    cleanup(h);
+});
+
+test('updateProxyById should support empty updates and normal updates', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+    h.db.upsertSourceBatch(
+        [{ ip: '2.2.2.2', port: 8080, protocol: 'https' }],
+        () => '龙卫-玄武-02',
+        'src',
+        'batch',
+        now,
+    );
+
+    const proxy = h.db.getProxyByKey('2.2.2.2:8080:https');
+    h.db.updateProxyById(proxy.id, {});
+    h.db.updateProxyById(proxy.id, {
+        lifecycle: 'active',
+        rank: '列兵',
+        updated_at: new Date().toISOString(),
+    });
+    h.db.updateProxyById(proxy.id, {
+        lifecycle: 'reserve',
+    });
+
+    const refreshed = h.db.getProxyById(proxy.id);
+    assert.equal(refreshed.lifecycle, 'reserve');
+    assert.equal(refreshed.rank, '列兵');
+
+    cleanup(h);
+});
+
+test('log and event APIs should work', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.insertRuntimeLog({
+        timestamp: now,
+        event: '开始抓源',
+        proxy_name: 'A',
+        ip_source: 'src',
+        stage: '抓源',
+        result: 'ok',
+        duration_ms: 12,
+        reason: 'none',
+        action: 'next',
+        details: { a: 1 },
+    });
+
+    h.db.insertProxyEvent({
+        timestamp: now,
+        proxy_id: null,
+        display_name: 'A',
+        event_type: 'promotion',
+        level: 'info',
+        message: '晋升',
+        details: { to: '列兵' },
+    });
+
+    const logs = h.db.getRuntimeLogs(10);
+    const events = h.db.getEvents(10);
+    assert.equal(logs.length, 1);
+    assert.equal(events.length, 1);
+
+    cleanup(h);
+});
+
+test('db should apply default field fallbacks for nullable inserts', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.insertRuntimeLog({
+        timestamp: now,
+        event: '默认字段测试',
+    });
+
+    h.db.insertProxyEvent({
+        timestamp: now,
+        event_type: 'generic',
+        message: 'x',
+    });
+
+    h.db.upsertSourceBatch(
+        [{ ip: '9.9.9.9', port: 9000, protocol: 'http' }],
+        () => '骁骑-星河-09',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyByKey('9.9.9.9:9000:http');
+
+    h.db.upsertHonor({
+        proxy_id: proxy.id,
+        display_name: proxy.display_name,
+        honor_type: '千次服役',
+        awarded_at: now,
+    });
+
+    h.db.insertRetirement({
+        proxy_id: proxy.id,
+        display_name: proxy.display_name,
+        retired_type: '技术退伍',
+        retired_at: now,
+    });
+
+    h.db.insertPoolSnapshot({
+        timestamp: now,
+        workers_total: 1,
+        workers_busy: 0,
+        queue_size: 0,
+        completed_tasks: 0,
+        failed_tasks: 0,
+        restarted_workers: 0,
+    });
+
+    h.db.db.prepare(`
+        UPDATE pool_snapshots
+        SET source_distribution_json = '', rank_distribution_json = '', lifecycle_distribution_json = ''
+        WHERE id = (SELECT id FROM pool_snapshots ORDER BY id DESC LIMIT 1)
+    `).run();
+
+    const latest = h.db.getLatestSnapshot();
+    assert.deepEqual(latest.source_distribution, []);
+    assert.deepEqual(latest.rank_distribution, []);
+    assert.deepEqual(latest.lifecycle_distribution, []);
+
+    h.db.updateProxyById(proxy.id, { rank: '神秘军衔', updated_at: now });
+    const board = h.db.getRankBoard();
+    assert.equal(board.some((x) => x.rank === '神秘军衔'), true);
+
+    cleanup(h);
+});
+
+test('honor and retirement APIs should work', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [{ ip: '3.3.3.3', port: 1080, protocol: 'socks5' }],
+        () => '雪豹-惊雷-03',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyByKey('3.3.3.3:1080:socks5');
+
+    h.db.upsertHonor({
+        proxy_id: proxy.id,
+        display_name: proxy.display_name,
+        honor_type: '钢铁连胜',
+        reason: '连续成功',
+        awarded_at: now,
+    });
+    h.db.refreshHonorActive(proxy.id, []);
+    h.db.refreshHonorActive(proxy.id, ['钢铁连胜']);
+
+    h.db.insertRetirement({
+        proxy_id: proxy.id,
+        display_name: proxy.display_name,
+        retired_type: '荣誉退伍',
+        reason: '长期稳定',
+        retired_at: now,
+    });
+
+    const honors = h.db.getHonors(10);
+    const retires = h.db.getRetirements(10);
+
+    assert.equal(honors.length, 1);
+    assert.equal(honors[0].active, 1);
+    assert.equal(retires.length, 1);
+
+    cleanup(h);
+});
+
+test('query list APIs should support filters and distributions', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [
+            { ip: '4.4.4.4', port: 80, protocol: 'http' },
+            { ip: '4.4.4.5', port: 443, protocol: 'https' },
+        ],
+        (() => {
+            let i = 0;
+            return () => {
+                i += 1;
+                return `远征-北辰-0${i}`;
+            };
+        })(),
+        'src-dist',
+        'batch',
+        now,
+    );
+
+    const all = h.db.getProxyList({ limit: 50 });
+    assert.equal(all.length, 2);
+
+    h.db.updateProxyById(all[0].id, { rank: '士官', lifecycle: 'active', updated_at: now });
+
+    const filtered = h.db.getProxyList({ limit: 10, rank: '士官', lifecycle: 'active' });
+    assert.equal(filtered.length, 1);
+
+    assert.equal(h.db.getSourceDistribution().length, 1);
+    assert.equal(h.db.getLifecycleDistribution().length >= 1, true);
+    assert.equal(h.db.getRankBoard().length >= 1, true);
+
+    cleanup(h);
+});
+
+test('snapshot APIs should persist and apply retention cleanup', () => {
+    const h = createDb({ snapshotRetentionDays: 0 });
+
+    const oldTs = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    h.db.insertPoolSnapshot({
+        timestamp: oldTs,
+        workers_total: 6,
+        workers_busy: 1,
+        queue_size: 0,
+        completed_tasks: 10,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        source_distribution: [{ source: 'old', count: 1 }],
+        rank_distribution: [{ rank: '新兵', count: 1 }],
+        lifecycle_distribution: [{ lifecycle: 'candidate', count: 1 }],
+    });
+
+    const latestTs = new Date(Date.now() + 2000).toISOString();
+    h.db.insertPoolSnapshot({
+        timestamp: latestTs,
+        workers_total: 6,
+        workers_busy: 2,
+        queue_size: 3,
+        completed_tasks: 20,
+        failed_tasks: 1,
+        restarted_workers: 0,
+        source_distribution: [{ source: 'new', count: 2 }],
+        rank_distribution: [{ rank: '列兵', count: 2 }],
+        lifecycle_distribution: [{ lifecycle: 'active', count: 2 }],
+    });
+
+    const latest = h.db.getLatestSnapshot();
+    assert.equal(latest.workers_busy, 2);
+    assert.equal(Array.isArray(latest.source_distribution), true);
+    const count = h.db.db.prepare('SELECT COUNT(*) AS c FROM pool_snapshots').get().c;
+    assert.equal(count, 1);
+
+    cleanup(h);
+});
+
+test('snapshot retention should cleanup by timestamp when retentionDays is positive', () => {
+    const h = createDb({ snapshotRetentionDays: 1 });
+    const now = Date.now();
+
+    h.db.insertPoolSnapshot({
+        timestamp: new Date(now - 2 * 24 * 3600 * 1000).toISOString(),
+        workers_total: 6,
+        workers_busy: 0,
+        queue_size: 0,
+        completed_tasks: 1,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        source_distribution: [{ source: 'old', count: 1 }],
+        rank_distribution: [{ rank: '新兵', count: 1 }],
+        lifecycle_distribution: [{ lifecycle: 'candidate', count: 1 }],
+    });
+    h.db.insertPoolSnapshot({
+        timestamp: new Date(now).toISOString(),
+        workers_total: 6,
+        workers_busy: 1,
+        queue_size: 0,
+        completed_tasks: 2,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        source_distribution: [{ source: 'new', count: 1 }],
+        rank_distribution: [{ rank: '列兵', count: 1 }],
+        lifecycle_distribution: [{ lifecycle: 'active', count: 1 }],
+    });
+
+    const count = h.db.db.prepare('SELECT COUNT(*) AS c FROM pool_snapshots').get().c;
+    const latest = h.db.getLatestSnapshot();
+    assert.equal(count, 1);
+    assert.equal(latest.workers_busy, 1);
+
+    cleanup(h);
+});
