@@ -1,11 +1,11 @@
-# Crawlee + Camoufox 需求沉淀与函数地图（可复用交接稿）
+﻿# Crawlee + Camoufox 需求沉淀与函数地图（可复用交接稿）
 
 ## 1. 任务目标（到目前为止）
 - 目标站点：`ly.com`
-- 目标检索：`北京(BJS) -> 三亚(SYX)`，日期 `2026-04-01`，航班号 `CA1345`
-- 输出频率：每 `5` 分钟给一个价格结果
+- 目标检索：`北京(BJS) -> 三亚(SYX)`，日期 `2026-04-01`，航班号默认 `CZ6714`
+- 输出频率：每 `5` 分钟产出一条结果
 - 运行方式：常驻 Web 服务
-- 可视要求：抓取时可看到浏览器窗口（可配置）
+- 默认运行模式：无头（`headless: true`，可配置）
 
 ## 2. 必须具备的能力
 - 使用 Crawlee 管理抓取任务与长跑循环
@@ -16,20 +16,20 @@
 - 提供查询接口（最新结果、历史、手动触发、SSE 推送）
 
 ## 3. 关键经验与约束（对话中确认）
-- 站点数据可能懒加载，`CA1345` 可能出现在列表底部（“最后一行”）
+- 站点数据可能懒加载，目标航班可能出现在列表底部
 - 仅靠 `page.content()` 容易漏航班，需优先读可见文本并滚动加载
 - 窗口不在最前时，`mouse.wheel` 可能不稳定，改为页面内 `window.scrollTo`
-- 配置不要散落在代码里，要集中在一个配置文件（`src/config.js`）
-- 源码注释要中文，便于快速维护
+- 配置集中在 `src/config.js`，避免在业务代码写死
+- 源码注释尽量用中文，方便维护
 
 ## 4. 当前代码结构
-- 统一配置入口：[src/config.js](/F:/lake/myCrawleeEngineer/src/config.js)
-- 主程序入口：[src/server.js](/F:/lake/myCrawleeEngineer/src/server.js)
-- 项目说明：[README.md](/F:/lake/myCrawleeEngineer/README.md)
+- 统一配置入口：`src/config.js`
+- 主程序入口：`src/server.js`
+- 项目说明：`README.md`
 - 结果输出：`output/flight-price-results.ndjson`
 
 ## 5. 配置清单（改哪里）
-配置都在 [src/config.js](/F:/lake/myCrawleeEngineer/src/config.js)：
+配置都在 `src/config.js`：
 - `server`：端口
 - `task`：日期、出发地、到达地、航班号、轮询间隔
 - `browser`：是否无头、可视停留、Camoufox 参数
@@ -41,16 +41,16 @@
 - `timeouts`：导航与 networkidle 超时
 - `api`：`/history` 默认与最大限制
 
-### 推荐基线配置（按本次需求）
+### 推荐基线配置（当前默认）
 - `task.flightDate = "2026-04-01"`
 - `task.departure = "BJS"`
 - `task.arrival = "SYX"`
-- `task.flightNo = "CA1345"`
+- `task.flightNo = "CZ6714"`
 - `task.pollIntervalMinutes = 5`
-- `browser.headless = false`（需要可视窗口时）
+- `browser.headless = true`（需要可视窗口时改为 `false`）
 
 ## 6. 函数位置与作用（快速地图）
-函数都在 [src/server.js](/F:/lake/myCrawleeEngineer/src/server.js)：
+函数都在 `src/server.js`：
 
 | 位置 | 函数/对象 | 作用 |
 |---|---|---|
@@ -84,7 +84,7 @@
 ## 8. 验收标准（建议）
 - 服务启动后可访问 `/health`
 - 轮询周期符合配置（默认 5 分钟）
-- `CA1345` 能在底部懒加载场景被识别
+- 目标航班能在底部懒加载场景被识别
 - 浏览器前后台切换时，抓取稳定性不明显下降
 - 结果持续落盘且 SSE 能实时收到更新
 

@@ -128,7 +128,7 @@ function extractPriceFromVisibleText(pageText, flightNo) {
     };
 }
 
-// 滚动采集页面可见文本，尽量覆盖底部懒加载航班（如 CA1345 在最后一行）。
+// 滚动采集页面可见文本，尽量覆盖底部懒加载航班（例如目标航班在最后一行）。
 async function collectPageTextWithScroll(page, flightNo) {
     const target = flightNo.toUpperCase();
     let longestText = '';
@@ -336,7 +336,10 @@ async function runSingleCheck(context) {
         // 双通道提取：先可见文本（主）再 HTML（兜底）。
         const extractedFromVisibleText = extractPriceFromVisibleText(pageText, FLIGHT_NO);
         const extractedFromHtml = extractPriceByFlightNo(html, FLIGHT_NO);
-        const extracted = extractedFromVisibleText ?? extractedFromHtml;
+        // 可见文本命中但 price 为空时，继续尝试 HTML 兜底；若仍失败，再回退到可见文本结果。
+        const extracted = extractedFromVisibleText?.price != null
+            ? extractedFromVisibleText
+            : extractedFromHtml ?? extractedFromVisibleText;
         const flightFound = Boolean(extracted);
         const hasPrice = extracted?.price != null;
         const finalUrl = page.url();
@@ -431,96 +434,111 @@ async function startMonitor() {
         return;
     }
 
-    monitorStarted = true;
+    try {
+        await mkdir(OUTPUT_DIR, { recursive: true });
 
-    await mkdir(OUTPUT_DIR, { recursive: true });
-
-    if (CAMOUFOX_AUTO_FETCH) {
-        try {
-            log.info('Checking Camoufox browser binaries...');
-            await downloadBrowser();
-        } catch (error) {
-            log.warning(`Camoufox binary prefetch failed: ${error.message}`);
-        }
-    }
-
-    proxyConfiguration = PROXY_URLS.length
-        ? new ProxyConfiguration({ proxyUrls: PROXY_URLS })
-        : null;
-
-    requestQueue = await RequestQueue.open(config.crawler.requestQueueName);
-
-    crawler = new BasicCrawler({
-        requestQueue,
-        // keepAlive=true 表示队列空了也不退出，适合长跑服务。
-        keepAlive: config.crawler.keepAlive,
-        // 并发由配置文件控制。
-        maxConcurrency: config.crawler.maxConcurrency,
-        minConcurrency: config.crawler.minConcurrency,
-        // 请求级别重试次数（不含 session 轮换带来的重试）。
-        maxRequestRetries: config.crawler.maxRequestRetries,
-        // 同一请求最多可触发的 session 轮换次数。
-        maxSessionRotations: config.crawler.maxSessionRotations,
-        retryOnBlocked: config.crawler.retryOnBlocked,
-        // 开启会话池（cookies + 失败分数 + 退休机制）。
-        useSessionPool: config.crawler.useSessionPool,
-        sessionPoolOptions: config.crawler.sessionPoolOptions,
-        requestHandlerTimeoutSecs: config.crawler.requestHandlerTimeoutSecs,
-        async requestHandler(context) {
-            inFlight += 1;
+        if (CAMOUFOX_AUTO_FETCH) {
             try {
-                await runSingleCheck(context);
-            } finally {
-                inFlight = Math.max(0, inFlight - 1);
+                log.info('Checking Camoufox browser binaries...');
+                await downloadBrowser();
+            } catch (error) {
+                log.warning(`Camoufox binary prefetch failed: ${error.message}`);
             }
-        },
-        async failedRequestHandler({ request, session }, error) {
-            // 最终失败也写入结果，避免“静默失败”。
-            const fallbackResult = {
-                timestamp: new Date().toISOString(),
-                task: {
-                    site: 'ly.com',
-                    departure: DEPARTURE,
-                    arrival: ARRIVAL,
-                    expectedDate: FLIGHT_DATE,
-                    flightNo: FLIGHT_NO,
-                },
-                status: 'failed',
-                foundFlight: false,
-                price: null,
-                priceCurrency: 'CNY',
-                extractionMethod: null,
-                extractionSnippet: null,
-                requestUrl: request.url,
-                finalUrl: null,
-                finalDate: null,
-                redirectedFromExpectedDate: false,
-                proxyUrl: null,
-                sessionId: session?.id ?? null,
-                durationMs: null,
-                triggerReason: request.userData.triggerReason,
-                note: `抓取失败: ${error.message}`,
-            };
+        }
 
-            await persistAndBroadcast(fallbackResult);
-        },
-    });
+        proxyConfiguration = PROXY_URLS.length
+            ? new ProxyConfiguration({ proxyUrls: PROXY_URLS })
+            : null;
 
-    // 启动 crawler 主循环（常驻）。
-    crawlerPromise = crawler.run().catch((error) => {
-        log.exception(error, 'Crawler loop crashed unexpectedly.');
-    });
+        requestQueue = await RequestQueue.open(config.crawler.requestQueueName);
 
-    // 启动后先抓一轮，再进入定时抓取。
-    await enqueueCheck('startup');
+        crawler = new BasicCrawler({
+            requestQueue,
+            // keepAlive=true 表示队列空了也不退出，适合长跑服务。
+            keepAlive: config.crawler.keepAlive,
+            // 并发由配置文件控制。
+            maxConcurrency: config.crawler.maxConcurrency,
+            minConcurrency: config.crawler.minConcurrency,
+            // 请求级别重试次数（不含 session 轮换带来的重试）。
+            maxRequestRetries: config.crawler.maxRequestRetries,
+            // 同一请求最多可触发的 session 轮换次数。
+            maxSessionRotations: config.crawler.maxSessionRotations,
+            retryOnBlocked: config.crawler.retryOnBlocked,
+            // 开启会话池（cookies + 失败分数 + 退休机制）。
+            useSessionPool: config.crawler.useSessionPool,
+            sessionPoolOptions: config.crawler.sessionPoolOptions,
+            requestHandlerTimeoutSecs: config.crawler.requestHandlerTimeoutSecs,
+            async requestHandler(context) {
+                inFlight += 1;
+                try {
+                    await runSingleCheck(context);
+                } finally {
+                    inFlight = Math.max(0, inFlight - 1);
+                }
+            },
+            async failedRequestHandler({ request, session }, error) {
+                // 最终失败也写入结果，避免“静默失败”。
+                const fallbackResult = {
+                    timestamp: new Date().toISOString(),
+                    task: {
+                        site: 'ly.com',
+                        departure: DEPARTURE,
+                        arrival: ARRIVAL,
+                        expectedDate: FLIGHT_DATE,
+                        flightNo: FLIGHT_NO,
+                    },
+                    status: 'failed',
+                    foundFlight: false,
+                    price: null,
+                    priceCurrency: 'CNY',
+                    extractionMethod: null,
+                    extractionSnippet: null,
+                    requestUrl: request.url,
+                    finalUrl: null,
+                    finalDate: null,
+                    redirectedFromExpectedDate: false,
+                    proxyUrl: null,
+                    sessionId: session?.id ?? null,
+                    durationMs: null,
+                    triggerReason: request.userData.triggerReason,
+                    note: `抓取失败: ${error.message}`,
+                };
 
-    enqueueTimer = setInterval(() => {
-        void enqueueCheck('scheduled-5min').catch((error) => {
-            log.warning(`enqueue failed: ${error.message}`);
+                await persistAndBroadcast(fallbackResult);
+            },
         });
-    }, POLL_INTERVAL_MS);
 
-    log.info(`Monitor started. Poll interval: ${Math.round(POLL_INTERVAL_MS / 1000)}s`);
+        // 启动 crawler 主循环（常驻）。
+        crawlerPromise = crawler.run().catch((error) => {
+            log.exception(error, 'Crawler loop crashed unexpectedly.');
+        });
+
+        // 启动后先抓一轮，再进入定时抓取。
+        await enqueueCheck('startup');
+
+        const scheduledTriggerReason = `scheduled-${POLL_INTERVAL_MINUTES}min`;
+        enqueueTimer = setInterval(() => {
+            void enqueueCheck(scheduledTriggerReason).catch((error) => {
+                log.warning(`enqueue failed: ${error.message}`);
+            });
+        }, POLL_INTERVAL_MS);
+
+        monitorStarted = true;
+        log.info(`Monitor started. Poll interval: ${Math.round(POLL_INTERVAL_MS / 1000)}s`);
+    } catch (error) {
+        monitorStarted = false;
+        if (enqueueTimer) {
+            clearInterval(enqueueTimer);
+            enqueueTimer = undefined;
+        }
+        if (crawler) {
+            await crawler.stop().catch(() => {});
+        }
+        requestQueue = undefined;
+        crawler = undefined;
+        crawlerPromise = undefined;
+        throw error;
+    }
 }
 
 // 优雅停止：先停定时器，再停 crawler。
@@ -534,6 +552,8 @@ async function stopMonitor() {
         await crawler.stop().catch(() => {});
         await crawlerPromise;
     }
+
+    monitorStarted = false;
 }
 
 const app = express();
@@ -569,10 +589,11 @@ app.get('/latest', (_req, res) => {
 
 // 历史结果（内存），可通过 ?limit=xx 控制返回数量。
 app.get('/history', (req, res) => {
-    const limit = Math.max(
-        1,
-        Math.min(config.api.historyMaxLimit, parseInt(req.query.limit ?? String(config.api.historyDefaultLimit), 10)),
-    );
+    const parsedLimit = Number.parseInt(String(req.query.limit ?? config.api.historyDefaultLimit), 10);
+    const normalizedLimit = Number.isFinite(parsedLimit)
+        ? parsedLimit
+        : config.api.historyDefaultLimit;
+    const limit = Math.max(1, Math.min(config.api.historyMaxLimit, normalizedLimit));
     res.json({
         count: Math.min(limit, history.length),
         items: history.slice(-limit),
