@@ -8,7 +8,7 @@
 - Camoufox（隐形 Firefox）
 - Web Server 持续运行（Express）
 
-默认任务（可在配置文件改）：查询 `2026-04-01` 北京(`BJS`) -> 三亚(`SYX`) 航班 `CA1345`，每 5 分钟执行一次。
+默认任务（可在配置文件改）：查询 `2026-04-01` 北京(`BJS`) -> 三亚(`SYX`) 航班 `CZ6714`，每 5 分钟执行一次。
 
 ## 安装
 
@@ -28,8 +28,8 @@ npm install
 npm start
 ```
 
-默认是可视模式（`headless: false`），抓取时会弹出浏览器窗口。  
-可在 `src/config.js -> browser.visibleHoldMs` 调整停留时长（毫秒）。
+默认是无头模式（`headless: true`）。  
+如需可视化观察抓取过程，可将 `src/config.js -> browser.headless` 改为 `false`，并通过 `browser.visibleHoldMs` 调整停留时长（毫秒）。
 
 ## API
 
@@ -53,4 +53,4 @@ npm start
 - `redirectedFromExpectedDate`
 - `finalDate`
 
-如果页面中找不到 `CA1345`，会返回 `status = flight-not-found`。
+如果页面中找不到配置中的目标航班号（默认 `CZ6714`），会返回 `status = flight-not-found`。
