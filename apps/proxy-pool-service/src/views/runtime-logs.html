@@ -1,0 +1,102 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyHub 运行日志</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #152238;
+      --muted: #5f6f8f;
+      --line: #d8e0ee;
+      --ok: #0f766e;
+      --warn: #b45309;
+      --bad: #b91c1c;
+    }
+    body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 16px 20px; background: #0f1f3d; color: #fff; }
+    h1 { margin: 0; font-size: 22px; }
+    .sub { margin-top: 4px; color: #c9d5ef; font-size: 12px; }
+    .wrap { padding: 14px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 7px 6px; text-align: left; }
+    th { background: #f2f5fb; color: var(--muted); position: sticky; top: 0; }
+    .ok { color: var(--ok); font-weight: 600; }
+    .warn { color: var(--warn); font-weight: 600; }
+    .bad { color: var(--bad); font-weight: 600; }
+    .mono { font-family: Consolas, monospace; }
+    #status { margin: 8px 0 10px; color: var(--muted); font-size: 12px; }
+    .table-wrap { max-height: 76vh; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ProxyHub 中文实时日志</h1>
+    <div class="sub">固定事件：抓源/校验/评分/晋升/降级/退伍/荣誉/入库/线程池告警/自动恢复</div>
+  </header>
+  <div class="wrap">
+    <div id="status">正在连接 SSE...</div>
+    <div class="card table-wrap">
+      <table>
+        <thead>
+          <tr><th>时间</th><th>事件</th><th>代理昵称</th><th>来源</th><th>阶段</th><th>结果</th><th>耗时(ms)</th><th>原因</th><th>动作</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+const statusEl = document.getElementById('status');
+const tbody = document.getElementById('tbody');
+const maxRows = 500;
+
+function esc(v) { return String(v == null ? '-' : v).replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]; }); }
+
+function rowClass(event, result) {
+  if (['抓源失败', '写数据库失败'].indexOf(event) >= 0 || String(result).indexOf('失败') >= 0) return 'bad';
+  if (['线程池告警', '降级', '退伍'].indexOf(event) >= 0) return 'warn';
+  if (['抓源成功', '校验通过', '晋升', '授予荣誉', '自动恢复', '写数据库成功'].indexOf(event) >= 0) return 'ok';
+  return '';
+}
+
+function prependLog(item) {
+  const tr = document.createElement('tr');
+  const cls = rowClass(item.event, item.result);
+  tr.innerHTML = ''
+    + '<td class="mono">' + esc(item.timestamp) + '</td>'
+    + '<td class="' + cls + '">' + esc(item.event) + '</td>'
+    + '<td>' + esc(item.proxy_name || '-') + '</td>'
+    + '<td>' + esc(item.ip_source || '-') + '</td>'
+    + '<td>' + esc(item.stage || '-') + '</td>'
+    + '<td>' + esc(item.result || '-') + '</td>'
+    + '<td>' + esc(item.duration_ms) + '</td>'
+    + '<td>' + esc(item.reason || '-') + '</td>'
+    + '<td>' + esc(item.action || '-') + '</td>';
+
+  tbody.insertBefore(tr, tbody.firstChild);
+  while (tbody.children.length > maxRows) {
+    tbody.removeChild(tbody.lastChild);
+  }
+}
+
+async function loadInitial() {
+  const data = await fetch('/v1/runtime/logs?limit=200').then(function(r){ return r.json(); });
+  const items = data.items || [];
+  for (let i = items.length - 1; i >= 0; i--) {
+    prependLog(items[i]);
+  }
+}
+
+const stream = new EventSource('/api/runtime/logs/stream');
+stream.onopen = function() { statusEl.textContent = 'SSE 已连接，日志实时更新中'; };
+stream.onerror = function() { statusEl.textContent = 'SSE 连接中断，正在自动重连...'; };
+stream.onmessage = function(ev) { prependLog(JSON.parse(ev.data)); };
+
+loadInitial();
+</script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyHub 管理页</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #121c31;
+      --panel2: #1b2744;
+      --text: #e6edf8;
+      --muted: #9eb1d8;
+      --ok: #2dd4bf;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --line: #2f4069;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at 20% 0%, #132447, #0b1220 45%);
+    }
+    header { padding: 20px 24px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 24px; letter-spacing: 1px; }
+    .sub { color: var(--muted); margin-top: 6px; font-size: 13px; }
+    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; padding: 14px; }
+    .card { background: linear-gradient(180deg, var(--panel), var(--panel2)); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-height: 180px; }
+    .card h2 { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 15px; color: #c9d9f8; }
+    .card .content { padding: 12px 14px; max-height: 360px; overflow: auto; }
+    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+    .stat .k { font-size: 12px; color: var(--muted); }
+    .stat .v { font-size: 20px; margin-top: 4px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 6px 4px; text-align: left; }
+    th { color: var(--muted); font-weight: 600; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .mono { font-family: Consolas, monospace; }
+    .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin-right: 6px; margin-bottom: 6px; font-size: 12px; }
+    footer { padding: 0 14px 14px; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ProxyHub 线程池与军衔管理台</h1>
+    <div class="sub">刷新周期 __REFRESH_MS__ms | 页面地址 /proxy-admin | 日志页 /runtime/logs</div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>线程池实时状态</h2>
+      <div class="content">
+        <div id="poolStats" class="stats"></div>
+        <table id="workerTable"></table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>来源分布 / 生命周期 / 军衔分布</h2>
+      <div class="content"><div id="distributions"></div></div>
+    </section>
+
+    <section class="card"><h2>荣誉墙</h2><div class="content"><table id="honorTable"></table></div></section>
+    <section class="card"><h2>退伍台账</h2><div class="content"><table id="retireTable"></table></div></section>
+    <section class="card"><h2>事件流</h2><div class="content"><table id="eventTable"></table></div></section>
+    <section class="card"><h2>代理明细（前50）</h2><div class="content"><table id="proxyTable"></table></div></section>
+  </main>
+
+  <footer><div>状态颜色：<span class="ok">正常</span> / <span class="warn">告警</span> / <span class="bad">异常</span></div></footer>
+
+<script>
+const workerTable = document.getElementById('workerTable');
+const poolStats = document.getElementById('poolStats');
+const distributions = document.getElementById('distributions');
+const honorTable = document.getElementById('honorTable');
+const retireTable = document.getElementById('retireTable');
+const eventTable = document.getElementById('eventTable');
+const proxyTable = document.getElementById('proxyTable');
+
+function fmt(n) { return n == null ? '-' : n; }
+function esc(v) { return String(v == null ? '-' : v).replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]; }); }
+
+function renderPool(status) {
+  const high = Math.max(20, status.workersTotal * 8);
+  const mid = Math.max(8, status.workersTotal * 3);
+  const busyClass = status.queueSize > high ? 'bad' : status.queueSize > mid ? 'warn' : 'ok';
+  poolStats.innerHTML = ''
+    + '<div class="stat"><div class="k">总线程</div><div class="v">' + status.workersTotal + '</div></div>'
+    + '<div class="stat"><div class="k">忙碌线程</div><div class="v">' + status.workersBusy + '</div></div>'
+    + '<div class="stat"><div class="k">队列长度</div><div class="v ' + busyClass + '">' + status.queueSize + '</div></div>'
+    + '<div class="stat"><div class="k">重启次数</div><div class="v">' + status.restartedWorkers + '</div></div>'
+    + '<div class="stat"><div class="k">已完成任务</div><div class="v">' + status.completedTasks + '</div></div>'
+    + '<div class="stat"><div class="k">失败任务</div><div class="v">' + status.failedTasks + '</div></div>';
+
+  const rows = (status.workers || []).map(function(w){
+    const stateCls = w.state === 'busy' ? 'warn' : 'ok';
+    return '<tr>'
+      + '<td>' + w.workerId + '</td>'
+      + '<td class="' + stateCls + '">' + esc(w.state) + '</td>'
+      + '<td class="mono">' + fmt(w.currentTaskId) + '</td>'
+      + '<td>' + fmt(w.processed) + '</td>'
+      + '<td>' + fmt(w.failed) + '</td>'
+      + '<td class="mono">' + esc(w.lastError || '-') + '</td>'
+      + '<td class="mono">' + esc(w.lastSeenAt || '-') + '</td>'
+      + '</tr>';
+  }).join('');
+
+  workerTable.innerHTML = '<thead><tr><th>Worker</th><th>状态</th><th>当前任务</th><th>已处理</th><th>失败</th><th>最后错误</th><th>最后心跳</th></tr></thead><tbody>' + rows + '</tbody>';
+}
+
+function renderDistributions(snapshot) {
+  const src = (snapshot.sourceDistribution || []).map(function(x){ return '<span class="pill">' + esc(x.source) + ': ' + x.count + '</span>'; }).join('');
+  const life = (snapshot.lifecycleDistribution || []).map(function(x){ return '<span class="pill">' + esc(x.lifecycle) + ': ' + x.count + '</span>'; }).join('');
+  const rank = (snapshot.rankBoard || []).map(function(x){ return '<span class="pill">' + esc(x.rank) + ': ' + x.count + '</span>'; }).join('');
+  distributions.innerHTML = ''
+    + '<div><strong>来源分布</strong><div>' + (src || '-') + '</div></div>'
+    + '<div style="margin-top:8px"><strong>生命周期</strong><div>' + (life || '-') + '</div></div>'
+    + '<div style="margin-top:8px"><strong>军衔分布</strong><div>' + (rank || '-') + '</div></div>';
+}
+
+function renderSimpleTable(el, headers, rows) {
+  el.innerHTML = '<thead><tr>' + headers.map(function(h){return '<th>' + h + '</th>';}).join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody>';
+}
+
+async function loadAll() {
+  const data = await Promise.all([
+    fetch('/v1/proxies/pool-status').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/ranks/board').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/honors?limit=30').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/retirements?limit=30').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/events?limit=50').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/list?limit=50').then(function(r){ return r.json(); }),
+  ]);
+
+  const pool = data[0], ranks = data[1], honors = data[2], retires = data[3], events = data[4], proxies = data[5];
+  renderPool(pool.poolStatus);
+  renderDistributions({ sourceDistribution: pool.sourceDistribution, lifecycleDistribution: pool.lifecycleDistribution, rankBoard: ranks.items });
+
+  renderSimpleTable(honorTable, ['时间', '代理', '荣誉', '状态', '原因'], (honors.items || []).map(function(x){
+    return '<tr><td class="mono">' + esc(x.awarded_at) + '</td><td>' + esc(x.display_name) + '</td><td>' + esc(x.honor_type) + '</td><td class="' + (x.active ? 'ok' : 'warn') + '">' + (x.active ? '激活' : '历史') + '</td><td>' + esc(x.reason || '-') + '</td></tr>';
+  }));
+
+  renderSimpleTable(retireTable, ['时间', '代理', '类型', '原因'], (retires.items || []).map(function(x){
+    return '<tr><td class="mono">' + esc(x.retired_at) + '</td><td>' + esc(x.display_name) + '</td><td class="warn">' + esc(x.retired_type) + '</td><td>' + esc(x.reason || '-') + '</td></tr>';
+  }));
+
+  renderSimpleTable(eventTable, ['时间', '类型', '代理', '消息'], (events.items || []).map(function(x){
+    return '<tr><td class="mono">' + esc(x.timestamp) + '</td><td>' + esc(x.event_type) + '</td><td>' + esc(x.display_name || '-') + '</td><td>' + esc(x.message) + '</td></tr>';
+  }));
+
+  renderSimpleTable(proxyTable, ['昵称', '地址', '来源', '生命周期', '军衔', '战功', '健康', '纪律', '样本'], (proxies.items || []).map(function(x){
+    return '<tr><td>' + esc(x.display_name) + '</td><td class="mono">' + esc(x.ip + ':' + x.port + '/' + x.protocol) + '</td><td>' + esc(x.source) + '</td><td>' + esc(x.lifecycle) + '</td><td>' + esc(x.rank) + '</td><td>' + fmt(x.combat_points) + '</td><td>' + fmt(x.health_score) + '</td><td>' + fmt(x.discipline_score) + '</td><td>' + fmt(x.total_samples) + '</td></tr>';
+  }));
+}
+
+const poolStream = new EventSource('/api/runtime/thread-pools/stream');
+poolStream.onmessage = function(ev) {
+  const payload = JSON.parse(ev.data);
+  if (payload.poolStatus) renderPool(payload.poolStatus);
+};
+
+loadAll();
+setInterval(loadAll, __REFRESH_MS__);
+</script>
+</body>
+</html>
