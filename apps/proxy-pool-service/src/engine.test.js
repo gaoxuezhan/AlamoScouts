@@ -9,6 +9,8 @@ const {
     runWithConcurrency,
     outcomeLabel,
     mapEventTypeToChinese,
+    pickValidationFailureOutcome,
+    buildBattleCounterUpdates,
     ProxyHubEngine,
 } = require('./engine');
 
@@ -126,6 +128,24 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(mapEventTypeToChinese('retirement'), '退伍');
     assert.equal(mapEventTypeToChinese('honor'), '授予荣誉');
     assert.equal(mapEventTypeToChinese('x'), '评分事件');
+
+    assert.equal(pickValidationFailureOutcome({ reason: 'Timeout reached' }), 'timeout');
+    assert.equal(pickValidationFailureOutcome({ reason: 'blocked by target' }), 'blocked');
+    assert.equal(pickValidationFailureOutcome({ reason: 'ECONNRESET' }), 'network_error');
+    assert.equal(pickValidationFailureOutcome(), 'network_error');
+
+    assert.deepEqual(buildBattleCounterUpdates({ battle_success_count: 1, battle_fail_count: 2 }, '2026-03-14T00:00:00.000Z', 'success'), {
+        last_battle_checked_at: '2026-03-14T00:00:00.000Z',
+        last_battle_outcome: 'success',
+        battle_success_count: 2,
+        battle_fail_count: 2,
+    });
+    assert.deepEqual(buildBattleCounterUpdates({ battle_success_count: 1, battle_fail_count: 2 }, '2026-03-14T00:00:00.000Z', 'blocked'), {
+        last_battle_checked_at: '2026-03-14T00:00:00.000Z',
+        last_battle_outcome: 'blocked',
+        battle_success_count: 1,
+        battle_fail_count: 3,
+    });
 
     const order = [];
     await runWithConcurrency([1, 2, 3], 2, async (n) => {
@@ -303,6 +323,63 @@ test('runSourceCycle and processProxy should handle success path', async () => {
     assert.equal(logger.entries.some((e) => e.event === '校验通过'), true);
     assert.equal(logger.entries.some((e) => e.stage === '评分(L0回退)' && e.result === '成功'), true);
 
+    cleanupDb(h);
+});
+
+test('engine start should schedule battle timers when enabled', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.source.monosans.enabled = false;
+    h.config.battle.enabled = true;
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const oldSetInterval = global.setInterval;
+    const oldClearInterval = global.clearInterval;
+    const timers = [];
+    global.setInterval = (fn) => {
+        fn();
+        const timer = { id: timers.length + 1 };
+        timers.push(timer);
+        return timer;
+    };
+    global.clearInterval = () => {};
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T00:00:00.000Z') });
+    let l1Calls = 0;
+    let l2Calls = 0;
+    engine.runBattleL1Cycle = async () => {
+        l1Calls += 1;
+    };
+    engine.runBattleL2Cycle = async () => {
+        l2Calls += 1;
+    };
+
+    await engine.start();
+    await engine.stop();
+
+    global.setInterval = oldSetInterval;
+    global.clearInterval = oldClearInterval;
+
+    assert.equal(timers.length, 5);
+    assert.equal(l1Calls >= 2, true);
+    assert.equal(l2Calls >= 2, true);
     cleanupDb(h);
 });
 
@@ -593,6 +670,210 @@ test('processProxy should persist awards and retirement events', async () => {
     assert.equal(latest.source, 'src');
     assert.equal(logger.entries.some((e) => e.event === '退伍'), true);
     assert.equal(logger.entries.some((e) => e.event === '授予荣誉'), true);
+
+    cleanupDb(h);
+});
+
+test('processProxy success should fallback latency to zero when missing', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.55', port: 8081, protocol: 'http' }],
+        () => '苍隼-回退-55',
+        'src',
+        'batch',
+        new Date().toISOString(),
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'validate-proxy') {
+                return { ok: true, reason: 'connect_ok' };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T07:30:00.000Z') });
+    await engine.processProxy(proxy, 'src');
+
+    const latest = h.db.getProxyById(proxy.id);
+    assert.equal(latest.success_count >= 1, true);
+    assert.equal(logger.entries.some((e) => e.stage === '评分(L0回退)'), true);
+    cleanupDb(h);
+});
+
+test('applyCombatOutcome should return early when proxy does not exist', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-missing.db'));
+    const db = {
+        getProxyById() {
+            return null;
+        },
+    };
+    const workerPool = {
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger, now: () => new Date('2026-03-14T06:00:00.000Z') });
+    await engine.applyCombatOutcome({
+        proxyId: 999,
+        sourceName: 'src',
+        outcome: 'success',
+        latencyMs: 1,
+        nowIso: '2026-03-14T06:00:00.000Z',
+        stage: '评分',
+    });
+    assert.equal(logger.entries.length, 0);
+});
+
+test('runBattleL1Cycle should cover guard and error branches', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.battle.enabled = true;
+    const now = new Date('2026-03-14T07:00:00.000Z').toISOString();
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.31', port: 8080, protocol: 'http' }],
+        () => '战场-L1-31',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+    h.db.updateProxyById(proxy.id, { lifecycle: 'active', updated_at: now });
+
+    let mode = 'throw-message';
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'battle-l1') {
+                if (mode === 'throw-message') {
+                    throw new Error('battle-l1-boom');
+                }
+                if (mode === 'throw-null') {
+                    throw null;
+                }
+                return {
+                    stage: 'l1',
+                    outcome: 'network_error',
+                    // runs omitted intentionally to cover fallback branch
+                };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T07:10:00.000Z') });
+    engine.started = true;
+    engine.isBattleL1Running = true;
+    await engine.runBattleL1Cycle();
+    engine.isBattleL1Running = false;
+
+    await engine.runBattleL1Cycle();
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L1' && e.reason === 'battle-l1-boom'), true);
+
+    mode = 'throw-null';
+    await engine.runBattleL1Cycle();
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L1' && e.reason === 'battle-l1-error'), true);
+
+    const oldGetById = h.db.getProxyById.bind(h.db);
+    h.db.getProxyById = () => null;
+    mode = 'no-runs';
+    await engine.runBattleL1Cycle();
+    h.db.getProxyById = oldGetById;
+
+    cleanupDb(h);
+});
+
+test('runBattleL2Cycle should process candidates and cover guard/error branches', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.battle.enabled = true;
+    const now = new Date().toISOString();
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.41', port: 8080, protocol: 'http' }],
+        () => '战场-L2-41',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+    h.db.updateProxyById(proxy.id, { lifecycle: 'active', updated_at: now });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: proxy.id,
+        stage: 'l1',
+        target: 'ipify',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 20,
+        reason: 'ok',
+        details: {},
+    });
+
+    let mode = 'success';
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'battle-l2') {
+                if (mode === 'throw-message') {
+                    throw new Error('battle-l2-boom');
+                }
+                if (mode === 'throw-null') {
+                    throw null;
+                }
+                if (mode === 'no-runs') {
+                    return {
+                        stage: 'l2',
+                        outcome: 'network_error',
+                    };
+                }
+                return {
+                    stage: 'l2',
+                    outcome: 'success',
+                    latencyMs: 18,
+                    runs: [{ target: 'ly', outcome: 'success', statusCode: 200, latencyMs: 18, reason: 'ok', details: {} }],
+                };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date() });
+
+    engine.started = false;
+    await engine.runBattleL2Cycle();
+
+    engine.started = true;
+    engine.isBattleL2Running = true;
+    await engine.runBattleL2Cycle();
+    engine.isBattleL2Running = false;
+
+    await engine.runBattleL2Cycle();
+    const runs = h.db.getBattleTestRuns(10);
+    assert.equal(runs.some((r) => r.stage === 'l2'), true);
+
+    mode = 'throw-message';
+    await engine.runBattleL2Cycle();
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L2' && e.reason === 'battle-l2-boom'), true);
+
+    mode = 'throw-null';
+    await engine.runBattleL2Cycle();
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L2' && e.reason === 'battle-l2-error'), true);
+
+    const oldGetById = h.db.getProxyById.bind(h.db);
+    h.db.getProxyById = () => null;
+    mode = 'no-runs';
+    await engine.runBattleL2Cycle();
+    h.db.getProxyById = oldGetById;
 
     cleanupDb(h);
 });

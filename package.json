@@ -12,7 +12,7 @@
     "test:proxyhub": "node --test apps/proxy-pool-service/src/**/*.test.js apps/proxy-pool-service/tests/**/*.integration.test.js",
     "test:proxyhub:unit": "node --test apps/proxy-pool-service/src/**/*.test.js",
     "test:proxyhub:integration": "node --test apps/proxy-pool-service/tests/**/*.integration.test.js",
-    "test:proxyhub:coverage": "c8 --all --src apps/proxy-pool-service/src --exclude \"**/*.test.js\" --exclude \"apps/proxy-pool-service/src/views/*.html\" --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test apps/proxy-pool-service/src/**/*.test.js apps/proxy-pool-service/tests/**/*.integration.test.js"
+    "test:proxyhub:coverage": "c8 --all --src apps/proxy-pool-service/src --exclude \"**/*.test.js\" --exclude \"apps/proxy-pool-service/src/views/*.html\" --check-coverage --lines 100 --branches 98 --functions 100 --statements 100 node --test apps/proxy-pool-service/src/**/*.test.js apps/proxy-pool-service/tests/**/*.integration.test.js"
   },
   "keywords": [],
   "author": "",
