@@ -6,6 +6,7 @@ const { WorkerPool } = require('./worker-pool');
 class FakeWorker extends EventEmitter {
     static instances = [];
 
+    // 0144_constructor_初始化实例逻辑
     constructor(file) {
         super();
         this.file = file;
@@ -14,10 +15,12 @@ class FakeWorker extends EventEmitter {
         FakeWorker.instances.push(this);
     }
 
+    // 0145_postMessage_执行postMessage相关逻辑
     postMessage(message) {
         this.lastMessage = message;
     }
 
+    // 0146_terminate_执行terminate相关逻辑
     terminate() {
         this.terminated = true;
         if (!this.exited) {
@@ -28,6 +31,7 @@ class FakeWorker extends EventEmitter {
     }
 }
 
+// 0147_makePool_线程池逻辑
 function makePool(size = 1, taskTimeoutMs = 60) {
     FakeWorker.instances = [];
     return new WorkerPool({
@@ -41,6 +45,7 @@ function makePool(size = 1, taskTimeoutMs = 60) {
 
 test('worker-pool constructor should cover defaults and no-op handlers', async () => {
     class BareWorker extends EventEmitter {
+        // 0148_constructor_初始化实例逻辑
         constructor(file) {
             super();
             this.file = file;

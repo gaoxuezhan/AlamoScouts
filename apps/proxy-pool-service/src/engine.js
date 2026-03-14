@@ -3,6 +3,7 @@ const { evaluateCombat, evaluateStateTransition } = require('./rank');
 const { EVENT_LEVEL } = require('./constants');
 const { generateRecruitName } = require('./naming');
 
+// 0023_parseArrayJson_解析数组JSON逻辑
 function parseArrayJson(value) {
     try {
         if (!value) return [];
@@ -13,6 +14,7 @@ function parseArrayJson(value) {
     }
 }
 
+// 0024_runWithConcurrency_执行并发逻辑
 async function runWithConcurrency(items, limit, handler) {
     const running = new Set();
     const errors = [];
@@ -40,6 +42,7 @@ async function runWithConcurrency(items, limit, handler) {
     }
 }
 
+// 0025_outcomeLabel_结果标签逻辑
 function outcomeLabel(outcome) {
     if (outcome === 'success') return '成功';
     if (outcome === 'blocked') return 'blocked';
@@ -48,6 +51,7 @@ function outcomeLabel(outcome) {
     return '未知';
 }
 
+// 0026_mapEventTypeToChinese_映射事件类型到中文逻辑
 function mapEventTypeToChinese(eventType) {
     if (eventType === 'promotion') return '晋升';
     if (eventType === 'demotion') return '降级';
@@ -57,6 +61,7 @@ function mapEventTypeToChinese(eventType) {
 }
 
 class ProxyHubEngine extends EventEmitter {
+    // 0027_constructor_初始化实例逻辑
     constructor({ config, db, workerPool, logger, now }) {
         super();
         this.config = config;
@@ -75,6 +80,7 @@ class ProxyHubEngine extends EventEmitter {
         this.threadPoolAlerting = false;
     }
 
+    // 0028_start_启动逻辑
     async start() {
         if (this.started) {
             return;
@@ -107,6 +113,7 @@ class ProxyHubEngine extends EventEmitter {
         });
     }
 
+    // 0029_stop_停止逻辑
     async stop() {
         this.started = false;
         if (this.sourceSyncTimer) {
@@ -123,10 +130,12 @@ class ProxyHubEngine extends EventEmitter {
         }
     }
 
+    // 0030_createRecruitName_创建新兵名称逻辑
     createRecruitName() {
         return generateRecruitName((name) => this.db.isDisplayNameAvailable(name));
     }
 
+    // 0031_runSourceCycle_执行来源轮次逻辑
     async runSourceCycle() {
         if (!this.started || this.isSourceCycleRunning) {
             return;
@@ -198,6 +207,7 @@ class ProxyHubEngine extends EventEmitter {
         }
     }
 
+    // 0032_runValidationCycle_执行校验轮次逻辑
     async runValidationCycle(sourceName) {
         const candidates = this.db.listProxiesForValidation(this.config.scheduler.maxValidationPerCycle);
         if (candidates.length === 0) {
@@ -210,6 +220,7 @@ class ProxyHubEngine extends EventEmitter {
         });
     }
 
+    // 0033_processProxy_处理代理逻辑
     async processProxy(proxy, sourceName) {
         const cycleStart = Date.now();
 
@@ -340,6 +351,7 @@ class ProxyHubEngine extends EventEmitter {
         }
     }
 
+    // 0034_runStateReviewCycle_执行状态巡检轮次逻辑
     async runStateReviewCycle() {
         if (!this.started || this.isStateReviewRunning) {
             return;
@@ -402,6 +414,7 @@ class ProxyHubEngine extends EventEmitter {
         }
     }
 
+    // 0035_persistSnapshot_持久化快照逻辑
     persistSnapshot() {
         const poolStatus = this.workerPool.getStatus();
         const sourceDistribution = this.db.getSourceDistribution();

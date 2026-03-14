@@ -2,6 +2,7 @@
 const crypto = require('node:crypto');
 const net = require('node:net');
 
+// 0149_createAbortSignal_创建中止信号逻辑
 function createAbortSignal(timeoutMs) {
     if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
         return AbortSignal.timeout(timeoutMs);
@@ -9,6 +10,7 @@ function createAbortSignal(timeoutMs) {
     return undefined;
 }
 
+// 0150_normalizeProxyPayload_规范化代理载荷逻辑
 function normalizeProxyPayload(payload, allowedProtocols) {
     const items = Array.isArray(payload) ? payload : [];
     const out = [];
@@ -48,6 +50,7 @@ function normalizeProxyPayload(payload, allowedProtocols) {
     return out;
 }
 
+// 0151_fetchSourceTask_抓取来源任务逻辑
 async function fetchSourceTask(payload, deps = {}) {
     const start = Date.now();
     const timeoutMs = payload.timeoutMs || 15_000;
@@ -76,6 +79,7 @@ async function fetchSourceTask(payload, deps = {}) {
     };
 }
 
+// 0152_checkTcpConnectivity_检查TCP连通性逻辑
 function checkTcpConnectivity(host, port, timeoutMs, deps = {}) {
     const createConnection = deps.createConnection || net.createConnection;
 
@@ -84,6 +88,7 @@ function checkTcpConnectivity(host, port, timeoutMs, deps = {}) {
         const socket = createConnection({ host, port });
         let finished = false;
 
+        // 0153_complete_执行complete相关逻辑
         const complete = (ok, reason) => {
             if (finished) {
                 return;
@@ -106,17 +111,20 @@ function checkTcpConnectivity(host, port, timeoutMs, deps = {}) {
     });
 }
 
+// 0154_validateProxyTask_校验代理任务逻辑
 async function validateProxyTask(payload, deps = {}) {
     const timeoutMs = payload.timeoutMs || 2_500;
     return checkTcpConnectivity(payload.ip, payload.port, timeoutMs, deps);
 }
 
+// 0155_seededRandom_种子随机逻辑
 function seededRandom(seed) {
     const hex = crypto.createHash('sha1').update(seed).digest('hex').slice(0, 8);
     const num = Number.parseInt(hex, 16);
     return num / 0xffffffff;
 }
 
+// 0156_scoreProxyTask_评分代理任务逻辑
 function scoreProxyTask(payload) {
     const validation = payload.validation || { ok: false, reason: 'missing_validation', latencyMs: 0 };
 
@@ -147,12 +155,14 @@ function scoreProxyTask(payload) {
     return { outcome: 'network_error', latencyMs };
 }
 
+// 0157_stateTransitionTask_状态迁移任务逻辑
 function stateTransitionTask() {
     return {
         ok: true,
     };
 }
 
+// 0158_handleTask_处理任务逻辑
 async function handleTask(type, payload, deps = {}) {
     if (type === 'fetch-source') {
         return fetchSourceTask(payload, deps);
@@ -170,6 +180,7 @@ async function handleTask(type, payload, deps = {}) {
     throw new Error(`unknown-task-type:${type}`);
 }
 
+// 0159_attachWorkerListener_绑定工作线程监听器逻辑
 function attachWorkerListener(portLike, deps = {}) {
     portLike.on('message', async (message) => {
         const { taskId, type, payload } = message;

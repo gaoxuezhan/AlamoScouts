@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const { safeParseJson, evaluateCombat, evaluateStateTransition } = require('./rank');
 
+// 0089_baseConfig_配置逻辑
 function baseConfig() {
     return {
         policy: {
@@ -51,6 +52,7 @@ function baseConfig() {
     };
 }
 
+// 0090_baseProxy_代理逻辑
 function baseProxy() {
     return {
         id: 1,

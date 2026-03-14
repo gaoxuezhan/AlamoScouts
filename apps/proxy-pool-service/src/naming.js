@@ -10,22 +10,27 @@ const CODENAMES = [
     '青龙', '白虎', '朱雀', '苍狼', '星河', '曜石', '寒星', '惊雷', '飞廉', '凌霜',
 ];
 
+// 0075_randomPick_随机逻辑
 function randomPick(list) {
     return list[crypto.randomInt(0, list.length)];
 }
 
+// 0076_randomSerial_随机逻辑
 function randomSerial() {
     return String(crypto.randomInt(1, 100)).padStart(2, '0');
 }
 
+// 0077_shortCode_执行shortCode相关逻辑
 function shortCode(seed) {
     return crypto.createHash('sha1').update(seed).digest('hex').slice(0, 2).toUpperCase();
 }
 
+// 0078_buildName_名称逻辑
 function buildName() {
     return `${randomPick(PREFIXES)}-${randomPick(CODENAMES)}-${randomSerial()}`;
 }
 
+// 0079_generateRecruitName_新兵名称逻辑
 function generateRecruitName(isUniqueName) {
     for (let i = 0; i < 10; i += 1) {
         const candidate = buildName();

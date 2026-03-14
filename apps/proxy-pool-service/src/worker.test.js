@@ -53,6 +53,7 @@ test('fetchSourceTask should parse proxies and throw on non-ok response', async 
         fetchImpl: async () => ({
             ok: true,
             status: 200,
+            // 0160_json_JSON逻辑
             async json() {
                 return [{ ip: '8.8.8.8', port: 8080, protocols: ['http', 'ftp'] }];
             },
@@ -69,6 +70,7 @@ test('fetchSourceTask should parse proxies and throw on non-ok response', async 
     );
 });
 
+// 0161_createFakeSocket_创建逻辑
 function createFakeSocket() {
     const socket = new EventEmitter();
     socket.destroyed = false;
@@ -167,6 +169,7 @@ test('scoreProxyTask should cover key outcome branches', () => {
     const noValidationDefault2 = scoreProxyTask({ validation: { ok: false, reason: 'err' } });
     assert.equal(noValidationDefault2.latencyMs, 2500);
 
+    // 0162_findSeed_执行findSeed相关逻辑
     const findSeed = (predicate) => {
         const bucket = '2026-03-14T12:34';
         for (let i = 0; i < 200000; i += 1) {
@@ -288,6 +291,7 @@ test('fetchSourceTask should use global fetch fallback and object payload count 
     global.fetch = async () => ({
         ok: true,
         status: 200,
+        // 0163_json_JSON逻辑
         async json() {
             return { ip: 'x' };
         },

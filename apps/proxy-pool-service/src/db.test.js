@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { ProxyHubDb } = require('./db');
 
+// 0021_createDb_创建逻辑
 function createDb({ snapshotRetentionDays = 7 } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxyhub-db-'));
     const dbPath = path.join(dir, 'proxyhub-test.db');
@@ -19,6 +20,7 @@ function createDb({ snapshotRetentionDays = 7 } = {}) {
     return { db, dir, dbPath };
 }
 
+// 0022_cleanup_执行cleanup相关逻辑
 function cleanup(handle) {
     handle.db.close();
     fs.rmSync(handle.dir, { recursive: true, force: true });

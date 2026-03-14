@@ -45,11 +45,13 @@ const history = [];
 const sseClients = new Set();
 
 // 生成同程查询 URL
+// 0167_buildLyUrl_执行buildLyUrl相关逻辑
 function buildLyUrl(date) {
     return `https://www.ly.com/flights/itinerary/oneway/${DEPARTURE}-${ARRIVAL}?date=${date}`;
 }
 
 // 从最终 URL 读取 date 参数，用于判断是否被站点重定向了日期。
+// 0168_pickDateFromUrl_从逻辑
 function pickDateFromUrl(url) {
     try {
         const parsed = new URL(url);
@@ -60,12 +62,14 @@ function pickDateFromUrl(url) {
 }
 
 // 安全转义正则特殊字符，避免航班号包含特殊字符时误匹配。
+// 0169_escapeRegex_执行escapeRegex相关逻辑
 function escapeRegex(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // 简单反封禁判定：根据标题 + 可见正文关键字识别“人机验证/访问受限”。
 // 注意：这是启发式策略，不是 100% 准确。
+// 0170_detectBlockedPage_页面逻辑
 function detectBlockedPage(text, title) {
     const haystack = `${title || ''}\n${text || ''}`.toLowerCase();
     const blockSignals = config.antiBlocking.blockSignals ?? [];
@@ -74,6 +78,7 @@ function detectBlockedPage(text, title) {
 }
 
 // 把“¥1,470起”这类文本归一化成数值 1470。
+// 0171_parsePrice_解析逻辑
 function parsePrice(rawPrice) {
     if (!rawPrice) return null;
     const normalized = String(rawPrice).replace(/[^0-9]/g, '');
@@ -85,6 +90,7 @@ function parsePrice(rawPrice) {
 
 // 优先策略：从可见文本中提取航班附近价格。
 // 原因：同程页面可能是动态渲染/懒加载，page.content() 未必完整。
+// 0172_extractPriceFromVisibleText_从逻辑
 function extractPriceFromVisibleText(pageText, flightNo) {
     const flightNoUpper = flightNo.toUpperCase();
     const lines = pageText
@@ -129,6 +135,7 @@ function extractPriceFromVisibleText(pageText, flightNo) {
 }
 
 // 滚动采集页面可见文本，尽量覆盖底部懒加载航班（例如目标航班在最后一行）。
+// 0173_collectPageTextWithScroll_页面逻辑
 async function collectPageTextWithScroll(page, flightNo) {
     const target = flightNo.toUpperCase();
     let longestText = '';
@@ -181,6 +188,7 @@ async function collectPageTextWithScroll(page, flightNo) {
 
 // 兜底策略：从 HTML（含脚本）中做 regex 提取。
 // 当可见文本提取失败时，尝试从序列化数据结构中拿价格字段。
+// 0174_extractPriceByFlightNo_执行extractPriceByFlightNo相关逻辑
 function extractPriceByFlightNo(html, flightNo) {
     const escapedFlightNo = escapeRegex(flightNo);
     const directFlightRegex = new RegExp(`flightNo["']?\\s*[:=]\\s*["']${escapedFlightNo}["']`, 'i');
@@ -241,6 +249,7 @@ function extractPriceByFlightNo(html, flightNo) {
 }
 
 // 向所有 SSE 客户端广播最新结果。
+// 0175_emitToSseClients_发出到SSE逻辑
 function emitToSseClients(payload) {
     const text = `data: ${JSON.stringify(payload)}\n\n`;
     for (const client of sseClients) {
@@ -249,6 +258,7 @@ function emitToSseClients(payload) {
 }
 
 // 统一处理结果：更新内存、落盘、日志、SSE 推送。
+// 0176_persistAndBroadcast_持久化逻辑
 async function persistAndBroadcast(result) {
     latestResult = result;
     history.push(result);
@@ -271,6 +281,7 @@ async function persistAndBroadcast(result) {
 
 // 单次抓取任务（核心流程）
 // 流程：取代理 -> 启 Camoufox -> 导航 -> 反封禁判定 -> 提取价格 -> 写入结果。
+// 0177_runSingleCheck_执行检查逻辑
 async function runSingleCheck(context) {
     const startedAt = new Date();
     const url = buildLyUrl(FLIGHT_DATE);
@@ -407,6 +418,7 @@ async function runSingleCheck(context) {
 }
 
 // 入队一个抓取任务。这里每次 uniqueKey 都不同，保证定时任务不会被去重。
+// 0178_enqueueCheck_检查逻辑
 async function enqueueCheck(triggerReason) {
     if (!requestQueue) {
         throw new Error('request queue not ready');
@@ -429,6 +441,7 @@ async function enqueueCheck(triggerReason) {
 // 2) 初始化代理池与队列
 // 3) 启动 Crawlee keepAlive 循环
 // 4) 立即抓一次 + 按间隔持续入队
+// 0179_startMonitor_启动逻辑
 async function startMonitor() {
     if (monitorStarted) {
         return;
@@ -468,6 +481,7 @@ async function startMonitor() {
             useSessionPool: config.crawler.useSessionPool,
             sessionPoolOptions: config.crawler.sessionPoolOptions,
             requestHandlerTimeoutSecs: config.crawler.requestHandlerTimeoutSecs,
+            // 0180_requestHandler_执行requestHandler相关逻辑
             async requestHandler(context) {
                 inFlight += 1;
                 try {
@@ -476,6 +490,7 @@ async function startMonitor() {
                     inFlight = Math.max(0, inFlight - 1);
                 }
             },
+            // 0181_failedRequestHandler_执行failedRequestHandler相关逻辑
             async failedRequestHandler({ request, session }, error) {
                 // 最终失败也写入结果，避免“静默失败”。
                 const fallbackResult = {
@@ -542,6 +557,7 @@ async function startMonitor() {
 }
 
 // 优雅停止：先停定时器，再停 crawler。
+// 0182_stopMonitor_停止逻辑
 async function stopMonitor() {
     if (enqueueTimer) {
         clearInterval(enqueueTimer);
@@ -625,6 +641,7 @@ app.get('/stream', (req, res) => {
 });
 
 // 程序入口：启动监控 + 启动 Web 服务 + 注册优雅退出信号。
+// 0183_main_执行main相关逻辑
 async function main() {
     log.setLevel(log.LEVELS.INFO);
 
@@ -636,6 +653,7 @@ async function main() {
         log.info(`Live stream: GET http://127.0.0.1:${PORT}/stream`);
     });
 
+    // 0184_shutdown_执行shutdown相关逻辑
     const shutdown = async (signal) => {
         log.warning(`Received ${signal}, shutting down...`);
         await stopMonitor();

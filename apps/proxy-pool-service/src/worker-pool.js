@@ -3,6 +3,7 @@ const workerThreads = require('node:worker_threads');
 const { EventEmitter } = require('node:events');
 
 class WorkerPool extends EventEmitter {
+    // 0133_constructor_初始化实例逻辑
     constructor({ size, taskTimeoutMs, workerFile, WorkerClass, now }) {
         super();
         this.size = size;
@@ -25,6 +26,7 @@ class WorkerPool extends EventEmitter {
         }
     }
 
+    // 0134_spawnWorker_工作线程逻辑
     spawnWorker(workerId) {
         const worker = new this.WorkerClass(this.workerFile);
         const meta = {
@@ -50,6 +52,7 @@ class WorkerPool extends EventEmitter {
         this.drain();
     }
 
+    // 0135_handleWorkerMessage_处理工作线程逻辑
     handleWorkerMessage(workerId, message) {
         const meta = this.workers.get(workerId);
         if (!meta) return;
@@ -80,6 +83,7 @@ class WorkerPool extends EventEmitter {
         this.drain();
     }
 
+    // 0136_handleWorkerError_处理工作线程逻辑
     handleWorkerError(workerId, err) {
         const meta = this.workers.get(workerId);
         if (!meta) return;
@@ -89,6 +93,7 @@ class WorkerPool extends EventEmitter {
         this.emitStatus();
     }
 
+    // 0137_handleWorkerExit_处理工作线程退出逻辑
     handleWorkerExit(workerId, code) {
         const meta = this.workers.get(workerId);
         if (!meta) return;
@@ -114,6 +119,7 @@ class WorkerPool extends EventEmitter {
         }
     }
 
+    // 0138_runTask_执行任务逻辑
     runTask(type, payload) {
         if (this.disposed) {
             return Promise.reject(new Error('worker-pool-disposed'));
@@ -129,6 +135,7 @@ class WorkerPool extends EventEmitter {
         });
     }
 
+    // 0139_drain_执行drain相关逻辑
     drain() {
         if (this.disposed) return;
 
@@ -169,6 +176,7 @@ class WorkerPool extends EventEmitter {
         this.emitStatus();
     }
 
+    // 0140_getStatus_获取逻辑
     getStatus() {
         const workers = Array.from(this.workers.values()).map((meta) => ({
             workerId: meta.workerId,
@@ -195,15 +203,18 @@ class WorkerPool extends EventEmitter {
         };
     }
 
+    // 0141_emitStatus_发出逻辑
     emitStatus() {
         this.emit('status', this.getStatus());
     }
 
+    // 0142_subscribe_订阅逻辑
     subscribe(handler) {
         this.on('status', handler);
         return () => this.off('status', handler);
     }
 
+    // 0143_close_关闭逻辑
     async close() {
         this.disposed = true;
 

@@ -1,9 +1,11 @@
 ﻿const { RANKS, RETIREMENT_TYPES, HONOR_TYPES } = require('./constants');
 
+// 0081_clamp_限制逻辑
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
+// 0082_safeParseJson_解析JSON逻辑
 function safeParseJson(raw, fallback) {
     try {
         if (!raw) return fallback;
@@ -14,11 +16,13 @@ function safeParseJson(raw, fallback) {
     }
 }
 
+// 0083_rankIndex_军衔逻辑
 function rankIndex(rank) {
     const idx = RANKS.indexOf(rank);
     return idx >= 0 ? idx : 0;
 }
 
+// 0084_computeRatios_执行computeRatios相关逻辑
 function computeRatios(windowRecords, nowMs, regularWindowSize, severeWindowMs) {
     const recent = windowRecords.slice(-regularWindowSize);
     const regularSamples = recent.length;
@@ -42,6 +46,7 @@ function computeRatios(windowRecords, nowMs, regularWindowSize, severeWindowMs) 
     };
 }
 
+// 0085_scoreDelta_评分逻辑
 function scoreDelta(outcome, latencyMs, scoring) {
     let delta = 0;
     if (outcome === 'success') {
@@ -63,6 +68,7 @@ function scoreDelta(outcome, latencyMs, scoring) {
     return delta;
 }
 
+// 0086_evaluateCombat_执行evaluateCombat相关逻辑
 function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     const nowMs = Date.parse(nowIso);
     const policy = config.policy;
@@ -229,6 +235,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
         });
     }
 
+    // 0087_hasHonor_荣誉逻辑
     const hasHonor = (name) => honorHistory.includes(name);
 
     if (nextConsecutiveSuccess >= policy.honors.steelStreak && !hasHonor(HONOR_TYPES.STEEL_STREAK)) {
@@ -297,6 +304,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     };
 }
 
+// 0088_evaluateStateTransition_状态迁移逻辑
 function evaluateStateTransition({ proxy, nowIso, config }) {
     const nowMs = Date.parse(nowIso);
     const demotion = config.policy.demotion;
