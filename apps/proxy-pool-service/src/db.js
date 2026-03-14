@@ -2,11 +2,13 @@
 const path = require('node:path');
 const Database = require('better-sqlite3');
 
+// 0000_ensureDirForFile_确保目录文件逻辑
 function ensureDirForFile(filePath) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
 class ProxyHubDb {
+    // 0001_constructor_初始化实例逻辑
     constructor(config) {
         this.config = config;
         this.dbPath = path.resolve(process.cwd(), config.storage.dbPath);
@@ -17,6 +19,7 @@ class ProxyHubDb {
         this.init();
     }
 
+    // 0002_init_初始化逻辑
     init() {
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS proxies (
@@ -172,23 +175,28 @@ class ProxyHubDb {
         `);
     }
 
+    // 0003_close_关闭逻辑
     close() {
         this.db.close();
     }
 
+    // 0004_isDisplayNameAvailable_判断名称可用逻辑
     isDisplayNameAvailable(displayName) {
         const row = this.db.prepare('SELECT id FROM proxies WHERE display_name = ?').get(displayName);
         return !row;
     }
 
+    // 0005_getProxyByKey_获取代理逻辑
     getProxyByKey(uniqueKey) {
         return this.db.prepare('SELECT * FROM proxies WHERE unique_key = ?').get(uniqueKey);
     }
 
+    // 0006_getProxyById_获取代理标识逻辑
     getProxyById(id) {
         return this.db.prepare('SELECT * FROM proxies WHERE id = ?').get(id);
     }
 
+    // 0007_upsertSourceBatch_插入更新来源批次逻辑
     upsertSourceBatch(normalizedProxies, createName, source, batchId, nowIso) {
         const tx = this.db.transaction((items) => {
             let inserted = 0;
@@ -225,6 +233,7 @@ class ProxyHubDb {
         return tx(normalizedProxies);
     }
 
+    // 0008_listProxiesForValidation_列出校验逻辑
     listProxiesForValidation(limit) {
         return this.db.prepare(`
             SELECT * FROM proxies
@@ -234,6 +243,7 @@ class ProxyHubDb {
         `).all(limit);
     }
 
+    // 0009_listProxiesForStateReview_列出状态巡检逻辑
     listProxiesForStateReview(limit) {
         return this.db.prepare(`
             SELECT * FROM proxies
@@ -243,6 +253,7 @@ class ProxyHubDb {
         `).all(limit);
     }
 
+    // 0010_updateProxyById_更新代理标识逻辑
     updateProxyById(id, updates) {
         const keys = Object.keys(updates);
         if (keys.length === 0) return;
@@ -252,6 +263,7 @@ class ProxyHubDb {
         stmt.run({ id, updated_at: updates.updated_at || new Date().toISOString(), ...updates });
     }
 
+    // 0011_insertProxyEvent_写入代理事件逻辑
     insertProxyEvent(record) {
         this.insertEventStmt.run({
             timestamp: record.timestamp,
@@ -264,6 +276,7 @@ class ProxyHubDb {
         });
     }
 
+    // 0012_insertRuntimeLog_写入运行时日志逻辑
     insertRuntimeLog(record) {
         this.insertRuntimeLogStmt.run({
             timestamp: record.timestamp,
@@ -279,6 +292,7 @@ class ProxyHubDb {
         });
     }
 
+    // 0013_upsertHonor_插入更新荣誉逻辑
     upsertHonor(record) {
         this.db.prepare(`
             INSERT INTO honors (proxy_id, display_name, honor_type, reason, awarded_at, active)
@@ -296,6 +310,7 @@ class ProxyHubDb {
         });
     }
 
+    // 0014_refreshHonorActive_刷新荣誉激活逻辑
     refreshHonorActive(proxyId, activeTypes) {
         const tx = this.db.transaction(() => {
             this.db.prepare('UPDATE honors SET active = 0 WHERE proxy_id = ?').run(proxyId);
@@ -309,6 +324,7 @@ class ProxyHubDb {
         tx();
     }
 
+    // 0015_insertRetirement_写入退伍逻辑
     insertRetirement(record) {
         this.db.prepare(`
             INSERT INTO retirements (proxy_id, display_name, retired_type, reason, retired_at)
@@ -322,6 +338,7 @@ class ProxyHubDb {
         });
     }
 
+    // 0016_insertPoolSnapshot_写入线程池快照逻辑
     insertPoolSnapshot(snapshot) {
         this.db.prepare(`
             INSERT INTO pool_snapshots (
@@ -358,6 +375,7 @@ class ProxyHubDb {
         this.db.prepare('DELETE FROM pool_snapshots WHERE timestamp < ?').run(cutoffIso);
     }
 
+    // 0185_getRuntimeLogs_获取运行时日志逻辑
     getRuntimeLogs(limit = 200) {
         return this.db.prepare(`
             SELECT id, timestamp, event, proxy_name, ip_source, stage, result, duration_ms, reason, action
@@ -367,6 +385,7 @@ class ProxyHubDb {
         `).all(limit);
     }
 
+    // 0186_getEvents_获取事件逻辑
     getEvents(limit = 200) {
         return this.db.prepare(`
             SELECT id, timestamp, display_name, event_type, level, message, details_json
@@ -376,6 +395,7 @@ class ProxyHubDb {
         `).all(limit);
     }
 
+    // 0187_getProxyList_获取代理列表逻辑
     getProxyList({ limit = 200, rank, lifecycle } = {}) {
         const clauses = [];
         const params = {};
@@ -402,6 +422,7 @@ class ProxyHubDb {
         `).all({ ...params, limit });
     }
 
+    // 0017_getRankBoard_获取军衔看板逻辑
     getRankBoard() {
         return this.db.prepare(`
             SELECT rank, COUNT(*) AS count,
@@ -419,6 +440,7 @@ class ProxyHubDb {
         `).all();
     }
 
+    // 0188_getHonors_获取荣誉逻辑
     getHonors(limit = 100) {
         return this.db.prepare(`
             SELECT id, display_name, honor_type, reason, awarded_at, active
@@ -428,6 +450,7 @@ class ProxyHubDb {
         `).all(limit);
     }
 
+    // 0189_getRetirements_获取退伍记录逻辑
     getRetirements(limit = 100) {
         return this.db.prepare(`
             SELECT id, display_name, retired_type, reason, retired_at
@@ -437,6 +460,7 @@ class ProxyHubDb {
         `).all(limit);
     }
 
+    // 0018_getSourceDistribution_获取来源分布逻辑
     getSourceDistribution() {
         return this.db.prepare(`
             SELECT source, COUNT(*) AS count
@@ -446,6 +470,7 @@ class ProxyHubDb {
         `).all();
     }
 
+    // 0019_getLifecycleDistribution_获取分布逻辑
     getLifecycleDistribution() {
         return this.db.prepare(`
             SELECT lifecycle, COUNT(*) AS count
@@ -454,6 +479,7 @@ class ProxyHubDb {
         `).all();
     }
 
+    // 0020_getLatestSnapshot_获取最新快照逻辑
     getLatestSnapshot() {
         const row = this.db.prepare('SELECT * FROM pool_snapshots ORDER BY id DESC LIMIT 1').get();
         if (!row) return null;

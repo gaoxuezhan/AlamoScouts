@@ -8,16 +8,19 @@ const { ProxyHubEngine } = require('./engine');
 const { renderProxyAdminPage } = require('./views/proxy-admin');
 const { renderRuntimeLogsPage } = require('./views/runtime-logs');
 
+// 0091_sendSse_发送SSE逻辑
 function sendSse(res, payload) {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+// 0092_normalizeLimit_规范化限制逻辑
 function normalizeLimit(value, fallback, min, max) {
     const parsed = Number.parseInt(String(value ?? fallback), 10);
     const normalized = Number.isFinite(parsed) ? parsed : fallback;
     return Math.max(min, Math.min(max, normalized));
 }
 
+// 0093_createRuntime_创建运行时逻辑
 function createRuntime(options = {}) {
     const config = options.config || defaultConfig;
     const app = options.app || express();
@@ -178,8 +181,10 @@ function createRuntime(options = {}) {
 
     let server;
 
+    // 0094_start_启动逻辑
     async function start() {
         return new Promise((resolve, reject) => {
+            // 0095_onError_执行onError相关逻辑
             const onError = (err) => {
                 reject(err);
             };
@@ -214,6 +219,7 @@ function createRuntime(options = {}) {
         });
     }
 
+    // 0096_shutdown_执行shutdown相关逻辑
     async function shutdown(signal = 'SIGTERM') {
         logger.write({
             event: '线程池告警',
@@ -248,10 +254,12 @@ function createRuntime(options = {}) {
     };
 }
 
+// 0097_runCli_执行命令行逻辑
 async function runCli(options = {}) {
     const runtime = options.runtime || createRuntime(options.runtimeOptions);
     const processRef = options.processRef || process;
 
+    // 0098_shutdownAndExit_退出逻辑
     const shutdownAndExit = async (signal) => {
         try {
             await runtime.shutdown(signal);

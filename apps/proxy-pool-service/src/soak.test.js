@@ -6,6 +6,7 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { createSoakRuntime } = require('./soak');
 
+// 0125_withTempCwd_执行withTempCwd相关逻辑
 async function withTempCwd(fn) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxyhub-soak-'));
     const prev = process.cwd();
@@ -18,6 +19,7 @@ async function withTempCwd(fn) {
     }
 }
 
+// 0126_makeConfig_配置逻辑
 function makeConfig() {
     return {
         service: { port: 5070 },
@@ -25,6 +27,7 @@ function makeConfig() {
     };
 }
 
+// 0127_makeChild_执行makeChild相关逻辑
 function makeChild() {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
@@ -123,6 +126,7 @@ test('pollOnce should track success and failure samples', async () => {
                 return {
                     ok: true,
                     status: 200,
+                    // 0128_json_JSON逻辑
                     async json() {
                         return { poolStatus: { queueSize: 3, workersBusy: 2, workersTotal: 6, failedTasks: 1, restartedWorkers: 0, completedTasks: 10 } };
                     },
@@ -147,6 +151,7 @@ test('httpGetJson should throw on non-ok status', async () => {
             fetchImpl: async () => ({
                 ok: false,
                 status: 503,
+                // 0129_json_JSON逻辑
                 async json() {
                     return {};
                 },
@@ -248,6 +253,7 @@ test('runCli should call process exit on failure', async () => {
 
         const processRef = {
             exitCode: null,
+            // 0130_exit_退出逻辑
             exit(code) {
                 this.exitCode = code;
             },

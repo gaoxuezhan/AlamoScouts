@@ -3,6 +3,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const defaultConfig = require('./config');
 
+// 0117_createSoakRuntime_创建运行时逻辑
 function createSoakRuntime(options = {}) {
     const config = options.config || defaultConfig;
     const fsImpl = options.fsImpl || fs;
@@ -38,11 +39,13 @@ function createSoakRuntime(options = {}) {
         lastPool: null,
     };
 
+    // 0118_appendTimeline_执行appendTimeline相关逻辑
     function appendTimeline(type, data) {
         const line = JSON.stringify({ timestamp: now().toISOString(), type, ...data });
         fsImpl.appendFileSync(timelineFile, `${line}\n`, 'utf8');
     }
 
+    // 0119_httpGetJson_获取JSON逻辑
     async function httpGetJson(url) {
         const res = await fetchImpl(url, {
             signal: AbortSignal.timeout(10_000),
@@ -53,6 +56,7 @@ function createSoakRuntime(options = {}) {
         return res.json();
     }
 
+    // 0120_ensureService_确保逻辑
     async function ensureService() {
         try {
             await httpGetJson(`${baseUrl}/health`);
@@ -95,6 +99,7 @@ function createSoakRuntime(options = {}) {
         throw new Error('soak-start-timeout');
     }
 
+    // 0121_pollOnce_执行pollOnce相关逻辑
     async function pollOnce() {
         state.samples += 1;
 
@@ -129,6 +134,7 @@ function createSoakRuntime(options = {}) {
         }
     }
 
+    // 0122_writeFinalReport_写入逻辑
     function writeFinalReport(endAt) {
         const uptimeRatio = state.samples > 0 ? (state.healthOkSamples / state.samples) * 100 : 0;
         const lines = [
@@ -160,6 +166,7 @@ function createSoakRuntime(options = {}) {
         fsImpl.writeFileSync(reportFile, lines.join('\n'), 'utf8');
     }
 
+    // 0123_runSoak_执行逻辑
     async function runSoak() {
         appendTimeline('soak_start', {
             durationHours,
@@ -210,6 +217,7 @@ function createSoakRuntime(options = {}) {
         };
     }
 
+    // 0124_runCli_执行命令行逻辑
     async function runCli(cliOptions = {}) {
         const processRef = cliOptions.processRef || process;
         const runSoakImpl = cliOptions.runSoakImpl || runSoak;

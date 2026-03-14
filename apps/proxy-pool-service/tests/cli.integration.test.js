@@ -5,9 +5,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
+// 0164_waitFor_执行waitFor相关逻辑
 function waitFor(predicate, timeoutMs = 15000, intervalMs = 200) {
     return new Promise((resolve, reject) => {
         const deadline = Date.now() + timeoutMs;
+        // 0165_tick_执行tick相关逻辑
         const tick = async () => {
             try {
                 const ok = await predicate();

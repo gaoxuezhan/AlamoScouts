@@ -2,10 +2,12 @@
 const assert = require('node:assert/strict');
 const { RuntimeLogger } = require('./logger');
 
+// 0073_createDbStub_创建逻辑
 function createDbStub(throwOnInsert = false) {
     const logs = [];
     return {
         logs,
+        // 0074_insertRuntimeLog_写入运行时日志逻辑
         insertRuntimeLog(entry) {
             if (throwOnInsert) {
                 throw new Error('db-write-failed');

@@ -12,6 +12,7 @@ const {
     ProxyHubEngine,
 } = require('./engine');
 
+// 0036_createConfig_创建配置逻辑
 function createConfig(dbPath) {
     return {
         service: { logRetention: 500 },
@@ -63,10 +64,12 @@ function createConfig(dbPath) {
     };
 }
 
+// 0037_createLogger_创建逻辑
 function createLogger() {
     const entries = [];
     return {
         entries,
+        // 0038_write_写入逻辑
         write(item) {
             entries.push(item);
             return item;
@@ -74,6 +77,7 @@ function createLogger() {
     };
 }
 
+// 0039_createDbHandle_创建处理逻辑
 function createDbHandle() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxyhub-engine-'));
     const dbPath = path.join(dir, 'engine.db');
@@ -82,6 +86,7 @@ function createDbHandle() {
     return { dir, db, config };
 }
 
+// 0040_cleanupDb_执行cleanupDb相关逻辑
 function cleanupDb(h) {
     h.db.close();
     fs.rmSync(h.dir, { recursive: true, force: true });
@@ -125,12 +130,14 @@ test('engine start/stop should be idempotent and persist snapshot', async () => 
     const logger = createLogger();
 
     const workerPool = {
+        // 0041_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'fetch-source') {
                 return { normalized: 0, proxies: [] };
             }
             return { ok: true, latencyMs: 10, reason: 'connect_ok', outcome: 'success' };
         },
+        // 0042_getStatus_获取逻辑
         getStatus() {
             return {
                 workersTotal: 2,
@@ -165,9 +172,11 @@ test('engine start should execute scheduled callback bodies', async () => {
     h.config.source.monosans.enabled = false;
 
     const workerPool = {
+        // 0043_runTask_执行任务逻辑
         async runTask() {
             return { ok: true };
         },
+        // 0044_getStatus_获取逻辑
         getStatus() {
             return {
                 workersTotal: 1,
@@ -208,9 +217,11 @@ test('runSourceCycle should skip when not started or source disabled', async () 
     const h = createDbHandle();
     const logger = createLogger();
     const workerPool = {
+        // 0045_runTask_执行任务逻辑
         async runTask() {
             throw new Error('should-not-run');
         },
+        // 0046_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -232,6 +243,7 @@ test('runSourceCycle and processProxy should handle success path', async () => {
     const logger = createLogger();
 
     const workerPool = {
+        // 0047_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'fetch-source') {
                 return {
@@ -247,6 +259,7 @@ test('runSourceCycle and processProxy should handle success path', async () => {
             }
             return { ok: true };
         },
+        // 0048_getStatus_获取逻辑
         getStatus() {
             return {
                 workersTotal: 2,
@@ -278,12 +291,14 @@ test('runSourceCycle should handle fetch errors', async () => {
     const h = createDbHandle();
     const logger = createLogger();
     const workerPool = {
+        // 0049_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'fetch-source') {
                 throw new Error('fetch-failed');
             }
             return { ok: true };
         },
+        // 0050_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -302,12 +317,14 @@ test('runSourceCycle should use unknown fallback reason when thrown value has no
     const h = createDbHandle();
     const logger = createLogger();
     const workerPool = {
+        // 0051_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'fetch-source') {
                 throw null;
             }
             return { ok: true };
         },
+        // 0052_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -335,12 +352,14 @@ test('processProxy should handle failure path', async () => {
     const proxy = h.db.getProxyList({ limit: 1 })[0];
 
     const workerPool = {
+        // 0053_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'validate-proxy') {
                 throw new Error('validate-failed');
             }
             return { ok: true };
         },
+        // 0054_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -367,11 +386,13 @@ test('processProxy should use unknown fallback reason when thrown value has no m
     const proxy = h.db.getProxyList({ limit: 1 })[0];
 
     const workerPool = {
+        // 0055_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'validate-proxy') return { ok: false, reason: 'x' };
             if (type === 'score-proxy') return { outcome: 'blocked' };
             return { ok: true };
         },
+        // 0056_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -379,6 +400,7 @@ test('processProxy should use unknown fallback reason when thrown value has no m
 
     const db = {
         ...h.db,
+        // 0057_updateProxyById_更新代理标识逻辑
         updateProxyById() {
             throw null;
         },
@@ -415,6 +437,7 @@ test('processProxy should cover validation false path and retirement/event fallb
     const calls = { honors: 0, retires: 0, eventDetails: null };
     const db = {
         updateProxyById() {},
+        // 0058_getProxyById_获取代理标识逻辑
         getProxyById() {
             return {
                 id: 1,
@@ -425,25 +448,30 @@ test('processProxy should cover validation false path and retirement/event fallb
                 honor_active_json: '[]',
             };
         },
+        // 0059_upsertHonor_插入更新荣誉逻辑
         upsertHonor() {
             calls.honors += 1;
         },
         refreshHonorActive() {},
+        // 0060_insertRetirement_写入退伍逻辑
         insertRetirement(record) {
             calls.retires += 1;
             calls.retireReason = record.reason;
         },
+        // 0061_insertProxyEvent_写入代理事件逻辑
         insertProxyEvent(record) {
             calls.eventDetails = record.details;
         },
     };
     const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-stub.db'));
     const workerPool = {
+        // 0062_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'validate-proxy') return { ok: false, reason: 'blocked' };
             if (type === 'score-proxy') return { outcome: 'blocked' };
             return { ok: true };
         },
+        // 0063_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -508,6 +536,7 @@ test('processProxy should persist awards and retirement events', async () => {
 
     const freshProxy = h.db.getProxyById(proxy.id);
     const workerPool = {
+        // 0064_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'validate-proxy') {
                 return { ok: true, reason: 'connect_ok', latencyMs: 20 };
@@ -517,6 +546,7 @@ test('processProxy should persist awards and retirement events', async () => {
             }
             return { ok: true };
         },
+        // 0065_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -573,12 +603,14 @@ test('runStateReviewCycle should cover change/no-change and error branches', asy
 
     let shouldThrow = false;
     const workerPool = {
+        // 0066_runTask_执行任务逻辑
         async runTask() {
             if (shouldThrow) {
                 throw new Error('state-cycle-fail');
             }
             return { ok: true };
         },
+        // 0067_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -613,9 +645,11 @@ test('runStateReviewCycle should fallback state-review-error reason when thrown 
     );
 
     const workerPool = {
+        // 0068_runTask_执行任务逻辑
         async runTask() {
             throw null;
         },
+        // 0069_getStatus_获取逻辑
         getStatus() {
             return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
         },
@@ -634,6 +668,7 @@ test('persistSnapshot should emit thread pool alert and auto recovery', () => {
 
     let queueSize = 30;
     const workerPool = {
+        // 0070_getStatus_获取逻辑
         getStatus() {
             return {
                 workersTotal: 2,

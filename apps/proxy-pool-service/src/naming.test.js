@@ -4,6 +4,7 @@ const { generateRecruitName } = require('./naming');
 
 test('generateRecruitName should create unique names with retry', () => {
     const used = new Set();
+    // 0080_isUnique_判断逻辑
     const isUnique = (name) => !used.has(name);
 
     for (let i = 0; i < 200; i += 1) {

@@ -6,6 +6,7 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { sendSse, normalizeLimit, createRuntime, runCli } = require('./server');
 
+// 0099_createConfig_创建配置逻辑
 function createConfig(port = 0) {
     return {
         service: { name: 'ProxyHub', port, host: '127.0.0.1', timezone: 'Asia/Shanghai', logRetention: 100 },
@@ -28,6 +29,7 @@ function createConfig(port = 0) {
     };
 }
 
+// 0100_createStubs_创建逻辑
 function createStubs() {
     const loggerEvents = new EventEmitter();
     const poolEvents = new EventEmitter();
@@ -50,11 +52,13 @@ function createStubs() {
 
     const logger = {
         entries: [],
+        // 0101_write_写入逻辑
         write(entry) {
             this.entries.push(entry);
             loggerEvents.emit('log', entry);
             return entry;
         },
+        // 0102_subscribe_订阅逻辑
         subscribe(handler) {
             loggerEvents.on('log', handler);
             return () => loggerEvents.off('log', handler);
@@ -63,6 +67,7 @@ function createStubs() {
 
     const workerPool = {
         getStatus: () => ({ workersTotal: 2, workersBusy: 1, queueSize: 0, runningTasks: 0, completedTasks: 1, failedTasks: 0, restartedWorkers: 0, workers: [] }),
+        // 0103_subscribe_订阅逻辑
         subscribe(handler) {
             poolEvents.on('status', handler);
             return () => poolEvents.off('status', handler);
@@ -83,6 +88,7 @@ function createStubs() {
     return { db, logger, workerPool, engine, state };
 }
 
+// 0104_startRuntimeOnRandomPort_启动运行时随机逻辑
 async function startRuntimeOnRandomPort(stubs) {
     const runtime = createRuntime({ config: createConfig(0), ...stubs });
     const server = await runtime.start();
@@ -198,9 +204,11 @@ test('runCli should register signals and handle startup failure', async () => {
     const processEvents = {};
     const processRef = {
         exitCode: null,
+        // 0105_on_执行on相关逻辑
         on(event, handler) {
             processEvents[event] = handler;
         },
+        // 0106_exit_退出逻辑
         exit(code) {
             this.exitCode = code;
         },
@@ -210,6 +218,7 @@ test('runCli should register signals and handle startup failure', async () => {
         stopped: false,
         logger: { write() {} },
         async start() {},
+        // 0107_shutdown_执行shutdown相关逻辑
         async shutdown() {
             this.stopped = true;
         },
@@ -225,9 +234,11 @@ test('runCli should register signals and handle startup failure', async () => {
 
     const processRefSigint = {
         exitCode: null,
+        // 0108_on_执行on相关逻辑
         on(event, handler) {
             processEvents[event] = handler;
         },
+        // 0109_exit_退出逻辑
         exit(code) {
             this.exitCode = code;
         },
@@ -235,6 +246,7 @@ test('runCli should register signals and handle startup failure', async () => {
     const runtimeSigint = {
         logger: { write() {} },
         async start() {},
+        // 0110_shutdown_执行shutdown相关逻辑
         async shutdown() {
             throw new Error('shutdown-fail');
         },
@@ -252,6 +264,7 @@ test('runCli should register signals and handle startup failure', async () => {
     const writes = [];
     const runtimeFail = {
         logger: { write(entry) { writes.push(entry); } },
+        // 0111_start_启动逻辑
         async start() {
             throw new Error('start-fail');
         },
@@ -274,6 +287,7 @@ test('runCli should register signals and handle startup failure', async () => {
     };
     const defaultRuntime = {
         logger: { write(entry) { writes.push(entry); } },
+        // 0112_start_启动逻辑
         async start() {
             throw null;
         },
@@ -297,9 +311,11 @@ test('runCli should create runtime when runtime is not injected', async () => {
     const processEvents = {};
     const processRef = {
         exitCode: null,
+        // 0113_on_执行on相关逻辑
         on(event, handler) {
             processEvents[event] = handler;
         },
+        // 0114_exit_退出逻辑
         exit(code) {
             this.exitCode = code;
         },
@@ -330,11 +346,13 @@ test('server runtime should cover default dependency wiring and SSE fanout loops
     const runtime = createRuntime({ config });
     const writes = [];
     const logClient = {
+        // 0115_write_写入逻辑
         write(chunk) {
             writes.push(chunk);
         },
     };
     const poolClient = {
+        // 0116_write_写入逻辑
         write(chunk) {
             writes.push(chunk);
         },
