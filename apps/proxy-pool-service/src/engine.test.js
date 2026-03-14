@@ -297,8 +297,11 @@ test('runSourceCycle and processProxy should handle success path', async () => {
     const proxies = h.db.getProxyList({ limit: 10 });
     assert.equal(proxies.length, 1);
     assert.equal(proxies[0].last_validation_ok, 1);
+    assert.equal(proxies[0].success_count >= 1, true);
+    assert.equal(proxies[0].total_samples >= 1, true);
     assert.equal(logger.entries.some((e) => e.event === '抓源成功'), true);
     assert.equal(logger.entries.some((e) => e.event === '校验通过'), true);
+    assert.equal(logger.entries.some((e) => e.stage === '评分(L0回退)' && e.result === '成功'), true);
 
     cleanupDb(h);
 });
@@ -583,9 +586,11 @@ test('processProxy should persist awards and retirement events', async () => {
     const honors = h.db.getHonors(10);
     const retirements = h.db.getRetirements(10);
     const events = h.db.getEvents(20);
+    const latest = h.db.getProxyById(proxy.id);
     assert.equal(honors.length >= 1, true);
     assert.equal(retirements.length >= 1, true);
     assert.equal(events.some((e) => e.event_type === 'retirement'), true);
+    assert.equal(latest.source, 'src');
     assert.equal(logger.entries.some((e) => e.event === '退伍'), true);
     assert.equal(logger.entries.some((e) => e.event === '授予荣誉'), true);
 
