@@ -1,6 +1,10 @@
 ﻿const { parentPort } = require('node:worker_threads');
 const crypto = require('node:crypto');
 const net = require('node:net');
+const http = require('node:http');
+const https = require('node:https');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 
 // 0149_createAbortSignal_创建中止信号逻辑
 function createAbortSignal(timeoutMs) {
@@ -60,7 +64,7 @@ async function fetchSourceTask(payload, deps = {}) {
         signal: createAbortSignal(timeoutMs),
         headers: {
             'user-agent': 'ProxyHub/1.0',
-            'accept': 'application/json,text/plain,*/*',
+            accept: 'application/json,text/plain,*/*',
         },
     });
 
@@ -124,41 +128,403 @@ function seededRandom(seed) {
     return num / 0xffffffff;
 }
 
+// 0196_normalizeValidationOutcome_规范化校验结果逻辑
+function normalizeValidationOutcome(validation) {
+    if (!validation?.ok) {
+        const reason = String(validation?.reason || '').toLowerCase();
+        if (reason.includes('timeout')) {
+            return 'timeout';
+        }
+        if (reason.includes('blocked')) {
+            return 'blocked';
+        }
+        return 'network_error';
+    }
+    return 'success';
+}
+
 // 0156_scoreProxyTask_评分代理任务逻辑
 function scoreProxyTask(payload) {
+    if (typeof payload?.outcome === 'string' && payload.outcome.length > 0) {
+        return {
+            outcome: payload.outcome,
+            latencyMs: Number(payload.latencyMs || payload.validation?.latencyMs || 0),
+        };
+    }
+
     const validation = payload.validation || { ok: false, reason: 'missing_validation', latencyMs: 0 };
-
-    if (!validation.ok) {
-        if (validation.reason === 'timeout') {
-            return { outcome: 'timeout', latencyMs: validation.latencyMs || 2500 };
-        }
-        return { outcome: 'network_error', latencyMs: validation.latencyMs || 2500 };
-    }
-
-    const bucket = new Date().toISOString().slice(0, 16);
-    const r = seededRandom(`${payload.seed || 'proxy'}:${bucket}`);
-    const latencyMs = validation.latencyMs || 0;
-
-    if (latencyMs > 2200 && r < 0.35) {
-        return { outcome: 'timeout', latencyMs };
-    }
-
-    if (r < 0.72) {
-        return { outcome: 'success', latencyMs };
-    }
-    if (r < 0.87) {
-        return { outcome: 'blocked', latencyMs };
-    }
-    if (r < 0.94) {
-        return { outcome: 'timeout', latencyMs };
-    }
-    return { outcome: 'network_error', latencyMs };
+    return {
+        outcome: normalizeValidationOutcome(validation),
+        latencyMs: Number(validation.latencyMs || payload.latencyMs || 0),
+    };
 }
 
 // 0157_stateTransitionTask_状态迁移任务逻辑
 function stateTransitionTask() {
     return {
         ok: true,
+    };
+}
+
+// 0197_safeParseJson_安全解析JSON逻辑
+function safeParseJson(raw) {
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+}
+
+// 0198_extractIpFromPayload_提取IP字段逻辑
+function extractIpFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const direct = payload.ip;
+    if (typeof direct === 'string' && direct.trim()) {
+        return direct.trim();
+    }
+
+    const origin = payload.origin;
+    if (typeof origin === 'string' && origin.trim()) {
+        const first = origin.split(',')[0]?.trim();
+        return first || null;
+    }
+
+    return null;
+}
+
+// 0199_hasBlockSignal_命中拦截信号逻辑
+function hasBlockSignal(text, blockSignals) {
+    const haystack = String(text || '').toLowerCase();
+    return (blockSignals || []).some((signal) => haystack.includes(String(signal).toLowerCase()));
+}
+
+// 0200_buildProxyUrl_构建代理URL逻辑
+function buildProxyUrl(proxy) {
+    const protocol = String(proxy?.protocol || 'http').toLowerCase();
+    return `${protocol}://${proxy.ip}:${proxy.port}`;
+}
+
+// 0201_createRequestAgent_创建请求代理逻辑
+function createRequestAgent(proxy, deps = {}) {
+    const proxyUrl = buildProxyUrl(proxy);
+    const protocol = String(proxy?.protocol || 'http').toLowerCase();
+    if (protocol.startsWith('socks')) {
+        const AgentClass = deps.SocksProxyAgentClass || SocksProxyAgent;
+        return new AgentClass(proxyUrl);
+    }
+    const AgentClass = deps.HttpsProxyAgentClass || HttpsProxyAgent;
+    return new AgentClass(proxyUrl);
+}
+
+// 0202_classifyRequestError_分类请求错误逻辑
+function classifyRequestError(error) {
+    const code = String(error?.code || '').toLowerCase();
+    const message = String(error?.message || '').toLowerCase();
+    if (code.includes('timedout') || message.includes('timeout')) {
+        return { outcome: 'timeout', reason: error?.code || 'timeout' };
+    }
+    return { outcome: 'network_error', reason: error?.code || error?.message || 'network_error' };
+}
+
+// 0203_requestThroughProxy_通过代理请求逻辑
+function requestThroughProxy({ proxy, targetUrl, timeoutMs, headers }, deps = {}) {
+    const started = Date.now();
+    const requestLib = targetUrl.startsWith('https://') ? (deps.httpsImpl || https) : (deps.httpImpl || http);
+    const agent = createRequestAgent(proxy, deps);
+
+    return new Promise((resolve) => {
+        const req = requestLib.request(targetUrl, {
+            method: 'GET',
+            agent,
+            headers: {
+                'user-agent': 'ProxyHub-Battle/1.0',
+                accept: 'application/json,text/plain,*/*',
+                ...headers,
+            },
+            timeout: timeoutMs,
+        }, (res) => {
+            const chunks = [];
+            let total = 0;
+            res.on('data', (chunk) => {
+                total += chunk.length;
+                if (total <= 512_000) {
+                    chunks.push(chunk);
+                }
+            });
+            res.on('end', () => {
+                const body = Buffer.concat(chunks).toString('utf8');
+                resolve({
+                    ok: true,
+                    statusCode: res.statusCode || 0,
+                    latencyMs: Date.now() - started,
+                    body,
+                });
+            });
+        });
+
+        req.on('timeout', () => {
+            req.destroy(new Error('timeout'));
+        });
+
+        req.on('error', (error) => {
+            const classified = classifyRequestError(error);
+            resolve({
+                ok: false,
+                statusCode: 0,
+                latencyMs: Date.now() - started,
+                body: '',
+                outcome: classified.outcome,
+                reason: classified.reason,
+            });
+        });
+
+        req.end();
+    });
+}
+
+// 0204_runBattleL1Task_执行战场L1逻辑
+async function runBattleL1Task(payload, deps = {}) {
+    const targets = Array.isArray(payload.targets) ? payload.targets : [];
+    const timeoutMs = Number(payload.timeoutMs || 5000);
+    const blockedStatusCodes = payload.blockedStatusCodes || [];
+    const blockSignals = payload.blockSignals || [];
+    const runs = [];
+
+    for (const target of targets) {
+        const requestResult = await requestThroughProxy({
+            proxy: payload.proxy,
+            targetUrl: target.url,
+            timeoutMs,
+            headers: target.headers || {},
+        }, deps);
+
+        if (!requestResult.ok) {
+            runs.push({
+                target: target.name || target.url,
+                outcome: requestResult.outcome || 'network_error',
+                statusCode: requestResult.statusCode || null,
+                latencyMs: requestResult.latencyMs,
+                reason: requestResult.reason || 'request_error',
+                details: {},
+            });
+            continue;
+        }
+
+        const isBlocked = blockedStatusCodes.includes(requestResult.statusCode)
+            || hasBlockSignal(requestResult.body, blockSignals);
+        if (isBlocked) {
+            runs.push({
+                target: target.name || target.url,
+                outcome: 'blocked',
+                statusCode: requestResult.statusCode,
+                latencyMs: requestResult.latencyMs,
+                reason: 'blocked_signal',
+                details: {},
+            });
+            continue;
+        }
+
+        if (requestResult.statusCode < 200 || requestResult.statusCode >= 300) {
+            runs.push({
+                target: target.name || target.url,
+                outcome: 'invalid_feedback',
+                statusCode: requestResult.statusCode,
+                latencyMs: requestResult.latencyMs,
+                reason: 'non_2xx',
+                details: {},
+            });
+            continue;
+        }
+
+        const parsed = safeParseJson(requestResult.body);
+        const ip = extractIpFromPayload(parsed);
+        if (!ip) {
+            runs.push({
+                target: target.name || target.url,
+                outcome: 'invalid_feedback',
+                statusCode: requestResult.statusCode,
+                latencyMs: requestResult.latencyMs,
+                reason: 'ip_field_missing',
+                details: {},
+            });
+            continue;
+        }
+
+        runs.push({
+            target: target.name || target.url,
+            outcome: 'success',
+            statusCode: requestResult.statusCode,
+            latencyMs: requestResult.latencyMs,
+            reason: 'ip_parsed',
+            details: { ip },
+        });
+    }
+
+    const hasSuccess = runs.some((item) => item.outcome === 'success');
+    let outcome = 'network_error';
+    if (hasSuccess) {
+        outcome = 'success';
+    } else if (runs.some((item) => item.outcome === 'blocked')) {
+        outcome = 'blocked';
+    } else if (runs.some((item) => item.outcome === 'timeout')) {
+        outcome = 'timeout';
+    } else if (runs.some((item) => item.outcome === 'invalid_feedback')) {
+        outcome = 'invalid_feedback';
+    }
+
+    const avgLatency = runs.length > 0
+        ? Math.round(runs.reduce((sum, item) => sum + (item.latencyMs || 0), 0) / runs.length)
+        : 0;
+
+    return {
+        stage: 'l1',
+        outcome,
+        latencyMs: avgLatency,
+        reason: hasSuccess ? 'at_least_one_target_success' : 'all_targets_failed',
+        runs,
+    };
+}
+
+// 0205_isL2ContentValid_判断L2内容有效逻辑
+function isL2ContentValid(body) {
+    const text = String(body || '').toLowerCase();
+    return text.includes('ly.com') || text.includes('flight') || text.includes('航班') || text.includes('机票');
+}
+
+// 0206_isFallbackContentValid_判断兜底内容有效逻辑
+function isFallbackContentValid(body) {
+    return String(body || '').trim().length > 20;
+}
+
+// 0207_runBattleL2Task_执行战场L2逻辑
+async function runBattleL2Task(payload, deps = {}) {
+    const timeoutMs = Number(payload.timeoutMs || 8000);
+    const blockedStatusCodes = payload.blockedStatusCodes || [];
+    const blockSignals = payload.blockSignals || [];
+    const primary = (payload.primaryTargets || [])[0];
+    const fallback = (payload.fallbackTargets || [])[0];
+    const runs = [];
+
+    if (!primary) {
+        return {
+            stage: 'l2',
+            outcome: 'invalid_feedback',
+            latencyMs: 0,
+            reason: 'missing_primary_target',
+            runs,
+        };
+    }
+
+    const primaryResult = await requestThroughProxy({
+        proxy: payload.proxy,
+        targetUrl: primary.url,
+        timeoutMs,
+        headers: primary.headers || {},
+    }, deps);
+
+    if (!primaryResult.ok) {
+        runs.push({
+            target: primary.name || primary.url,
+            outcome: primaryResult.outcome || 'network_error',
+            statusCode: primaryResult.statusCode || null,
+            latencyMs: primaryResult.latencyMs,
+            reason: primaryResult.reason || 'primary_failed',
+            details: {},
+        });
+    } else {
+        const blockedBySignal = blockedStatusCodes.includes(primaryResult.statusCode)
+            || hasBlockSignal(primaryResult.body, blockSignals);
+        if (blockedBySignal) {
+            runs.push({
+                target: primary.name || primary.url,
+                outcome: 'blocked',
+                statusCode: primaryResult.statusCode,
+                latencyMs: primaryResult.latencyMs,
+                reason: 'blocked_signal',
+                details: {},
+            });
+        } else if (primaryResult.statusCode < 200 || primaryResult.statusCode >= 300) {
+            runs.push({
+                target: primary.name || primary.url,
+                outcome: 'invalid_feedback',
+                statusCode: primaryResult.statusCode,
+                latencyMs: primaryResult.latencyMs,
+                reason: 'non_2xx',
+                details: {},
+            });
+        } else if (!isL2ContentValid(primaryResult.body)) {
+            runs.push({
+                target: primary.name || primary.url,
+                outcome: 'invalid_feedback',
+                statusCode: primaryResult.statusCode,
+                latencyMs: primaryResult.latencyMs,
+                reason: 'content_assert_failed',
+                details: {},
+            });
+        } else {
+            runs.push({
+                target: primary.name || primary.url,
+                outcome: 'success',
+                statusCode: primaryResult.statusCode,
+                latencyMs: primaryResult.latencyMs,
+                reason: 'content_assert_ok',
+                details: {},
+            });
+        }
+    }
+
+    let fallbackSuccess = false;
+    if (fallback) {
+        const fallbackResult = await requestThroughProxy({
+            proxy: payload.proxy,
+            targetUrl: fallback.url,
+            timeoutMs,
+            headers: fallback.headers || {},
+        }, deps);
+
+        if (!fallbackResult.ok) {
+            runs.push({
+                target: fallback.name || fallback.url,
+                outcome: fallbackResult.outcome || 'network_error',
+                statusCode: fallbackResult.statusCode || null,
+                latencyMs: fallbackResult.latencyMs,
+                reason: fallbackResult.reason || 'fallback_failed',
+                details: {},
+            });
+        } else {
+            fallbackSuccess = fallbackResult.statusCode >= 200
+                && fallbackResult.statusCode < 300
+                && isFallbackContentValid(fallbackResult.body);
+            runs.push({
+                target: fallback.name || fallback.url,
+                outcome: fallbackSuccess ? 'success' : 'invalid_feedback',
+                statusCode: fallbackResult.statusCode,
+                latencyMs: fallbackResult.latencyMs,
+                reason: fallbackSuccess ? 'fallback_ok' : 'fallback_assert_failed',
+                details: {},
+            });
+        }
+    }
+
+    const primaryRun = runs[0];
+    let outcome = primaryRun?.outcome || 'network_error';
+    if ((primaryRun?.outcome === 'timeout' || primaryRun?.outcome === 'network_error') && fallbackSuccess) {
+        outcome = 'network_error';
+    }
+
+    const avgLatency = runs.length > 0
+        ? Math.round(runs.reduce((sum, item) => sum + (item.latencyMs || 0), 0) / runs.length)
+        : 0;
+
+    return {
+        stage: 'l2',
+        outcome,
+        latencyMs: avgLatency,
+        reason: primaryRun?.reason || 'l2_done',
+        runs,
     };
 }
 
@@ -172,6 +538,12 @@ async function handleTask(type, payload, deps = {}) {
     }
     if (type === 'score-proxy') {
         return scoreProxyTask(payload, deps);
+    }
+    if (type === 'battle-l1') {
+        return runBattleL1Task(payload, deps);
+    }
+    if (type === 'battle-l2') {
+        return runBattleL2Task(payload, deps);
     }
     if (type === 'state-transition') {
         return stateTransitionTask(payload, deps);
@@ -208,8 +580,20 @@ module.exports = {
     checkTcpConnectivity,
     validateProxyTask,
     seededRandom,
+    normalizeValidationOutcome,
     scoreProxyTask,
     stateTransitionTask,
+    safeParseJson,
+    extractIpFromPayload,
+    hasBlockSignal,
+    buildProxyUrl,
+    createRequestAgent,
+    classifyRequestError,
+    requestThroughProxy,
+    runBattleL1Task,
+    isL2ContentValid,
+    isFallbackContentValid,
+    runBattleL2Task,
     handleTask,
     attachWorkerListener,
 };

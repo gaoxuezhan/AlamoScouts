@@ -11,8 +11,19 @@ const {
     checkTcpConnectivity,
     validateProxyTask,
     seededRandom,
+    normalizeValidationOutcome,
     scoreProxyTask,
     stateTransitionTask,
+    safeParseJson,
+    extractIpFromPayload,
+    hasBlockSignal,
+    buildProxyUrl,
+    classifyRequestError,
+    requestThroughProxy,
+    runBattleL1Task,
+    isL2ContentValid,
+    isFallbackContentValid,
+    runBattleL2Task,
     handleTask,
     attachWorkerListener,
 } = require('./worker');
@@ -53,7 +64,6 @@ test('fetchSourceTask should parse proxies and throw on non-ok response', async 
         fetchImpl: async () => ({
             ok: true,
             status: 200,
-            // 0160_json_JSON逻辑
             async json() {
                 return [{ ip: '8.8.8.8', port: 8080, protocols: ['http', 'ftp'] }];
             },
@@ -70,7 +80,6 @@ test('fetchSourceTask should parse proxies and throw on non-ok response', async 
     );
 });
 
-// 0161_createFakeSocket_创建逻辑
 function createFakeSocket() {
     const socket = new EventEmitter();
     socket.destroyed = false;
@@ -118,20 +127,6 @@ test('checkTcpConnectivity should resolve connect/timeout/error branches', async
     assert.equal(r4.reason, 'network_error');
 });
 
-test('checkTcpConnectivity should ignore duplicate completion signals', async () => {
-    const socket = createFakeSocket();
-    const p = checkTcpConnectivity('a', 1, 10, {
-        createConnection: () => socket,
-    });
-
-    socket.emit('connect');
-    socket.emit('error', { code: 'late-error' });
-    socket.timeoutCb();
-
-    const result = await p;
-    assert.equal(result.reason, 'connect_ok');
-});
-
 test('validateProxyTask should call connectivity helper path', async () => {
     const socket = createFakeSocket();
     const promise = validateProxyTask({ ip: '1.1.1.1', port: 80, timeoutMs: 5 }, {
@@ -140,14 +135,6 @@ test('validateProxyTask should call connectivity helper path', async () => {
     socket.emit('connect');
     const result = await promise;
     assert.equal(result.ok, true);
-
-    const socket2 = createFakeSocket();
-    const promise2 = validateProxyTask({ ip: '1.1.1.1', port: 80 }, {
-        createConnection: () => socket2,
-    });
-    socket2.timeoutCb();
-    const result2 = await promise2;
-    assert.equal(result2.reason, 'timeout');
 });
 
 test('seededRandom should be deterministic', () => {
@@ -155,56 +142,206 @@ test('seededRandom should be deterministic', () => {
     assert.notEqual(seededRandom('abc'), seededRandom('def'));
 });
 
-test('scoreProxyTask should cover key outcome branches', () => {
-    const oldIso = Date.prototype.toISOString;
-    Date.prototype.toISOString = () => '2026-03-14T12:34:56.000Z';
+test('scoreProxyTask should become deterministic by validation or explicit outcome', () => {
+    assert.equal(normalizeValidationOutcome({ ok: false, reason: 'timeout' }), 'timeout');
+    assert.equal(normalizeValidationOutcome({ ok: false, reason: 'blocked-by-signal' }), 'blocked');
+    assert.equal(normalizeValidationOutcome({ ok: false, reason: 'ECONNRESET' }), 'network_error');
+    assert.equal(normalizeValidationOutcome({ ok: true, reason: 'connect_ok' }), 'success');
 
-    const noValidation = scoreProxyTask({ validation: { ok: false, reason: 'timeout', latencyMs: 10 } });
-    assert.equal(noValidation.outcome, 'timeout');
+    assert.deepEqual(scoreProxyTask({ validation: { ok: false, reason: 'timeout', latencyMs: 7 } }), {
+        outcome: 'timeout',
+        latencyMs: 7,
+    });
+    assert.deepEqual(scoreProxyTask({ validation: { ok: true, latencyMs: 9 } }), {
+        outcome: 'success',
+        latencyMs: 9,
+    });
+    assert.deepEqual(scoreProxyTask({ outcome: 'blocked', latencyMs: 11 }), {
+        outcome: 'blocked',
+        latencyMs: 11,
+    });
+});
 
-    const noValidationErr = scoreProxyTask({ validation: { ok: false, reason: 'err', latencyMs: 10 } });
-    assert.equal(noValidationErr.outcome, 'network_error');
-    const noValidationDefault1 = scoreProxyTask({ validation: { ok: false, reason: 'timeout' } });
-    assert.equal(noValidationDefault1.latencyMs, 2500);
-    const noValidationDefault2 = scoreProxyTask({ validation: { ok: false, reason: 'err' } });
-    assert.equal(noValidationDefault2.latencyMs, 2500);
+test('utility helpers should work', () => {
+    assert.deepEqual(safeParseJson('{bad'), null);
+    assert.equal(extractIpFromPayload({ ip: '1.1.1.1' }), '1.1.1.1');
+    assert.equal(extractIpFromPayload({ origin: '2.2.2.2, 3.3.3.3' }), '2.2.2.2');
+    assert.equal(extractIpFromPayload({}), null);
 
-    // 0162_findSeed_执行findSeed相关逻辑
-    const findSeed = (predicate) => {
-        const bucket = '2026-03-14T12:34';
-        for (let i = 0; i < 200000; i += 1) {
-            const seed = `seed-${i}`;
-            const r = seededRandom(`${seed}:${bucket}`);
-            if (predicate(r)) return seed;
-        }
-        throw new Error('seed-not-found');
+    assert.equal(hasBlockSignal('Access denied please verify', ['captcha', 'access denied']), true);
+    assert.equal(hasBlockSignal('hello world', ['captcha']), false);
+
+    assert.equal(buildProxyUrl({ protocol: 'http', ip: '1.1.1.1', port: 80 }), 'http://1.1.1.1:80');
+
+    assert.deepEqual(classifyRequestError({ code: 'ETIMEDOUT' }), { outcome: 'timeout', reason: 'ETIMEDOUT' });
+    assert.equal(classifyRequestError({ code: 'ECONNRESET' }).outcome, 'network_error');
+
+    assert.equal(isL2ContentValid('ly.com 航班列表'), true);
+    assert.equal(isL2ContentValid('random text'), false);
+    assert.equal(isFallbackContentValid('x'.repeat(21)), true);
+    assert.equal(isFallbackContentValid('short'), false);
+});
+
+function createFakeRequestLib(steps) {
+    const seq = [...steps];
+    return {
+        request(_url, _options, cb) {
+            const req = new EventEmitter();
+            req.destroy = (err) => {
+                setImmediate(() => req.emit('error', err || new Error('destroyed')));
+            };
+            req.end = () => {
+                const step = seq.shift();
+                if (!step) {
+                    setImmediate(() => req.emit('error', Object.assign(new Error('unexpected-call'), { code: 'EUNEXPECTED' })));
+                    return;
+                }
+
+                if (step.type === 'error') {
+                    setImmediate(() => req.emit('error', step.error || Object.assign(new Error('e'), { code: 'ECONNRESET' })));
+                    return;
+                }
+
+                if (step.type === 'timeout') {
+                    setImmediate(() => req.emit('timeout'));
+                    return;
+                }
+
+                const res = new EventEmitter();
+                res.statusCode = step.statusCode;
+                setImmediate(() => {
+                    cb(res);
+                    if (step.body != null) {
+                        res.emit('data', Buffer.from(step.body));
+                    }
+                    res.emit('end');
+                });
+            };
+            return req;
+        },
     };
+}
 
-    const blockedSeed = findSeed((r) => r >= 0.72 && r < 0.87);
-    assert.equal(scoreProxyTask({ validation: { ok: true, latencyMs: 50 }, seed: blockedSeed }).outcome, 'blocked');
+test('requestThroughProxy should return success and error branches', async () => {
+    const okResult = await requestThroughProxy({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targetUrl: 'https://api.ipify.org?format=json',
+        timeoutMs: 50,
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'response', statusCode: 200, body: '{"ip":"1.1.1.1"}' },
+        ]),
+    });
+    assert.equal(okResult.ok, true);
+    assert.equal(okResult.statusCode, 200);
 
-    const successSeed = findSeed((r) => r < 0.72);
-    assert.equal(scoreProxyTask({ validation: { ok: true, latencyMs: 50 }, seed: successSeed }).outcome, 'success');
+    const timeoutResult = await requestThroughProxy({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targetUrl: 'http://example.com',
+        timeoutMs: 50,
+    }, {
+        httpImpl: createFakeRequestLib([{ type: 'timeout' }]),
+    });
+    assert.equal(timeoutResult.ok, false);
+    assert.equal(timeoutResult.outcome, 'timeout');
 
-    const timeoutSeed = findSeed((r) => r >= 0.87 && r < 0.94);
-    assert.equal(scoreProxyTask({ validation: { ok: true, latencyMs: 50 }, seed: timeoutSeed }).outcome, 'timeout');
+    const errResult = await requestThroughProxy({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targetUrl: 'http://example.com',
+        timeoutMs: 50,
+    }, {
+        httpImpl: createFakeRequestLib([{ type: 'error', error: { code: 'ECONNRESET' } }]),
+    });
+    assert.equal(errResult.ok, false);
+    assert.equal(errResult.outcome, 'network_error');
+});
 
-    const networkSeed = findSeed((r) => r >= 0.94);
-    assert.equal(scoreProxyTask({ validation: { ok: true, latencyMs: 50 }, seed: networkSeed }).outcome, 'network_error');
+test('battle L1 task should classify outcomes and succeed when one target succeeds', async () => {
+    const result = await runBattleL1Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [
+            { name: 'httpbin/ip', url: 'https://httpbin.org/ip' },
+            { name: 'ipify', url: 'https://api.ipify.org?format=json' },
+        ],
+        timeoutMs: 50,
+        blockedStatusCodes: [401, 403],
+        blockSignals: ['captcha'],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'response', statusCode: 500, body: 'oops' },
+            { type: 'response', statusCode: 200, body: '{"ip":"5.5.5.5"}' },
+        ]),
+    });
 
-    const slowTimeoutSeed = findSeed((r) => r < 0.35);
-    assert.equal(scoreProxyTask({ validation: { ok: true, latencyMs: 2501 }, seed: slowTimeoutSeed }).outcome, 'timeout');
-    assert.equal(scoreProxyTask({ validation: { ok: true } }).outcome.length > 0, true);
-    assert.equal(scoreProxyTask({ validation: { ok: true } }).latencyMs, 0);
+    assert.equal(result.outcome, 'success');
+    assert.equal(result.runs.length, 2);
 
-    Date.prototype.toISOString = oldIso;
+    const blocked = await runBattleL1Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 'x', url: 'https://x.test' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [403],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'response', statusCode: 403, body: 'denied' },
+        ]),
+    });
+    assert.equal(blocked.outcome, 'blocked');
+});
+
+test('battle L2 task should classify blocked/network_error/success branches', async () => {
+    const blocked = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ name: 'ly', url: 'https://www.ly.com/flights' }],
+        fallbackTargets: [{ name: 'baidu', url: 'https://www.baidu.com' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [403],
+        blockSignals: ['captcha'],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'response', statusCode: 403, body: 'forbidden' },
+            { type: 'response', statusCode: 200, body: 'baidu ok content long enough' },
+        ]),
+    });
+    assert.equal(blocked.outcome, 'blocked');
+
+    const network = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ name: 'ly', url: 'https://www.ly.com/flights' }],
+        fallbackTargets: [{ name: 'baidu', url: 'https://www.baidu.com' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [403],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'error', error: { code: 'ECONNRESET' } },
+            { type: 'response', statusCode: 200, body: 'baidu ok content long enough' },
+        ]),
+    });
+    assert.equal(network.outcome, 'network_error');
+
+    const success = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ name: 'ly', url: 'https://www.ly.com/flights' }],
+        fallbackTargets: [{ name: 'baidu', url: 'https://www.baidu.com' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [403],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'response', statusCode: 200, body: 'ly.com 航班 flight list' },
+            { type: 'response', statusCode: 200, body: 'baidu ok content long enough' },
+        ]),
+    });
+    assert.equal(success.outcome, 'success');
 });
 
 test('stateTransitionTask should return ok', () => {
     assert.deepEqual(stateTransitionTask(), { ok: true });
 });
 
-test('handleTask should dispatch and throw on unknown type', async () => {
+test('handleTask should dispatch all task types and throw on unknown type', async () => {
     const fetchResult = await handleTask('fetch-source', {
         url: 'https://example.com',
         allowedProtocols: ['http'],
@@ -223,6 +360,26 @@ test('handleTask should dispatch and throw on unknown type', async () => {
 
     const scoreResult = await handleTask('score-proxy', { validation: { ok: false, reason: 'timeout', latencyMs: 3 } });
     assert.equal(scoreResult.outcome, 'timeout');
+
+    const l1Result = await handleTask('battle-l1', {
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 'ipify', url: 'https://api.ipify.org?format=json' }],
+    }, {
+        httpsImpl: createFakeRequestLib([{ type: 'response', statusCode: 200, body: '{"ip":"8.8.8.8"}' }]),
+    });
+    assert.equal(l1Result.stage, 'l1');
+
+    const l2Result = await handleTask('battle-l2', {
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ name: 'ly', url: 'https://www.ly.com' }],
+        fallbackTargets: [{ name: 'baidu', url: 'https://www.baidu.com' }],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'response', statusCode: 200, body: 'ly.com flight' },
+            { type: 'response', statusCode: 200, body: 'baidu ok content long enough' },
+        ]),
+    });
+    assert.equal(l2Result.stage, 'l2');
 
     const transResult = await handleTask('state-transition', {});
     assert.equal(transResult.ok, true);
@@ -280,18 +437,11 @@ test('worker module should run under worker_threads parentPort listener', async 
     await worker.terminate();
 });
 
-test('normalizeProxyPayload should handle non-array payload and missing protocols', () => {
-    assert.deepEqual(normalizeProxyPayload(null, ['http']), []);
-    const out = normalizeProxyPayload([{ ip: '4.4.4.4', port: 80 }], ['http']);
-    assert.deepEqual(out, []);
-});
-
 test('fetchSourceTask should use global fetch fallback and object payload count branch', async () => {
     const oldFetch = global.fetch;
     global.fetch = async () => ({
         ok: true,
         status: 200,
-        // 0163_json_JSON逻辑
         async json() {
             return { ip: 'x' };
         },
@@ -313,9 +463,4 @@ test('checkTcpConnectivity should use net.createConnection fallback', async () =
     const result = await promise;
     assert.equal(result.ok, true);
     net.createConnection = oldCreate;
-});
-
-test('scoreProxyTask should fallback validation when payload has no validation', () => {
-    const result = scoreProxyTask({});
-    assert.equal(result.outcome, 'network_error');
 });

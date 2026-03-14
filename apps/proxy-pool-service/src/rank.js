@@ -51,11 +51,6 @@ function scoreDelta(outcome, latencyMs, scoring) {
     let delta = 0;
     if (outcome === 'success') {
         delta += scoring.success;
-        if (latencyMs < 1200) {
-            delta += scoring.successFastBonusLt1200;
-        } else if (latencyMs < 2500) {
-            delta += scoring.successFastBonusLt2500;
-        }
     } else if (outcome === 'blocked') {
         delta += scoring.blocked;
     } else if (outcome === 'timeout') {

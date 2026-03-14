@@ -256,6 +256,9 @@ test('query list APIs should support filters and distributions', () => {
 
     const all = h.db.getProxyList({ limit: 50 });
     assert.equal(all.length, 2);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'last_battle_outcome'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'battle_success_count'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'last_validation_ok'), true);
 
     h.db.updateProxyById(all[0].id, { rank: '士官', lifecycle: 'active', updated_at: now });
 
@@ -265,6 +268,55 @@ test('query list APIs should support filters and distributions', () => {
     assert.equal(h.db.getSourceDistribution().length, 1);
     assert.equal(h.db.getLifecycleDistribution().length >= 1, true);
     assert.equal(h.db.getRankBoard().length >= 1, true);
+
+    cleanup(h);
+});
+
+test('battle APIs should persist run details and support L1/L2 candidate selection', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [
+            { ip: '7.7.7.1', port: 80, protocol: 'http' },
+            { ip: '7.7.7.2', port: 80, protocol: 'http' },
+            { ip: '7.7.7.3', port: 80, protocol: 'http' },
+        ],
+        (() => {
+            let i = 0;
+            return () => `战场-${++i}`;
+        })(),
+        'src-battle',
+        'batch-battle',
+        now,
+    );
+
+    const all = h.db.getProxyList({ limit: 10 });
+    h.db.updateProxyById(all[0].id, { lifecycle: 'active', updated_at: now });
+    h.db.updateProxyById(all[1].id, { lifecycle: 'reserve', updated_at: now });
+    h.db.updateProxyById(all[2].id, { lifecycle: 'candidate', updated_at: now });
+
+    const l1Candidates = h.db.listProxiesForBattleL1(3, 0.34);
+    assert.equal(l1Candidates.length, 3);
+
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l1',
+        target: 'httpbin/ip',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 50,
+        reason: 'ok',
+        details: { ip: '1.2.3.4' },
+    });
+
+    const l2Candidates = h.db.listProxiesForBattleL2(2, 10);
+    assert.equal(l2Candidates.some((item) => item.id === all[0].id), true);
+
+    const runs = h.db.getBattleTestRuns(5);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].stage, 'l1');
 
     cleanup(h);
 });

@@ -19,6 +19,23 @@ function createConfig(dbPath) {
         storage: { dbPath, snapshotRetentionDays: 7 },
         threadPool: { workers: 2 },
         scheduler: { sourceSyncMs: 10000, stateReviewMs: 10000, snapshotPersistMs: 10000, maxValidationPerCycle: 5 },
+        battle: {
+            enabled: false,
+            l1SyncMs: 300000,
+            l2SyncMs: 1800000,
+            maxBattleL1PerCycle: 60,
+            maxBattleL2PerCycle: 20,
+            candidateQuota: 0.15,
+            l2LookbackMinutes: 10,
+            timeoutMs: { l1: 5000, l2: 8000 },
+            blockedStatusCodes: [401, 403, 429, 503],
+            blockSignals: ['captcha'],
+            targets: {
+                l1: [{ name: 'ipify', url: 'https://api.ipify.org?format=json' }],
+                l2Primary: [{ name: 'ly', url: 'https://www.ly.com/flights' }],
+                l2Fallback: [{ name: 'baidu', url: 'https://www.baidu.com' }],
+            },
+        },
         source: { monosans: { name: 'monosans/proxy-list', url: 'https://example.com', enabled: true } },
         validation: { allowedProtocols: ['http', 'https', 'socks5'], maxTimeoutMs: 1000 },
         policy: {
@@ -32,9 +49,9 @@ function createConfig(dbPath) {
                 { rank: '王牌', minHours: 4, minPoints: 50, minSamples: 8 },
             ],
             scoring: {
-                success: 5,
-                successFastBonusLt1200: 2,
-                successFastBonusLt2500: 1,
+                success: 6,
+                successFastBonusLt1200: 0,
+                successFastBonusLt2500: 0,
                 blocked: -8,
                 timeout: -6,
                 networkError: -5,
@@ -101,6 +118,7 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(outcomeLabel('blocked'), 'blocked');
     assert.equal(outcomeLabel('timeout'), 'timeout');
     assert.equal(outcomeLabel('network_error'), 'networkError');
+    assert.equal(outcomeLabel('invalid_feedback'), 'invalidFeedback');
     assert.equal(outcomeLabel('other'), '未知');
 
     assert.equal(mapEventTypeToChinese('promotion'), '晋升');
@@ -254,9 +272,6 @@ test('runSourceCycle and processProxy should handle success path', async () => {
             if (type === 'validate-proxy') {
                 return { ok: true, reason: 'connect_ok', latencyMs: 20 };
             }
-            if (type === 'score-proxy') {
-                return { outcome: 'success', latencyMs: 20 };
-            }
             return { ok: true };
         },
         // 0048_getStatus_获取逻辑
@@ -281,8 +296,9 @@ test('runSourceCycle and processProxy should handle success path', async () => {
 
     const proxies = h.db.getProxyList({ limit: 10 });
     assert.equal(proxies.length, 1);
+    assert.equal(proxies[0].last_validation_ok, 1);
     assert.equal(logger.entries.some((e) => e.event === '抓源成功'), true);
-    assert.equal(logger.entries.some((e) => e.event === '写数据库成功'), true);
+    assert.equal(logger.entries.some((e) => e.event === '校验通过'), true);
 
     cleanupDb(h);
 });
@@ -389,7 +405,6 @@ test('processProxy should use unknown fallback reason when thrown value has no m
         // 0055_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'validate-proxy') return { ok: false, reason: 'x' };
-            if (type === 'score-proxy') return { outcome: 'blocked' };
             return { ok: true };
         },
         // 0056_getStatus_获取逻辑
@@ -435,15 +450,20 @@ test('processProxy should cover validation false path and retirement/event fallb
 
     const logger = createLogger();
     const calls = { honors: 0, retires: 0, eventDetails: null };
+    let lifecycle = 'active';
+    let retiredType = null;
     const db = {
-        updateProxyById() {},
+        updateProxyById(_id, updates) {
+            if (updates.lifecycle) lifecycle = updates.lifecycle;
+            if (Object.prototype.hasOwnProperty.call(updates, 'retired_type')) retiredType = updates.retired_type;
+        },
         // 0058_getProxyById_获取代理标识逻辑
         getProxyById() {
             return {
                 id: 1,
                 display_name: '苍隼-补分-01',
-                lifecycle: 'retired',
-                retired_type: null,
+                lifecycle,
+                retired_type: retiredType,
                 rank: '新兵',
                 honor_active_json: '[]',
             };
@@ -468,7 +488,6 @@ test('processProxy should cover validation false path and retirement/event fallb
         // 0062_runTask_执行任务逻辑
         async runTask(type) {
             if (type === 'validate-proxy') return { ok: false, reason: 'blocked' };
-            if (type === 'score-proxy') return { outcome: 'blocked' };
             return { ok: true };
         },
         // 0063_getStatus_获取逻辑
@@ -506,6 +525,9 @@ test('processProxy should persist awards and retirement events', async () => {
     h.config.policy.retirement.honorMinServiceHours = 1;
     h.config.policy.retirement.honorMinSuccess = 1;
     h.config.policy.honors.thousandService = 10;
+    h.config.battle.enabled = true;
+    h.config.battle.maxBattleL1PerCycle = 10;
+    h.config.battle.candidateQuota = 1;
 
     const now = new Date('2026-03-14T05:00:00.000Z').toISOString();
     h.db.upsertSourceBatch(
@@ -538,11 +560,13 @@ test('processProxy should persist awards and retirement events', async () => {
     const workerPool = {
         // 0064_runTask_执行任务逻辑
         async runTask(type) {
-            if (type === 'validate-proxy') {
-                return { ok: true, reason: 'connect_ok', latencyMs: 20 };
-            }
-            if (type === 'score-proxy') {
-                return { outcome: 'success', latencyMs: 20 };
+            if (type === 'battle-l1') {
+                return {
+                    stage: 'l1',
+                    outcome: 'success',
+                    latencyMs: 20,
+                    runs: [{ target: 'ipify', outcome: 'success', statusCode: 200, latencyMs: 20, reason: 'ok', details: {} }],
+                };
             }
             return { ok: true };
         },
@@ -553,7 +577,8 @@ test('processProxy should persist awards and retirement events', async () => {
     };
 
     const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T06:00:00.000Z') });
-    await engine.processProxy(freshProxy, 'src');
+    engine.started = true;
+    await engine.runBattleL1Cycle();
 
     const honors = h.db.getHonors(10);
     const retirements = h.db.getRetirements(10);

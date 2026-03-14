@@ -48,6 +48,7 @@ function outcomeLabel(outcome) {
     if (outcome === 'blocked') return 'blocked';
     if (outcome === 'timeout') return 'timeout';
     if (outcome === 'network_error') return 'networkError';
+    if (outcome === 'invalid_feedback') return 'invalidFeedback';
     return '未知';
 }
 
@@ -58,6 +59,29 @@ function mapEventTypeToChinese(eventType) {
     if (eventType === 'retirement') return '退伍';
     if (eventType === 'honor') return '授予荣誉';
     return '评分事件';
+}
+
+// 0208_pickValidationFailureOutcome_选择L0失败结果逻辑
+function pickValidationFailureOutcome(validation) {
+    const reason = String(validation?.reason || '').toLowerCase();
+    if (reason.includes('timeout')) {
+        return 'timeout';
+    }
+    if (reason.includes('blocked')) {
+        return 'blocked';
+    }
+    return 'network_error';
+}
+
+// 0209_buildBattleCounterUpdates_构建战场计数更新逻辑
+function buildBattleCounterUpdates(proxy, nowIso, outcome) {
+    const isSuccess = outcome === 'success';
+    return {
+        last_battle_checked_at: nowIso,
+        last_battle_outcome: outcome,
+        battle_success_count: (proxy.battle_success_count || 0) + (isSuccess ? 1 : 0),
+        battle_fail_count: (proxy.battle_fail_count || 0) + (isSuccess ? 0 : 1),
+    };
 }
 
 class ProxyHubEngine extends EventEmitter {
@@ -74,10 +98,19 @@ class ProxyHubEngine extends EventEmitter {
         this.sourceSyncTimer = null;
         this.stateReviewTimer = null;
         this.snapshotTimer = null;
+        this.battleL1Timer = null;
+        this.battleL2Timer = null;
 
         this.isSourceCycleRunning = false;
         this.isStateReviewRunning = false;
+        this.isBattleL1Running = false;
+        this.isBattleL2Running = false;
         this.threadPoolAlerting = false;
+    }
+
+    // 0210_isBattleEnabled_判断战场测试开关逻辑
+    isBattleEnabled() {
+        return this.config?.battle?.enabled === true;
     }
 
     // 0028_start_启动逻辑
@@ -90,6 +123,10 @@ class ProxyHubEngine extends EventEmitter {
 
         await this.runSourceCycle();
         await this.runStateReviewCycle();
+        if (this.isBattleEnabled()) {
+            await this.runBattleL1Cycle();
+            await this.runBattleL2Cycle();
+        }
         this.persistSnapshot();
 
         this.sourceSyncTimer = setInterval(() => {
@@ -100,6 +137,16 @@ class ProxyHubEngine extends EventEmitter {
             void this.runStateReviewCycle();
         }, this.config.scheduler.stateReviewMs);
 
+        if (this.isBattleEnabled()) {
+            this.battleL1Timer = setInterval(() => {
+                void this.runBattleL1Cycle();
+            }, this.config.battle.l1SyncMs);
+
+            this.battleL2Timer = setInterval(() => {
+                void this.runBattleL2Cycle();
+            }, this.config.battle.l2SyncMs);
+        }
+
         this.snapshotTimer = setInterval(() => {
             this.persistSnapshot();
         }, this.config.scheduler.snapshotPersistMs);
@@ -109,7 +156,9 @@ class ProxyHubEngine extends EventEmitter {
             stage: '调度',
             result: 'ProxyHub 已启动',
             reason: `抓源间隔 ${Math.round(this.config.scheduler.sourceSyncMs / 1000)} 秒`,
-            action: '调度循环启动',
+            action: this.isBattleEnabled()
+                ? `L1 ${Math.round(this.config.battle.l1SyncMs / 1000)} 秒, L2 ${Math.round(this.config.battle.l2SyncMs / 1000)} 秒`
+                : '调度循环启动',
         });
     }
 
@@ -127,6 +176,14 @@ class ProxyHubEngine extends EventEmitter {
         if (this.snapshotTimer) {
             clearInterval(this.snapshotTimer);
             this.snapshotTimer = null;
+        }
+        if (this.battleL1Timer) {
+            clearInterval(this.battleL1Timer);
+            this.battleL1Timer = null;
+        }
+        if (this.battleL2Timer) {
+            clearInterval(this.battleL2Timer);
+            this.battleL2Timer = null;
         }
     }
 
@@ -220,6 +277,86 @@ class ProxyHubEngine extends EventEmitter {
         });
     }
 
+    // 0211_applyCombatOutcome_应用评分结果逻辑
+    async applyCombatOutcome({ proxyId, sourceName, outcome, latencyMs, nowIso, stage, extraUpdates = {} }) {
+        const currentProxy = this.db.getProxyById(proxyId);
+        if (!currentProxy) {
+            return;
+        }
+
+        const combat = evaluateCombat({
+            proxy: currentProxy,
+            outcome,
+            latencyMs,
+            nowIso,
+            config: this.config,
+        });
+
+        this.db.updateProxyById(proxyId, {
+            ...combat.updates,
+            ...extraUpdates,
+            source: sourceName,
+            updated_at: nowIso,
+        });
+
+        const updatedProxy = this.db.getProxyById(proxyId);
+        const activeHonors = parseArrayJson(updatedProxy.honor_active_json);
+
+        for (const award of combat.awards) {
+            this.db.upsertHonor({
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                honor_type: award.type,
+                awarded_at: nowIso,
+                reason: award.reason,
+            });
+        }
+
+        this.db.refreshHonorActive(proxyId, activeHonors);
+
+        if (currentProxy.lifecycle !== 'retired' && updatedProxy.lifecycle === 'retired') {
+            this.db.insertRetirement({
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                retired_type: updatedProxy.retired_type || '未知',
+                reason: `系统自动判定：${updatedProxy.retired_type || '未知'}`,
+                retired_at: nowIso,
+            });
+        }
+
+        for (const event of combat.events) {
+            this.db.insertProxyEvent({
+                timestamp: nowIso,
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                event_type: event.event_type,
+                level: EVENT_LEVEL.INFO,
+                message: event.message,
+                details: event.details || {},
+            });
+
+            this.logger.write({
+                event: mapEventTypeToChinese(event.event_type),
+                proxyName: updatedProxy.display_name,
+                ipSource: sourceName,
+                stage,
+                result: event.message,
+                action: '状态已更新',
+                details: event.details,
+            });
+        }
+
+        this.logger.write({
+            event: '写数据库成功',
+            proxyName: updatedProxy.display_name,
+            ipSource: sourceName,
+            stage,
+            result: outcomeLabel(outcome),
+            reason: `${updatedProxy.rank}/${updatedProxy.lifecycle}`,
+            action: '提交本轮结果',
+        });
+    }
+
     // 0033_processProxy_处理代理逻辑
     async processProxy(proxy, sourceName) {
         const cycleStart = Date.now();
@@ -240,6 +377,16 @@ class ProxyHubEngine extends EventEmitter {
                 timeoutMs: this.config.validation.maxTimeoutMs,
             });
 
+            const nowIso = this.now().toISOString();
+            this.db.updateProxyById(proxy.id, {
+                last_validation_at: nowIso,
+                last_validation_ok: validation.ok ? 1 : 0,
+                last_validation_reason: validation.reason,
+                last_validation_latency_ms: validation.latencyMs || 0,
+                source: sourceName,
+                updated_at: nowIso,
+            });
+
             this.logger.write({
                 event: validation.ok ? '校验通过' : '校验淘汰',
                 proxyName: proxy.display_name,
@@ -248,93 +395,30 @@ class ProxyHubEngine extends EventEmitter {
                 result: validation.ok ? '通过' : '失败',
                 durationMs: validation.latencyMs,
                 reason: validation.reason,
-                action: validation.ok ? '进入评分' : '记录失败并评分',
+                action: validation.ok ? '等待战场测试' : '记录失败并评分',
             });
 
-            this.logger.write({
-                event: '开始评分',
-                proxyName: proxy.display_name,
-                ipSource: sourceName,
-                stage: '评分',
-                result: '进行中',
-                action: '计算战功与状态',
-            });
+            if (validation.ok) {
+                return;
+            }
 
-            const scoreResult = await this.workerPool.runTask('score-proxy', {
-                validation,
-                seed: `${proxy.unique_key}:${proxy.total_samples}`,
-            });
-
-            const nowIso = this.now().toISOString();
-            const combat = evaluateCombat({
-                proxy,
-                outcome: scoreResult.outcome,
-                latencyMs: scoreResult.latencyMs || validation.latencyMs || 0,
+            const l0Outcome = pickValidationFailureOutcome(validation);
+            await this.applyCombatOutcome({
+                proxyId: proxy.id,
+                sourceName,
+                outcome: l0Outcome,
+                latencyMs: validation.latencyMs || 0,
                 nowIso,
-                config: this.config,
+                stage: '评分(L0)',
             });
-
-            this.db.updateProxyById(proxy.id, {
-                ...combat.updates,
-                source: sourceName,
-                updated_at: nowIso,
-            });
-
-            const updatedProxy = this.db.getProxyById(proxy.id);
-            const activeHonors = parseArrayJson(updatedProxy.honor_active_json);
-
-            for (const award of combat.awards) {
-                this.db.upsertHonor({
-                    proxy_id: proxy.id,
-                    display_name: updatedProxy.display_name,
-                    honor_type: award.type,
-                    awarded_at: nowIso,
-                    reason: award.reason,
-                });
-            }
-
-            this.db.refreshHonorActive(proxy.id, activeHonors);
-
-            if (proxy.lifecycle !== 'retired' && updatedProxy.lifecycle === 'retired') {
-                this.db.insertRetirement({
-                    proxy_id: proxy.id,
-                    display_name: updatedProxy.display_name,
-                    retired_type: updatedProxy.retired_type || '未知',
-                    reason: `系统自动判定：${updatedProxy.retired_type || '未知'}`,
-                    retired_at: nowIso,
-                });
-            }
-
-            for (const event of combat.events) {
-                this.db.insertProxyEvent({
-                    timestamp: nowIso,
-                    proxy_id: proxy.id,
-                    display_name: updatedProxy.display_name,
-                    event_type: event.event_type,
-                    level: EVENT_LEVEL.INFO,
-                    message: event.message,
-                    details: event.details || {},
-                });
-
-                this.logger.write({
-                    event: mapEventTypeToChinese(event.event_type),
-                    proxyName: updatedProxy.display_name,
-                    ipSource: sourceName,
-                    stage: '评分',
-                    result: event.message,
-                    action: '状态已更新',
-                    details: event.details,
-                });
-            }
 
             this.logger.write({
                 event: '写数据库成功',
-                proxyName: updatedProxy.display_name,
+                proxyName: proxy.display_name,
                 ipSource: sourceName,
                 stage: '入库',
-                result: outcomeLabel(scoreResult.outcome),
+                result: outcomeLabel(l0Outcome),
                 durationMs: Date.now() - cycleStart,
-                reason: `${updatedProxy.rank}/${updatedProxy.lifecycle}`,
                 action: '提交本轮结果',
             });
         } catch (error) {
@@ -348,6 +432,151 @@ class ProxyHubEngine extends EventEmitter {
                 reason: error?.message || 'unknown',
                 action: '等待下轮重试',
             });
+        }
+    }
+
+    // 0212_runBattleL1Cycle_执行战场L1轮次逻辑
+    async runBattleL1Cycle() {
+        if (!this.started || !this.isBattleEnabled() || this.isBattleL1Running) {
+            return;
+        }
+
+        this.isBattleL1Running = true;
+        const sourceName = 'battle-l1';
+
+        try {
+            const candidates = this.db.listProxiesForBattleL1(
+                this.config.battle.maxBattleL1PerCycle,
+                this.config.battle.candidateQuota,
+            );
+            if (candidates.length === 0) {
+                return;
+            }
+
+            const concurrency = Math.max(2, Math.min(this.config.threadPool.workers, 10));
+            await runWithConcurrency(candidates, concurrency, async (proxy) => {
+                const result = await this.workerPool.runTask('battle-l1', {
+                    proxy: {
+                        ip: proxy.ip,
+                        port: proxy.port,
+                        protocol: proxy.protocol,
+                    },
+                    targets: this.config.battle.targets.l1,
+                    timeoutMs: this.config.battle.timeoutMs.l1,
+                    blockedStatusCodes: this.config.battle.blockedStatusCodes,
+                    blockSignals: this.config.battle.blockSignals,
+                });
+
+                const nowIso = this.now().toISOString();
+                for (const run of result.runs || []) {
+                    this.db.insertBattleTestRun({
+                        timestamp: nowIso,
+                        proxy_id: proxy.id,
+                        stage: 'l1',
+                        target: run.target,
+                        outcome: run.outcome,
+                        status_code: run.statusCode,
+                        latency_ms: run.latencyMs,
+                        reason: run.reason,
+                        details: run.details,
+                    });
+                }
+
+                const latest = this.db.getProxyById(proxy.id);
+                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome);
+                await this.applyCombatOutcome({
+                    proxyId: proxy.id,
+                    sourceName,
+                    outcome: result.outcome,
+                    latencyMs: result.latencyMs || 0,
+                    nowIso,
+                    stage: '评分(L1)',
+                    extraUpdates: battleUpdates,
+                });
+            });
+        } catch (error) {
+            this.logger.write({
+                event: '线程池告警',
+                stage: '战场测试L1',
+                result: '异常',
+                reason: error?.message || 'battle-l1-error',
+                action: '等待自动恢复',
+            });
+        } finally {
+            this.isBattleL1Running = false;
+        }
+    }
+
+    // 0213_runBattleL2Cycle_执行战场L2轮次逻辑
+    async runBattleL2Cycle() {
+        if (!this.started || !this.isBattleEnabled() || this.isBattleL2Running) {
+            return;
+        }
+
+        this.isBattleL2Running = true;
+        const sourceName = 'battle-l2';
+
+        try {
+            const candidates = this.db.listProxiesForBattleL2(
+                this.config.battle.maxBattleL2PerCycle,
+                this.config.battle.l2LookbackMinutes,
+            );
+            if (candidates.length === 0) {
+                return;
+            }
+
+            const concurrency = Math.max(1, Math.min(this.config.threadPool.workers, 6));
+            await runWithConcurrency(candidates, concurrency, async (proxy) => {
+                const result = await this.workerPool.runTask('battle-l2', {
+                    proxy: {
+                        ip: proxy.ip,
+                        port: proxy.port,
+                        protocol: proxy.protocol,
+                    },
+                    primaryTargets: this.config.battle.targets.l2Primary,
+                    fallbackTargets: this.config.battle.targets.l2Fallback,
+                    timeoutMs: this.config.battle.timeoutMs.l2,
+                    blockedStatusCodes: this.config.battle.blockedStatusCodes,
+                    blockSignals: this.config.battle.blockSignals,
+                });
+
+                const nowIso = this.now().toISOString();
+                for (const run of result.runs || []) {
+                    this.db.insertBattleTestRun({
+                        timestamp: nowIso,
+                        proxy_id: proxy.id,
+                        stage: 'l2',
+                        target: run.target,
+                        outcome: run.outcome,
+                        status_code: run.statusCode,
+                        latency_ms: run.latencyMs,
+                        reason: run.reason,
+                        details: run.details,
+                    });
+                }
+
+                const latest = this.db.getProxyById(proxy.id);
+                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome);
+                await this.applyCombatOutcome({
+                    proxyId: proxy.id,
+                    sourceName,
+                    outcome: result.outcome,
+                    latencyMs: result.latencyMs || 0,
+                    nowIso,
+                    stage: '评分(L2)',
+                    extraUpdates: battleUpdates,
+                });
+            });
+        } catch (error) {
+            this.logger.write({
+                event: '线程池告警',
+                stage: '战场测试L2',
+                result: '异常',
+                reason: error?.message || 'battle-l2-error',
+                action: '等待自动恢复',
+            });
+        } finally {
+            this.isBattleL2Running = false;
         }
     }
 
@@ -473,5 +702,7 @@ module.exports = {
     runWithConcurrency,
     outcomeLabel,
     mapEventTypeToChinese,
+    pickValidationFailureOutcome,
+    buildBattleCounterUpdates,
     ProxyHubEngine,
 };

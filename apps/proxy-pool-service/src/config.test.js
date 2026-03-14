@@ -10,6 +10,13 @@ test('config should expose required default values', () => {
     assert.equal(Array.isArray(config.validation.allowedProtocols), true);
     assert.equal(config.source.monosans.enabled, true);
     assert.equal(config.source.monosans.url.includes('proxies.json'), true);
+    assert.equal(config.battle.enabled, true);
+    assert.equal(config.battle.l1SyncMs, 300000);
+    assert.equal(config.battle.l2SyncMs, 1800000);
+    assert.equal(config.battle.maxBattleL1PerCycle, 60);
+    assert.equal(config.battle.maxBattleL2PerCycle, 20);
+    assert.equal(config.battle.candidateQuota, 0.15);
+    assert.equal(Array.isArray(config.battle.targets.l1), true);
 });
 
 test('config ranks should be ordered and complete', () => {
