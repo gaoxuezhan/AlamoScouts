@@ -23,4 +23,7 @@ test('config ranks should be ordered and complete', () => {
     const ranks = config.policy.ranks.map((item) => item.rank);
     assert.deepEqual(ranks, ['新兵', '列兵', '士官', '尉官', '王牌']);
     assert.equal(config.policy.promotionProtectHours, 6);
+    assert.equal(config.policy.valueModel.combatPointCap, 1200);
+    assert.equal(config.policy.valueModel.lifecycleScoreMap.retired, 8);
+    assert.equal(config.soak.durationHours, 10);
 });

@@ -39,10 +39,17 @@ function createConfig(port = 0) {
             demotion: { regularWindowSize: 50, regularBlockedRatio: 0.45, regularMinSamples: 3, severeWindowMinutes: 60, severeMinSamples: 3, severeBlockedRatio: 0.7, healthThreshold: 45, lowHealthRetireThreshold: 20 },
             retirement: { disciplineThreshold: 40, disciplineInvalidCount: 2, technicalMinSamples: 6, technicalSuccessRatio: 0.1, battleDamageBlockedRatio: 0.6, honorMinServiceHours: 500, honorMinSuccess: 800 },
             honors: { steelStreak: 3, riskyWarrior: 3, thousandService: 10 },
+            valueModel: {
+                combatPointCap: 1200,
+                honorActiveWeight: 30,
+                honorHistoryWeight: 10,
+                weights: { rank: 16, combat: 24, health: 16, discipline: 14, successRatio: 12, battleRatio: 10, honor: 8 },
+                lifecycleScoreMap: { active: 100, reserve: 72, candidate: 58, retired: 8 },
+            },
         },
         storage: { dbPath: 'unused.db', snapshotRetentionDays: 7 },
         ui: { refreshMs: 5000 },
-        soak: { durationHours: 24, summaryIntervalMs: 3600000 },
+        soak: { durationHours: 10, summaryIntervalMs: 3600000 },
     };
 }
 
@@ -59,6 +66,7 @@ function createStubs() {
         getProxyList: () => [{ id: 1 }],
         getEvents: () => [{ id: 2 }],
         getBattleTestRuns: () => [{ id: 6, stage: 'l1' }],
+        getValueBoard: () => [{ id: 7, ip_value_score: 88.8 }],
         getRankBoard: () => [{ rank: '新兵', count: 1 }],
         getHonors: () => [{ id: 3 }],
         getRetirements: () => [{ id: 4 }],
@@ -140,6 +148,9 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/list?limit=10&rank=%E5%88%97%E5%85%B5&lifecycle=active',
         '/v1/proxies/events?limit=0',
         '/v1/proxies/battle-tests?limit=1000',
+        '/v1/proxies/value-board?limit=20',
+        '/v1/proxies/value-board?limit=20&lifecycle=active',
+        '/v1/proxies/policy',
         '/v1/proxies/ranks/board',
         '/v1/proxies/honors?limit=1000',
         '/v1/proxies/retirements?limit=-1',
@@ -150,6 +161,32 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         const res = await fetch(baseUrl + p, { signal: AbortSignal.timeout(10000) });
         assert.equal(res.status, 200);
     }
+
+    const patchOk = await fetch(baseUrl + '/v1/proxies/policy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            promotionProtectHours: 4,
+            honors: { steelStreak: 2, riskyWarrior: 2, thousandService: 8 },
+        }),
+    });
+    assert.equal(patchOk.status, 200);
+
+    const patchInvalidBody = await fetch(baseUrl + '/v1/proxies/policy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify([]),
+    });
+    assert.equal(patchInvalidBody.status, 400);
+
+    const patchInvalidValue = await fetch(baseUrl + '/v1/proxies/policy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            retirement: { technicalSuccessRatio: 2 },
+        }),
+    });
+    assert.equal(patchInvalidValue.status, 400);
 
     const sseLogs = await fetch(baseUrl + '/api/runtime/logs/stream', {
         headers: { Accept: 'text/event-stream' },
@@ -175,6 +212,7 @@ test('server start should reject when listen emits error', async () => {
     const fakeApp = new EventEmitter();
     fakeApp.use = () => {};
     fakeApp.get = () => {};
+    fakeApp.post = () => {};
     fakeApp.listen = () => {
         const server = new EventEmitter();
         server.close = (cb) => cb();
@@ -191,6 +229,7 @@ test('server start should handle sync listen throw and engine async start failur
     const fakeAppThrow = new EventEmitter();
     fakeAppThrow.use = () => {};
     fakeAppThrow.get = () => {};
+    fakeAppThrow.post = () => {};
     fakeAppThrow.listen = () => {
         throw new Error('listen-throw');
     };

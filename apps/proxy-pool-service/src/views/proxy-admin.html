@@ -67,6 +67,7 @@
 
     <section class="card"><h2>荣誉墙</h2><div class="content"><table id="honorTable"></table></div></section>
     <section class="card"><h2>退伍台账</h2><div class="content"><table id="retireTable"></table></div></section>
+    <section class="card"><h2>IP价值榜（前30）</h2><div class="content"><table id="valueTable"></table></div></section>
     <section class="card"><h2>事件流</h2><div class="content"><table id="eventTable"></table></div></section>
     <section class="card"><h2>代理明细（前50）</h2><div class="content"><table id="proxyTable"></table></div></section>
   </main>
@@ -79,6 +80,7 @@ const poolStats = document.getElementById('poolStats');
 const distributions = document.getElementById('distributions');
 const honorTable = document.getElementById('honorTable');
 const retireTable = document.getElementById('retireTable');
+const valueTable = document.getElementById('valueTable');
 const eventTable = document.getElementById('eventTable');
 const proxyTable = document.getElementById('proxyTable');
 
@@ -133,11 +135,12 @@ async function loadAll() {
     fetch('/v1/proxies/ranks/board').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/honors?limit=30').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/retirements?limit=30').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/value-board?limit=30').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/events?limit=50').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/list?limit=50').then(function(r){ return r.json(); }),
   ]);
 
-  const pool = data[0], ranks = data[1], honors = data[2], retires = data[3], events = data[4], proxies = data[5];
+  const pool = data[0], ranks = data[1], honors = data[2], retires = data[3], values = data[4], events = data[5], proxies = data[6];
   renderPool(pool.poolStatus);
   renderDistributions({ sourceDistribution: pool.sourceDistribution, lifecycleDistribution: pool.lifecycleDistribution, rankBoard: ranks.items });
 
@@ -149,12 +152,16 @@ async function loadAll() {
     return '<tr><td class="mono">' + esc(x.retired_at) + '</td><td>' + esc(x.display_name) + '</td><td class="warn">' + esc(x.retired_type) + '</td><td>' + esc(x.reason || '-') + '</td></tr>';
   }));
 
+  renderSimpleTable(valueTable, ['代理', '价值分', '军衔', '生命周期', '成功率', '战场胜率', '激活荣誉'], (values.items || []).map(function(x){
+    return '<tr><td>' + esc(x.display_name) + '</td><td class="ok">' + fmt(Number(x.ip_value_score || 0).toFixed(2)) + '</td><td>' + esc(x.rank) + '</td><td>' + esc(x.lifecycle) + '</td><td>' + fmt(Number((x.success_ratio || 0) * 100).toFixed(1)) + '%</td><td>' + fmt(Number((x.battle_ratio || 0) * 100).toFixed(1)) + '%</td><td>' + esc((x.honor_active || []).join(', ') || '-') + '</td></tr>';
+  }));
+
   renderSimpleTable(eventTable, ['时间', '类型', '代理', '消息'], (events.items || []).map(function(x){
     return '<tr><td class="mono">' + esc(x.timestamp) + '</td><td>' + esc(x.event_type) + '</td><td>' + esc(x.display_name || '-') + '</td><td>' + esc(x.message) + '</td></tr>';
   }));
 
-  renderSimpleTable(proxyTable, ['昵称', '地址', '来源', '生命周期', '军衔', '战功', '健康', '纪律', '样本'], (proxies.items || []).map(function(x){
-    return '<tr><td>' + esc(x.display_name) + '</td><td class="mono">' + esc(x.ip + ':' + x.port + '/' + x.protocol) + '</td><td>' + esc(x.source) + '</td><td>' + esc(x.lifecycle) + '</td><td>' + esc(x.rank) + '</td><td>' + fmt(x.combat_points) + '</td><td>' + fmt(x.health_score) + '</td><td>' + fmt(x.discipline_score) + '</td><td>' + fmt(x.total_samples) + '</td></tr>';
+  renderSimpleTable(proxyTable, ['昵称', '地址', '来源', '生命周期', '军衔', '价值分', '战功', '健康', '纪律', '样本'], (proxies.items || []).map(function(x){
+    return '<tr><td>' + esc(x.display_name) + '</td><td class="mono">' + esc(x.ip + ':' + x.port + '/' + x.protocol) + '</td><td>' + esc(x.source) + '</td><td>' + esc(x.lifecycle) + '</td><td>' + esc(x.rank) + '</td><td class="ok">' + fmt(Number(x.ip_value_score || 0).toFixed(2)) + '</td><td>' + fmt(x.combat_points) + '</td><td>' + fmt(x.health_score) + '</td><td>' + fmt(x.discipline_score) + '</td><td>' + fmt(x.total_samples) + '</td></tr>';
   }));
 }
 

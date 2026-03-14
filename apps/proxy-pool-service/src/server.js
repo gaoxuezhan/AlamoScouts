@@ -7,6 +7,7 @@ const { WorkerPool } = require('./worker-pool');
 const { ProxyHubEngine } = require('./engine');
 const { renderProxyAdminPage } = require('./views/proxy-admin');
 const { renderRuntimeLogsPage } = require('./views/runtime-logs');
+const { normalizePolicyPatch, applyPolicyPatch, validatePolicy } = require('./policy');
 
 // 0091_sendSse_发送SSE逻辑
 function sendSse(res, payload) {
@@ -119,6 +120,55 @@ function createRuntime(options = {}) {
         const limit = normalizeLimit(req.query.limit, 200, 1, 500);
         res.json({
             items: db.getBattleTestRuns(limit),
+        });
+    });
+
+    app.get('/v1/proxies/value-board', (req, res) => {
+        const limit = normalizeLimit(req.query.limit, 100, 1, 500);
+        const lifecycle = req.query.lifecycle ? String(req.query.lifecycle) : undefined;
+        res.json({
+            items: db.getValueBoard(limit, lifecycle),
+        });
+    });
+
+    app.get('/v1/proxies/policy', (_req, res) => {
+        res.json({
+            policy: config.policy,
+        });
+    });
+
+    app.post('/v1/proxies/policy', (req, res) => {
+        const normalized = normalizePolicyPatch(req.body);
+        if (!normalized.ok) {
+            res.status(400).json({
+                ok: false,
+                error: normalized.error,
+            });
+            return;
+        }
+
+        const nextPolicy = applyPolicyPatch(config.policy, normalized.patch);
+        const validation = validatePolicy(nextPolicy);
+        if (!validation.ok) {
+            res.status(400).json({
+                ok: false,
+                error: validation.error,
+            });
+            return;
+        }
+
+        config.policy = nextPolicy;
+        logger.write({
+            event: '策略调整',
+            stage: '策略',
+            result: '策略已更新',
+            action: '即时生效',
+            details: normalized.patch,
+        });
+
+        res.json({
+            ok: true,
+            policy: config.policy,
         });
     });
 

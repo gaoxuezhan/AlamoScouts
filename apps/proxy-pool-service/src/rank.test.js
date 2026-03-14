@@ -107,6 +107,38 @@ test('success should use fixed score mapping', () => {
     assert.equal(result.updates.combat_points, 6);
 });
 
+test('success should apply latency bonus branches', () => {
+    const cfg = baseConfig();
+    cfg.policy.scoring.successFastBonusLt1200 = 2;
+    cfg.policy.scoring.successFastBonusLt2500 = 1;
+
+    const fast = evaluateCombat({
+        proxy: baseProxy(),
+        outcome: 'success',
+        latencyMs: 900,
+        nowIso: new Date().toISOString(),
+        config: cfg,
+    });
+    const medium = evaluateCombat({
+        proxy: baseProxy(),
+        outcome: 'success',
+        latencyMs: 1800,
+        nowIso: new Date().toISOString(),
+        config: cfg,
+    });
+    const slow = evaluateCombat({
+        proxy: baseProxy(),
+        outcome: 'success',
+        latencyMs: 3000,
+        nowIso: new Date().toISOString(),
+        config: cfg,
+    });
+
+    assert.equal(fast.updates.combat_points, 8);
+    assert.equal(medium.updates.combat_points, 7);
+    assert.equal(slow.updates.combat_points, 6);
+});
+
 test('should promote when hours, points and samples all pass thresholds', () => {
     const cfg = baseConfig();
     const proxy = {
@@ -472,6 +504,8 @@ test('evaluateCombat should handle unknown rank/lifecycle and null scores', () =
     assert.equal(result.updates.rank, '未知军衔');
     assert.equal(result.updates.lifecycle, 'candidate');
     assert.equal(result.updates.discipline_score <= 100, true);
+    assert.equal(typeof result.updates.ip_value_score, 'number');
+    assert.equal(typeof result.updates.ip_value_breakdown_json, 'string');
 });
 
 test('safeParseJson should return parsed object when fallback is object', () => {
@@ -497,4 +531,24 @@ test('evaluateCombat should fallback rank when proxy rank is missing', () => {
     });
 
     assert.equal(result.updates.rank === '新兵' || result.updates.rank === '列兵', true);
+});
+
+test('state transition updates should include value score fields', () => {
+    const cfg = baseConfig();
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'reserve',
+        health_score: 70,
+        recent_window_json: JSON.stringify([
+            { t: new Date().toISOString(), o: 'success' },
+            { t: new Date().toISOString(), o: 'success' },
+        ]),
+    };
+    const result = evaluateStateTransition({
+        proxy,
+        nowIso: new Date().toISOString(),
+        config: cfg,
+    });
+    assert.equal(typeof result.updates.ip_value_score, 'number');
+    assert.equal(typeof result.updates.ip_value_breakdown_json, 'string');
 });

@@ -18,6 +18,17 @@ function parseJsonArray(raw) {
     }
 }
 
+// 0196_parseJsonObject_解析JSON对象逻辑
+function parseJsonObject(raw) {
+    try {
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
 class ProxyHubDb {
     // 0001_constructor_初始化实例逻辑
     constructor(config) {
@@ -70,6 +81,8 @@ class ProxyHubDb {
                 last_battle_outcome TEXT,
                 battle_success_count INTEGER NOT NULL DEFAULT 0,
                 battle_fail_count INTEGER NOT NULL DEFAULT 0,
+                ip_value_score REAL NOT NULL DEFAULT 0,
+                ip_value_breakdown_json TEXT NOT NULL DEFAULT '{}',
                 retired_type TEXT,
                 promotion_protect_until TEXT,
                 recent_window_json TEXT NOT NULL DEFAULT '[]',
@@ -244,6 +257,8 @@ class ProxyHubDb {
             { name: 'last_battle_outcome', sql: 'TEXT' },
             { name: 'battle_success_count', sql: 'INTEGER NOT NULL DEFAULT 0' },
             { name: 'battle_fail_count', sql: 'INTEGER NOT NULL DEFAULT 0' },
+            { name: 'ip_value_score', sql: 'REAL NOT NULL DEFAULT 0' },
+            { name: 'ip_value_breakdown_json', sql: "TEXT NOT NULL DEFAULT '{}'" },
         ];
 
         for (const column of requiredColumns) {
@@ -578,7 +593,8 @@ class ProxyHubDb {
                 success_count, block_count, timeout_count, network_error_count,
                 total_samples, retired_type, is_applied, updated_at, last_checked_at,
                 last_validation_at, last_validation_ok, last_validation_reason, last_validation_latency_ms,
-                last_battle_checked_at, last_battle_outcome, battle_success_count, battle_fail_count
+                last_battle_checked_at, last_battle_outcome, battle_success_count, battle_fail_count,
+                ip_value_score, ip_value_breakdown_json
             FROM proxies
             ${where}
             ORDER BY updated_at DESC
@@ -591,7 +607,8 @@ class ProxyHubDb {
         return this.db.prepare(`
             SELECT rank, COUNT(*) AS count,
                 ROUND(AVG(health_score), 2) AS avgHealth,
-                ROUND(AVG(combat_points), 2) AS avgCombat
+                ROUND(AVG(combat_points), 2) AS avgCombat,
+                ROUND(AVG(ip_value_score), 2) AS avgValue
             FROM proxies
             GROUP BY rank
             ORDER BY CASE rank
@@ -602,6 +619,45 @@ class ProxyHubDb {
                 WHEN '王牌' THEN 5
                 ELSE 6 END
         `).all();
+    }
+
+    // 0197_getValueBoard_获取价值榜逻辑
+    getValueBoard(limit = 100, lifecycle) {
+        const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+        const clauses = [];
+        const params = { limit: safeLimit };
+        if (lifecycle) {
+            clauses.push('lifecycle = @lifecycle');
+            params.lifecycle = String(lifecycle);
+        }
+
+        const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+        const rows = this.db.prepare(`
+            SELECT id, display_name, ip, port, protocol, source, lifecycle, rank,
+                ip_value_score, ip_value_breakdown_json,
+                combat_points, health_score, discipline_score,
+                success_count, total_samples, battle_success_count, battle_fail_count,
+                honor_active_json, retired_type, updated_at
+            FROM proxies
+            ${where}
+            ORDER BY ip_value_score DESC, combat_points DESC, updated_at DESC
+            LIMIT @limit
+        `).all(params);
+
+        return rows.map((row) => {
+            const battleTotal = (row.battle_success_count || 0) + (row.battle_fail_count || 0);
+            return {
+                ...row,
+                ip_value_breakdown: parseJsonObject(row.ip_value_breakdown_json),
+                honor_active: parseJsonArray(row.honor_active_json),
+                success_ratio: row.total_samples > 0
+                    ? Number((row.success_count / row.total_samples).toFixed(4))
+                    : 0,
+                battle_ratio: battleTotal > 0
+                    ? Number((row.battle_success_count / battleTotal).toFixed(4))
+                    : 0,
+            };
+        });
     }
 
     // 0188_getHonors_获取荣誉逻辑

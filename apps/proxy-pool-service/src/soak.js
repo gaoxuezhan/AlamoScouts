@@ -24,6 +24,7 @@ function createSoakRuntime(options = {}) {
     const durationHours = Number(process.env.SOAK_HOURS || config.soak.durationHours);
     const pollMs = Number(process.env.SOAK_POLL_MS || 30_000);
     const summaryMs = Number(process.env.SOAK_SUMMARY_MS || config.soak.summaryIntervalMs);
+    const policyActionsFile = String(process.env.SOAK_POLICY_ACTIONS_FILE || '').trim();
 
     const state = {
         child: null,
@@ -37,6 +38,12 @@ function createSoakRuntime(options = {}) {
         healthOkSamples: 0,
         startedBySoak: false,
         lastPool: null,
+        lastValueBoard: [],
+        policyActions: [],
+        policyActionsPlanned: 0,
+        policyActionsApplied: 0,
+        policyActionFailures: 0,
+        nextPolicyActionIndex: 0,
     };
 
     // 0118_appendTimeline_执行appendTimeline相关逻辑
@@ -54,6 +61,159 @@ function createSoakRuntime(options = {}) {
             throw new Error(`http-${res.status}`);
         }
         return res.json();
+    }
+
+    // 0131_httpPostJson_提交JSON逻辑
+    async function httpPostJson(url, payload) {
+        const res = await fetchImpl(url, {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) {
+            throw new Error(`http-${res.status}`);
+        }
+        return res.json();
+    }
+
+    // 0132_defaultPolicyActions_默认策略动作逻辑
+    function defaultPolicyActions() {
+        if (durationHours < 10) {
+            return [];
+        }
+
+        const policy = config.policy || {};
+        return [
+            {
+                atMinute: 60,
+                note: '调整晋升保护窗口',
+                patch: {
+                    promotionProtectHours: Math.max(1, Number(policy.promotionProtectHours || 6) - 2),
+                },
+            },
+            {
+                atMinute: 180,
+                note: '提高技术退伍门槛',
+                patch: {
+                    retirement: {
+                        technicalSuccessRatio: Number((Number(policy.retirement?.technicalSuccessRatio || 0.1) + 0.02).toFixed(2)),
+                    },
+                },
+            },
+            {
+                atMinute: 300,
+                note: '提高纪律退伍阈值',
+                patch: {
+                    retirement: {
+                        disciplineThreshold: Math.min(90, Number(policy.retirement?.disciplineThreshold || 40) + 3),
+                    },
+                },
+            },
+            {
+                atMinute: 420,
+                note: '下调荣誉触发阈值',
+                patch: {
+                    honors: {
+                        steelStreak: Math.max(5, Number(policy.honors?.steelStreak || 30) - 5),
+                        riskyWarrior: Math.max(3, Number(policy.honors?.riskyWarrior || 20) - 3),
+                        thousandService: Math.max(100, Number(policy.honors?.thousandService || 1000) - 100),
+                    },
+                },
+            },
+            {
+                atMinute: 540,
+                note: '加强价值评分中的实战权重',
+                patch: {
+                    valueModel: {
+                        weights: {
+                            combat: 26,
+                            successRatio: 14,
+                            battleRatio: 12,
+                            honor: 9,
+                        },
+                    },
+                },
+            },
+        ];
+    }
+
+    // 0133_normalizePolicyActions_规范化策略动作逻辑
+    function normalizePolicyActions(rawActions) {
+        if (!Array.isArray(rawActions)) return [];
+        return rawActions
+            .map((item) => {
+                const atMinute = Number(item?.atMinute);
+                if (!Number.isFinite(atMinute) || atMinute < 0 || typeof item?.patch !== 'object' || Array.isArray(item.patch) || !item.patch) {
+                    return null;
+                }
+                return {
+                    atMinute,
+                    note: String(item.note || '策略调整'),
+                    patch: item.patch,
+                };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.atMinute - b.atMinute);
+    }
+
+    // 0134_loadPolicyActions_加载策略动作逻辑
+    function loadPolicyActions() {
+        let actions = [];
+
+        if (policyActionsFile) {
+            try {
+                const raw = fsImpl.readFileSync(policyActionsFile, 'utf8');
+                actions = normalizePolicyActions(JSON.parse(raw));
+                appendTimeline('policy_actions_loaded', {
+                    source: policyActionsFile,
+                    count: actions.length,
+                });
+            } catch (error) {
+                appendTimeline('policy_actions_load_failed', {
+                    source: policyActionsFile,
+                    reason: error?.message || 'load-policy-actions-failed',
+                });
+            }
+        } else {
+            actions = normalizePolicyActions(defaultPolicyActions());
+        }
+
+        state.policyActions = actions;
+        state.policyActionsPlanned = actions.length;
+        state.nextPolicyActionIndex = 0;
+        return actions;
+    }
+
+    // 0135_applyPendingPolicyActions_应用待执行策略动作逻辑
+    async function applyPendingPolicyActions(elapsedMs) {
+        const elapsedMinutes = elapsedMs / 60_000;
+        while (state.nextPolicyActionIndex < state.policyActions.length) {
+            const action = state.policyActions[state.nextPolicyActionIndex];
+            if (elapsedMinutes < action.atMinute) {
+                break;
+            }
+
+            try {
+                await httpPostJson(`${baseUrl}/v1/proxies/policy`, action.patch);
+                state.policyActionsApplied += 1;
+                appendTimeline('policy_action_applied', {
+                    atMinute: action.atMinute,
+                    note: action.note,
+                });
+            } catch (error) {
+                state.policyActionFailures += 1;
+                appendTimeline('policy_action_failed', {
+                    atMinute: action.atMinute,
+                    note: action.note,
+                    reason: error?.message || 'policy-action-failed',
+                });
+            }
+
+            state.nextPolicyActionIndex += 1;
+        }
     }
 
     // 0120_ensureService_确保逻辑
@@ -135,10 +295,10 @@ function createSoakRuntime(options = {}) {
     }
 
     // 0122_writeFinalReport_写入逻辑
-    function writeFinalReport(endAt) {
+    function writeFinalReport(endAt, valueBoard = []) {
         const uptimeRatio = state.samples > 0 ? (state.healthOkSamples / state.samples) * 100 : 0;
         const lines = [
-            '# ProxyHub V1 24h Soak 报告',
+            `# ProxyHub V1 ${durationHours}h Soak 报告`,
             '',
             `- 启动时间: ${startedAt.toISOString()}`,
             `- 结束时间: ${endAt.toISOString()}`,
@@ -153,6 +313,14 @@ function createSoakRuntime(options = {}) {
             `- 最大忙碌线程: ${state.maxBusy}`,
             `- 最大失败任务计数: ${state.maxFailedTasks}`,
             `- 最后线程池状态: ${state.lastPool ? JSON.stringify(state.lastPool) : 'N/A'}`,
+            `- 策略动作计划数: ${state.policyActionsPlanned}`,
+            `- 策略动作成功: ${state.policyActionsApplied}`,
+            `- 策略动作失败: ${state.policyActionFailures}`,
+            '',
+            '## IP价值榜 Top 10',
+            ...(Array.isArray(valueBoard) && valueBoard.length > 0
+                ? valueBoard.map((item, index) => `- ${index + 1}. ${item.display_name} | 价值分 ${Number(item.ip_value_score || 0).toFixed(2)} | 军衔 ${item.rank || '-'} | 生命周期 ${item.lifecycle || '-'}`)
+                : ['- 无可用样本']),
             '',
             '## 异常修复时间线',
             `- 详见 ${timelineFile}`,
@@ -168,19 +336,23 @@ function createSoakRuntime(options = {}) {
 
     // 0123_runSoak_执行逻辑
     async function runSoak() {
+        loadPolicyActions();
         appendTimeline('soak_start', {
             durationHours,
             pollMs,
             summaryMs,
             baseUrl,
+            policyActionsPlanned: state.policyActionsPlanned,
         });
 
         await ensureService();
 
+        const loopStartedMs = Date.now();
         const endTime = Date.now() + durationHours * 3_600_000;
         let nextSummary = Date.now() + summaryMs;
 
         while (Date.now() < endTime) {
+            await applyPendingPolicyActions(Date.now() - loopStartedMs);
             await pollOnce();
 
             if (Date.now() >= nextSummary) {
@@ -199,8 +371,20 @@ function createSoakRuntime(options = {}) {
             await new Promise((r) => setTimeout(r, pollMs));
         }
 
+        await applyPendingPolicyActions(Date.now() - loopStartedMs + 60_000);
+        let valueBoard = [];
+        try {
+            const valuePayload = await httpGetJson(`${baseUrl}/v1/proxies/value-board?limit=10`);
+            valueBoard = Array.isArray(valuePayload?.items) ? valuePayload.items : [];
+        } catch (error) {
+            appendTimeline('value_board_fetch_failed', {
+                reason: error?.message || 'value-board-fetch-failed',
+            });
+        }
+        state.lastValueBoard = valueBoard;
+
         const endAt = now();
-        writeFinalReport(endAt);
+        writeFinalReport(endAt, valueBoard);
         appendTimeline('soak_end', {
             reportFile,
             timelineFile,
@@ -246,6 +430,10 @@ function createSoakRuntime(options = {}) {
         summaryMs,
         appendTimeline,
         httpGetJson,
+        httpPostJson,
+        normalizePolicyActions,
+        loadPolicyActions,
+        applyPendingPolicyActions,
         ensureService,
         pollOnce,
         writeFinalReport,

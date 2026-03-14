@@ -1,4 +1,5 @@
-﻿const { RANKS, RETIREMENT_TYPES, HONOR_TYPES } = require('./constants');
+const { RANKS, RETIREMENT_TYPES, HONOR_TYPES } = require('./constants');
+const { computeProxyValue } = require('./value-model');
 
 // 0081_clamp_限制逻辑
 function clamp(value, min, max) {
@@ -51,6 +52,13 @@ function scoreDelta(outcome, latencyMs, scoring) {
     let delta = 0;
     if (outcome === 'success') {
         delta += scoring.success;
+        if (Number.isFinite(latencyMs) && latencyMs > 0) {
+            if (latencyMs < 1200) {
+                delta += scoring.successFastBonusLt1200 || 0;
+            } else if (latencyMs < 2500) {
+                delta += scoring.successFastBonusLt2500 || 0;
+            }
+        }
     } else if (outcome === 'blocked') {
         delta += scoring.blocked;
     } else if (outcome === 'timeout') {
@@ -289,6 +297,9 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     updates.recent_window_json = JSON.stringify(trimmedWindow);
     updates.honor_history_json = JSON.stringify(honorHistory);
     updates.honor_active_json = JSON.stringify(activeHonors);
+    const valuation = computeProxyValue({ ...proxy, ...updates }, policy);
+    updates.ip_value_score = valuation.score;
+    updates.ip_value_breakdown_json = JSON.stringify(valuation.breakdown);
     updates.is_applied = 1;
 
     return {
@@ -327,10 +338,21 @@ function evaluateStateTransition({ proxy, nowIso, config }) {
         }
     }
 
+    const valuation = computeProxyValue(
+        {
+            ...proxy,
+            lifecycle,
+            retired_type: retiredType,
+        },
+        config.policy,
+    );
+
     return {
         updates: {
             lifecycle,
             retired_type: retiredType,
+            ip_value_score: valuation.score,
+            ip_value_breakdown_json: JSON.stringify(valuation.breakdown),
             updated_at: nowIso,
         },
         change,
