@@ -397,3 +397,95 @@ test('snapshot retention should cleanup by timestamp when retentionDays is posit
 
     cleanup(h);
 });
+
+test('db branch helpers should cover migration and battle edge branches', () => {
+    const h = createDb();
+
+    // parseJsonArray catch path
+    h.db.insertPoolSnapshot({
+        timestamp: new Date().toISOString(),
+        workers_total: 1,
+        workers_busy: 0,
+        queue_size: 0,
+        completed_tasks: 0,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        source_distribution: [],
+        rank_distribution: [],
+        lifecycle_distribution: [],
+    });
+    h.db.db.prepare(`
+        UPDATE pool_snapshots
+        SET source_distribution_json = '{bad',
+            rank_distribution_json = '{bad',
+            lifecycle_distribution_json = '{bad'
+        WHERE id = (SELECT id FROM pool_snapshots ORDER BY id DESC LIMIT 1)
+    `).run();
+    const latest = h.db.getLatestSnapshot();
+    assert.deepEqual(latest.source_distribution, []);
+    assert.deepEqual(latest.rank_distribution, []);
+    assert.deepEqual(latest.lifecycle_distribution, []);
+    h.db.db.prepare(`
+        UPDATE pool_snapshots
+        SET source_distribution_json = '{}'
+        WHERE id = (SELECT id FROM pool_snapshots ORDER BY id DESC LIMIT 1)
+    `).run();
+    const latestObj = h.db.getLatestSnapshot();
+    assert.deepEqual(latestObj.source_distribution, []);
+
+    // safeLimit=0 guard branches
+    assert.deepEqual(h.db.listProxiesForBattleL1(0, 0.5), []);
+    assert.deepEqual(h.db.listProxiesForBattleL2(0, 10), []);
+    assert.deepEqual(h.db.listProxiesForBattleL1(3, 'not-a-number'), []);
+
+    // merged.length === 0 branch in L1 filler query
+    assert.deepEqual(h.db.listProxiesForBattleL1(3, 0.2), []);
+
+    // insertBattleTestRun fallbacks for nullable numeric fields
+    h.db.upsertSourceBatch(
+        [{ ip: '8.8.8.8', port: 8080, protocol: 'http' }],
+        () => '覆盖-边界-01',
+        'src',
+        'batch',
+        new Date().toISOString(),
+    );
+    const proxy = h.db.getProxyByKey('8.8.8.8:8080:http');
+    h.db.insertBattleTestRun({
+        timestamp: new Date().toISOString(),
+        proxy_id: proxy.id,
+        stage: 'l1',
+        target: 'x',
+        outcome: 'network_error',
+        status_code: Number.NaN,
+        latency_ms: Number.NaN,
+        details: null,
+    });
+    const runs = h.db.getBattleTestRuns(5);
+    assert.equal(runs[0].status_code, null);
+    assert.equal(runs[0].latency_ms, null);
+
+    cleanup(h);
+});
+
+test('ensureProxyColumns should add missing columns in legacy schema', () => {
+    const execCalls = [];
+    const fake = {
+        db: {
+            prepare(sql) {
+                assert.equal(sql, 'PRAGMA table_info(proxies)');
+                return {
+                    all() {
+                        return [{ name: 'id' }, { name: 'source' }];
+                    },
+                };
+            },
+            exec(sql) {
+                execCalls.push(sql);
+            },
+        },
+    };
+
+    ProxyHubDb.prototype.ensureProxyColumns.call(fake);
+    assert.equal(execCalls.length > 0, true);
+    assert.equal(execCalls.every((sql) => sql.includes('ALTER TABLE proxies ADD COLUMN')), true);
+});

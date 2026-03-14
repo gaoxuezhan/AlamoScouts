@@ -18,6 +18,7 @@ const {
     extractIpFromPayload,
     hasBlockSignal,
     buildProxyUrl,
+    createRequestAgent,
     classifyRequestError,
     requestThroughProxy,
     runBattleL1Task,
@@ -43,6 +44,7 @@ test('normalizeProxyPayload should deduplicate and filter invalid protocols', ()
     const normalized = normalizeProxyPayload([
         { ip: '1.1.1.1', port: '80', protocols: ['HTTP', 'https'] },
         { host: '1.1.1.1', port: 80, protocol: 'http' },
+        { ip: '1.1.1.2', port: 81 },
         { ip: '2.2.2.2', port: 0, protocol: 'http' },
         { ip: '', port: 8080, protocol: 'http' },
         { ip: '3.3.3.3', port: 1080, protocol: 'socks5' },
@@ -125,6 +127,15 @@ test('checkTcpConnectivity should resolve connect/timeout/error branches', async
     socketNoCode.emit('error', {});
     const r4 = await p4;
     assert.equal(r4.reason, 'network_error');
+
+    const socketFinished = createFakeSocket();
+    const p5 = checkTcpConnectivity('a', 1, 10, {
+        createConnection: () => socketFinished,
+    });
+    socketFinished.emit('connect');
+    socketFinished.emit('error', { code: 'ECONNRESET' });
+    const r5 = await p5;
+    assert.equal(r5.ok, true);
 });
 
 test('validateProxyTask should call connectivity helper path', async () => {
@@ -135,6 +146,14 @@ test('validateProxyTask should call connectivity helper path', async () => {
     socket.emit('connect');
     const result = await promise;
     assert.equal(result.ok, true);
+
+    const socketDefaultTimeout = createFakeSocket();
+    const promiseDefault = validateProxyTask({ ip: '1.1.1.1', port: 80 }, {
+        createConnection: () => socketDefaultTimeout,
+    });
+    socketDefaultTimeout.emit('connect');
+    const defaultResult = await promiseDefault;
+    assert.equal(defaultResult.ok, true);
 });
 
 test('seededRandom should be deterministic', () => {
@@ -160,26 +179,73 @@ test('scoreProxyTask should become deterministic by validation or explicit outco
         outcome: 'blocked',
         latencyMs: 11,
     });
+    assert.deepEqual(scoreProxyTask({ outcome: 'success', validation: { latencyMs: 4 } }), {
+        outcome: 'success',
+        latencyMs: 4,
+    });
+    assert.deepEqual(scoreProxyTask({}), {
+        outcome: 'network_error',
+        latencyMs: 0,
+    });
+    assert.deepEqual(scoreProxyTask({ validation: { ok: true }, latencyMs: 6 }), {
+        outcome: 'success',
+        latencyMs: 6,
+    });
+    assert.equal(normalizeValidationOutcome({ ok: false }), 'network_error');
 });
 
 test('utility helpers should work', () => {
     assert.deepEqual(safeParseJson('{bad'), null);
+    assert.equal(extractIpFromPayload(null), null);
     assert.equal(extractIpFromPayload({ ip: '1.1.1.1' }), '1.1.1.1');
     assert.equal(extractIpFromPayload({ origin: '2.2.2.2, 3.3.3.3' }), '2.2.2.2');
+    assert.equal(extractIpFromPayload({ origin: ',3.3.3.3' }), null);
+    assert.equal(extractIpFromPayload({ origin: '   ' }), null);
     assert.equal(extractIpFromPayload({}), null);
 
     assert.equal(hasBlockSignal('Access denied please verify', ['captcha', 'access denied']), true);
+    assert.equal(hasBlockSignal('Access denied please verify'), false);
     assert.equal(hasBlockSignal('hello world', ['captcha']), false);
 
     assert.equal(buildProxyUrl({ protocol: 'http', ip: '1.1.1.1', port: 80 }), 'http://1.1.1.1:80');
+    assert.equal(buildProxyUrl({ ip: '1.1.1.1', port: 80 }), 'http://1.1.1.1:80');
 
     assert.deepEqual(classifyRequestError({ code: 'ETIMEDOUT' }), { outcome: 'timeout', reason: 'ETIMEDOUT' });
     assert.equal(classifyRequestError({ code: 'ECONNRESET' }).outcome, 'network_error');
+    assert.deepEqual(classifyRequestError({}), { outcome: 'network_error', reason: 'network_error' });
 
     assert.equal(isL2ContentValid('ly.com 航班列表'), true);
+    assert.equal(isL2ContentValid(), false);
     assert.equal(isL2ContentValid('random text'), false);
     assert.equal(isFallbackContentValid('x'.repeat(21)), true);
+    assert.equal(isFallbackContentValid(), false);
     assert.equal(isFallbackContentValid('short'), false);
+});
+
+test('createRequestAgent should choose socks and https agent classes', () => {
+    class FakeSocks {
+        constructor(url) {
+            this.url = url;
+            this.kind = 'socks';
+        }
+    }
+    class FakeHttps {
+        constructor(url) {
+            this.url = url;
+            this.kind = 'https';
+        }
+    }
+
+    const socks = createRequestAgent({ protocol: 'socks5', ip: '1.1.1.1', port: 1080 }, { SocksProxyAgentClass: FakeSocks });
+    const httpsAgent = createRequestAgent({ protocol: 'http', ip: '1.1.1.1', port: 8080 }, { HttpsProxyAgentClass: FakeHttps });
+    const httpsDefaultProtocol = createRequestAgent({ ip: '1.1.1.1', port: 8080 }, { HttpsProxyAgentClass: FakeHttps });
+    const socksFallback = createRequestAgent({ protocol: 'socks5', ip: '1.1.1.1', port: 1080 });
+    assert.equal(socks.kind, 'socks');
+    assert.equal(socks.url, 'socks5://1.1.1.1:1080');
+    assert.equal(httpsAgent.kind, 'https');
+    assert.equal(httpsAgent.url, 'http://1.1.1.1:8080');
+    assert.equal(httpsDefaultProtocol.kind, 'https');
+    assert.equal(socksFallback != null, true);
 });
 
 function createFakeRequestLib(steps) {
@@ -254,6 +320,17 @@ test('requestThroughProxy should return success and error branches', async () =>
     });
     assert.equal(errResult.ok, false);
     assert.equal(errResult.outcome, 'network_error');
+
+    const statusFallback = await requestThroughProxy({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targetUrl: 'https://api.ipify.org?format=json',
+        timeoutMs: 50,
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'response', body: '{"ip":"1.1.1.1"}' },
+        ]),
+    });
+    assert.equal(statusFallback.statusCode, 0);
 });
 
 test('battle L1 task should classify outcomes and succeed when one target succeeds', async () => {
@@ -288,6 +365,48 @@ test('battle L1 task should classify outcomes and succeed when one target succee
         ]),
     });
     assert.equal(blocked.outcome, 'blocked');
+
+    const timeout = await runBattleL1Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://x.test' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([{ type: 'timeout' }]),
+    });
+    assert.equal(timeout.outcome, 'timeout');
+    assert.equal(timeout.reason, 'all_targets_failed');
+
+    const invalidBody = await runBattleL1Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://x.test' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([{ type: 'response', statusCode: 200, body: '{"x":1}' }]),
+    });
+    assert.equal(invalidBody.outcome, 'invalid_feedback');
+
+    const noTargets = await runBattleL1Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: null,
+        timeoutMs: 50,
+    }, {
+        httpsImpl: createFakeRequestLib([]),
+    });
+    assert.equal(noTargets.outcome, 'network_error');
+    assert.equal(noTargets.latencyMs, 0);
+
+    const noNameSuccess = await runBattleL1Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://x.test' }],
+        timeoutMs: 50,
+    }, {
+        httpsImpl: createFakeRequestLib([{ type: 'response', statusCode: 200, body: '{"ip":"7.7.7.7"}' }]),
+    });
+    assert.equal(noNameSuccess.runs[0].target, 'https://x.test');
 });
 
 test('battle L2 task should classify blocked/network_error/success branches', async () => {
@@ -335,6 +454,87 @@ test('battle L2 task should classify blocked/network_error/success branches', as
         ]),
     });
     assert.equal(success.outcome, 'success');
+
+    const missingPrimary = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [],
+        fallbackTargets: [],
+    }, {
+        httpsImpl: createFakeRequestLib([]),
+    });
+    assert.equal(missingPrimary.reason, 'missing_primary_target');
+    assert.equal(missingPrimary.outcome, 'invalid_feedback');
+
+    const non2xx = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ url: 'https://ly.test' }],
+        fallbackTargets: [],
+        blockedStatusCodes: [],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([{ type: 'response', statusCode: 500, body: 'server error' }]),
+    });
+    assert.equal(non2xx.outcome, 'invalid_feedback');
+
+    const contentInvalid = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ url: 'https://ly.test' }],
+        fallbackTargets: [],
+        blockedStatusCodes: [],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([{ type: 'response', statusCode: 200, body: 'hello world' }]),
+    });
+    assert.equal(contentInvalid.outcome, 'invalid_feedback');
+    assert.equal(contentInvalid.reason, 'content_assert_failed');
+
+    const fallbackError = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ url: 'https://ly.test' }],
+        fallbackTargets: [{ url: 'https://fb.test' }],
+        blockedStatusCodes: [],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'error', error: { code: 'ECONNRESET' } },
+            { type: 'error', error: { code: 'ECONNREFUSED' } },
+        ]),
+    });
+    assert.equal(fallbackError.runs.length, 2);
+    assert.equal(fallbackError.runs[1].reason, 'ECONNREFUSED');
+
+    const defaultTargets = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+    }, {
+        httpsImpl: createFakeRequestLib([]),
+    });
+    assert.equal(defaultTargets.outcome, 'invalid_feedback');
+
+    const blockedNoName = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ url: 'https://ly.test' }],
+        fallbackTargets: [],
+        blockedStatusCodes: [403],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([{ type: 'response', statusCode: 403, body: 'blocked' }]),
+    });
+    assert.equal(blockedNoName.runs[0].target, 'https://ly.test');
+
+    const fallbackInvalid = await runBattleL2Task({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        primaryTargets: [{ url: 'https://ly.test' }],
+        fallbackTargets: [{ url: 'https://fb.test' }],
+        blockedStatusCodes: [],
+        blockSignals: [],
+    }, {
+        httpsImpl: createFakeRequestLib([
+            { type: 'error', error: { code: 'ECONNRESET' } },
+            { type: 'response', statusCode: 200, body: 'short' },
+        ]),
+    });
+    assert.equal(fallbackInvalid.runs[1].outcome, 'invalid_feedback');
+    assert.equal(fallbackInvalid.runs[1].reason, 'fallback_assert_failed');
 });
 
 test('stateTransitionTask should return ok', () => {

@@ -295,7 +295,6 @@ class ProxyHubEngine extends EventEmitter {
         this.db.updateProxyById(proxyId, {
             ...combat.updates,
             ...extraUpdates,
-            source: sourceName,
             updated_at: nowIso,
         });
 
@@ -399,6 +398,26 @@ class ProxyHubEngine extends EventEmitter {
             });
 
             if (validation.ok) {
+                if (!this.isBattleEnabled()) {
+                    await this.applyCombatOutcome({
+                        proxyId: proxy.id,
+                        sourceName,
+                        outcome: 'success',
+                        latencyMs: validation.latencyMs || 0,
+                        nowIso,
+                        stage: '评分(L0回退)',
+                    });
+
+                    this.logger.write({
+                        event: '写数据库成功',
+                        proxyName: proxy.display_name,
+                        ipSource: sourceName,
+                        stage: '入库',
+                        result: outcomeLabel('success'),
+                        durationMs: Date.now() - cycleStart,
+                        action: 'battle关闭，使用L0成功评分',
+                    });
+                }
                 return;
             }
 
