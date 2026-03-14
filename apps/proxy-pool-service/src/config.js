@@ -112,12 +112,32 @@
             riskyWarrior: 20,
             thousandService: 1000,
         },
+        valueModel: {
+            combatPointCap: 1200,
+            honorActiveWeight: 30,
+            honorHistoryWeight: 10,
+            weights: {
+                rank: 16,
+                combat: 24,
+                health: 16,
+                discipline: 14,
+                successRatio: 12,
+                battleRatio: 10,
+                honor: 8,
+            },
+            lifecycleScoreMap: {
+                active: 100,
+                reserve: 72,
+                candidate: 58,
+                retired: 8,
+            },
+        },
     },
     ui: {
         refreshMs: 5_000,
     },
     soak: {
-        durationHours: 24,
+        durationHours: 10,
         summaryIntervalMs: 3_600_000,
     },
 };

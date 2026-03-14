@@ -259,6 +259,7 @@ test('query list APIs should support filters and distributions', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'last_battle_outcome'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'battle_success_count'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'last_validation_ok'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'ip_value_score'), true);
 
     h.db.updateProxyById(all[0].id, { rank: '士官', lifecycle: 'active', updated_at: now });
 
@@ -268,6 +269,79 @@ test('query list APIs should support filters and distributions', () => {
     assert.equal(h.db.getSourceDistribution().length, 1);
     assert.equal(h.db.getLifecycleDistribution().length >= 1, true);
     assert.equal(h.db.getRankBoard().length >= 1, true);
+
+    cleanup(h);
+});
+
+test('value board API should sort by value and parse breakdown and honor fields', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [
+            { ip: '6.6.6.1', port: 80, protocol: 'http' },
+            { ip: '6.6.6.2', port: 80, protocol: 'http' },
+        ],
+        (() => {
+            let i = 0;
+            return () => `价值-${++i}`;
+        })(),
+        'src-value',
+        'batch-value',
+        now,
+    );
+
+    const all = h.db.getProxyList({ limit: 10 });
+    h.db.updateProxyById(all[0].id, {
+        lifecycle: 'active',
+        ip_value_score: 88.3,
+        ip_value_breakdown_json: JSON.stringify({ grade: 'A' }),
+        honor_active_json: JSON.stringify(['钢铁连胜']),
+        success_count: 8,
+        total_samples: 10,
+        battle_success_count: 3,
+        battle_fail_count: 1,
+        updated_at: now,
+    });
+    h.db.updateProxyById(all[1].id, {
+        lifecycle: 'reserve',
+        ip_value_score: 40,
+        ip_value_breakdown_json: '[]',
+        honor_active_json: '',
+        updated_at: now,
+    });
+
+    const board = h.db.getValueBoard(10);
+    assert.equal(board.length, 2);
+    assert.equal(board[0].ip_value_score >= board[1].ip_value_score, true);
+    assert.equal(board[0].ip_value_breakdown.grade, 'A');
+    assert.deepEqual(board[1].ip_value_breakdown, {});
+    assert.deepEqual(board[1].honor_active, []);
+    assert.equal(board[0].success_ratio, 0.8);
+    assert.equal(board[0].battle_ratio, 0.75);
+
+    const filtered = h.db.getValueBoard(10, 'active');
+    assert.equal(filtered.length, 1);
+    assert.equal(filtered[0].lifecycle, 'active');
+
+    h.db.updateProxyById(all[1].id, {
+        ip_value_breakdown_json: '',
+        updated_at: now,
+    });
+    const emptyBreakdown = h.db.getValueBoard(10);
+    assert.deepEqual(emptyBreakdown[1].ip_value_breakdown, {});
+
+    h.db.updateProxyById(all[1].id, {
+        ip_value_breakdown_json: '{bad',
+        updated_at: now,
+    });
+    const badBreakdown = h.db.getValueBoard(10);
+    assert.deepEqual(badBreakdown[1].ip_value_breakdown, {});
+
+    const fallbackLimit = h.db.getValueBoard('bad');
+    assert.equal(fallbackLimit.length >= 1, true);
+    const clampedLimit = h.db.getValueBoard(0);
+    assert.equal(clampedLimit.length >= 1, true);
 
     cleanup(h);
 });
