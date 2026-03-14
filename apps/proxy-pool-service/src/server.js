@@ -115,6 +115,13 @@ function createRuntime(options = {}) {
         });
     });
 
+    app.get('/v1/proxies/battle-tests', (req, res) => {
+        const limit = normalizeLimit(req.query.limit, 200, 1, 500);
+        res.json({
+            items: db.getBattleTestRuns(limit),
+        });
+    });
+
     app.get('/v1/proxies/ranks/board', (_req, res) => {
         res.json({
             items: db.getRankBoard(),

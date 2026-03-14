@@ -7,6 +7,17 @@ function ensureDirForFile(filePath) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+// 0190_parseJsonArray_解析JSON数组逻辑
+function parseJsonArray(raw) {
+    try {
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
 class ProxyHubDb {
     // 0001_constructor_初始化实例逻辑
     constructor(config) {
@@ -51,6 +62,14 @@ class ProxyHubDb {
                 last_checked_at TEXT,
                 last_outcome TEXT,
                 last_latency_ms INTEGER,
+                last_validation_at TEXT,
+                last_validation_ok INTEGER,
+                last_validation_reason TEXT,
+                last_validation_latency_ms INTEGER,
+                last_battle_checked_at TEXT,
+                last_battle_outcome TEXT,
+                battle_success_count INTEGER NOT NULL DEFAULT 0,
+                battle_fail_count INTEGER NOT NULL DEFAULT 0,
                 retired_type TEXT,
                 promotion_protect_until TEXT,
                 recent_window_json TEXT NOT NULL DEFAULT '[]',
@@ -140,6 +159,35 @@ class ProxyHubDb {
 
             CREATE INDEX IF NOT EXISTS idx_pool_snapshots_time
             ON pool_snapshots(timestamp DESC);
+
+            CREATE TABLE IF NOT EXISTS battle_test_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                proxy_id INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                target TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                status_code INTEGER,
+                latency_ms INTEGER,
+                reason TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(proxy_id) REFERENCES proxies(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_battle_test_runs_time
+            ON battle_test_runs(timestamp DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_battle_test_runs_proxy_stage
+            ON battle_test_runs(proxy_id, stage, timestamp DESC);
+        `);
+
+        this.ensureProxyColumns();
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_proxies_last_validation
+            ON proxies(last_validation_at);
+
+            CREATE INDEX IF NOT EXISTS idx_proxies_last_battle
+            ON proxies(last_battle_checked_at);
         `);
 
         this.insertRuntimeLogStmt = this.db.prepare(`
@@ -173,6 +221,36 @@ class ProxyHubDb {
                 last_seen_at = @now
             WHERE id = @id
         `);
+
+        this.insertBattleTestRunStmt = this.db.prepare(`
+            INSERT INTO battle_test_runs (
+                timestamp, proxy_id, stage, target, outcome, status_code, latency_ms, reason, details_json
+            ) VALUES (
+                @timestamp, @proxy_id, @stage, @target, @outcome, @status_code, @latency_ms, @reason, @details_json
+            )
+        `);
+    }
+
+    // 0191_ensureProxyColumns_确保代理列逻辑
+    ensureProxyColumns() {
+        const rows = this.db.prepare('PRAGMA table_info(proxies)').all();
+        const columns = new Set(rows.map((row) => row.name));
+        const requiredColumns = [
+            { name: 'last_validation_at', sql: 'TEXT' },
+            { name: 'last_validation_ok', sql: 'INTEGER' },
+            { name: 'last_validation_reason', sql: 'TEXT' },
+            { name: 'last_validation_latency_ms', sql: 'INTEGER' },
+            { name: 'last_battle_checked_at', sql: 'TEXT' },
+            { name: 'last_battle_outcome', sql: 'TEXT' },
+            { name: 'battle_success_count', sql: 'INTEGER NOT NULL DEFAULT 0' },
+            { name: 'battle_fail_count', sql: 'INTEGER NOT NULL DEFAULT 0' },
+        ];
+
+        for (const column of requiredColumns) {
+            if (!columns.has(column.name)) {
+                this.db.exec(`ALTER TABLE proxies ADD COLUMN ${column.name} ${column.sql}`);
+            }
+        }
     }
 
     // 0003_close_关闭逻辑
@@ -238,9 +316,78 @@ class ProxyHubDb {
         return this.db.prepare(`
             SELECT * FROM proxies
             WHERE lifecycle != 'retired'
-            ORDER BY COALESCE(last_checked_at, '1970-01-01T00:00:00.000Z') ASC, updated_at ASC
+            ORDER BY COALESCE(last_validation_at, '1970-01-01T00:00:00.000Z') ASC, updated_at ASC
             LIMIT ?
         `).all(limit);
+    }
+
+    // 0192_listProxiesForBattleL1_列出战场L1候选逻辑
+    listProxiesForBattleL1(limit, candidateQuota = 0.15) {
+        const safeLimit = Math.max(0, Number(limit) || 0);
+        if (safeLimit === 0) return [];
+
+        const normalizedQuota = Math.max(0, Math.min(1, Number(candidateQuota) || 0));
+        const candidateLimit = Math.min(safeLimit, Math.max(0, Math.floor(safeLimit * normalizedQuota)));
+        const coreLimit = Math.max(0, safeLimit - candidateLimit);
+
+        const nonCandidate = this.db.prepare(`
+            SELECT * FROM proxies
+            WHERE lifecycle IN ('active', 'reserve')
+            ORDER BY
+                COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
+                CASE lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 ELSE 2 END ASC,
+                updated_at ASC
+            LIMIT ?
+        `).all(coreLimit);
+
+        const candidates = this.db.prepare(`
+            SELECT * FROM proxies
+            WHERE lifecycle = 'candidate'
+            ORDER BY COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC, updated_at ASC
+            LIMIT ?
+        `).all(candidateLimit);
+
+        const merged = [...nonCandidate, ...candidates];
+        if (merged.length >= safeLimit) {
+            return merged.slice(0, safeLimit);
+        }
+
+        const filled = this.db.prepare(`
+            SELECT * FROM proxies
+            WHERE lifecycle != 'retired'
+              AND id NOT IN (${merged.length > 0 ? merged.map(() => '?').join(',') : '-1'})
+            ORDER BY
+                COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
+                CASE lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC,
+                updated_at ASC
+            LIMIT ?
+        `).all(...merged.map((item) => item.id), safeLimit - merged.length);
+
+        return [...merged, ...filled];
+    }
+
+    // 0193_listProxiesForBattleL2_列出战场L2候选逻辑
+    listProxiesForBattleL2(limit, lookbackMinutes = 10) {
+        const safeLimit = Math.max(0, Number(limit) || 0);
+        if (safeLimit === 0) return [];
+
+        const cutoffIso = new Date(Date.now() - Math.max(1, lookbackMinutes) * 60_000).toISOString();
+        return this.db.prepare(`
+            SELECT p.*
+            FROM proxies p
+            INNER JOIN (
+                SELECT proxy_id, MAX(timestamp) AS latest_l1_success_at
+                FROM battle_test_runs
+                WHERE stage = 'l1' AND outcome = 'success' AND timestamp >= ?
+                GROUP BY proxy_id
+            ) l1 ON l1.proxy_id = p.id
+            WHERE p.lifecycle != 'retired'
+            ORDER BY
+                COALESCE(p.last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
+                CASE p.lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC,
+                l1.latest_l1_success_at DESC
+            LIMIT ?
+        `).all(cutoffIso, safeLimit);
     }
 
     // 0009_listProxiesForStateReview_列出状态巡检逻辑
@@ -375,6 +522,21 @@ class ProxyHubDb {
         this.db.prepare('DELETE FROM pool_snapshots WHERE timestamp < ?').run(cutoffIso);
     }
 
+    // 0194_insertBattleTestRun_写入战场测试逻辑
+    insertBattleTestRun(record) {
+        this.insertBattleTestRunStmt.run({
+            timestamp: record.timestamp,
+            proxy_id: record.proxy_id,
+            stage: record.stage,
+            target: record.target,
+            outcome: record.outcome,
+            status_code: Number.isFinite(record.status_code) ? record.status_code : null,
+            latency_ms: Number.isFinite(record.latency_ms) ? record.latency_ms : null,
+            reason: record.reason || '',
+            details_json: JSON.stringify(record.details || {}),
+        });
+    }
+
     // 0185_getRuntimeLogs_获取运行时日志逻辑
     getRuntimeLogs(limit = 200) {
         return this.db.prepare(`
@@ -414,7 +576,9 @@ class ProxyHubDb {
             SELECT id, display_name, ip, port, protocol, source, lifecycle, rank,
                 service_hours, rank_service_hours, combat_points, health_score, discipline_score,
                 success_count, block_count, timeout_count, network_error_count,
-                total_samples, retired_type, is_applied, updated_at, last_checked_at
+                total_samples, retired_type, is_applied, updated_at, last_checked_at,
+                last_validation_at, last_validation_ok, last_validation_reason, last_validation_latency_ms,
+                last_battle_checked_at, last_battle_outcome, battle_success_count, battle_fail_count
             FROM proxies
             ${where}
             ORDER BY updated_at DESC
@@ -485,10 +649,20 @@ class ProxyHubDb {
         if (!row) return null;
         return {
             ...row,
-            source_distribution: JSON.parse(row.source_distribution_json || '[]'),
-            rank_distribution: JSON.parse(row.rank_distribution_json || '[]'),
-            lifecycle_distribution: JSON.parse(row.lifecycle_distribution_json || '[]'),
+            source_distribution: parseJsonArray(row.source_distribution_json),
+            rank_distribution: parseJsonArray(row.rank_distribution_json),
+            lifecycle_distribution: parseJsonArray(row.lifecycle_distribution_json),
         };
+    }
+
+    // 0195_getBattleTestRuns_获取战场测试逻辑
+    getBattleTestRuns(limit = 200) {
+        return this.db.prepare(`
+            SELECT id, timestamp, proxy_id, stage, target, outcome, status_code, latency_ms, reason, details_json
+            FROM battle_test_runs
+            ORDER BY id DESC
+            LIMIT ?
+        `).all(limit);
     }
 }
 

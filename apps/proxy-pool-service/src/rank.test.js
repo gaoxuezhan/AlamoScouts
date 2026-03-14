@@ -16,9 +16,9 @@ function baseConfig() {
                 { rank: '王牌', minHours: 4, minPoints: 50, minSamples: 8 },
             ],
             scoring: {
-                success: 5,
-                successFastBonusLt1200: 2,
-                successFastBonusLt2500: 1,
+                success: 6,
+                successFastBonusLt1200: 0,
+                successFastBonusLt2500: 0,
                 blocked: -8,
                 timeout: -6,
                 networkError: -5,
@@ -89,12 +89,12 @@ test('success outcome should increase points and samples', () => {
     const result = evaluateCombat({ proxy, outcome: 'success', latencyMs: 900, nowIso: now, config: cfg });
 
     assert.equal(result.updates.total_samples, 1);
-    assert.ok(result.updates.combat_points >= 7);
+    assert.ok(result.updates.combat_points >= 6);
     assert.equal(result.updates.success_count, 1);
     assert.equal(result.updates.lifecycle, 'active');
 });
 
-test('success with medium latency should use second fast bonus branch', () => {
+test('success should use fixed score mapping', () => {
     const cfg = baseConfig();
     const result = evaluateCombat({
         proxy: baseProxy(),

@@ -20,6 +20,44 @@
         snapshotPersistMs: Number(process.env.PROXY_HUB_SNAPSHOT_MS || 60_000),
         maxValidationPerCycle: Number(process.env.PROXY_HUB_MAX_VALIDATE || 180),
     },
+    battle: {
+        enabled: String(process.env.PROXY_HUB_BATTLE_ENABLED || 'true') === 'true',
+        l1SyncMs: Number(process.env.PROXY_HUB_BATTLE_L1_MS || 300_000),
+        l2SyncMs: Number(process.env.PROXY_HUB_BATTLE_L2_MS || 1_800_000),
+        maxBattleL1PerCycle: Number(process.env.PROXY_HUB_BATTLE_L1_MAX || 60),
+        maxBattleL2PerCycle: Number(process.env.PROXY_HUB_BATTLE_L2_MAX || 20),
+        candidateQuota: Number(process.env.PROXY_HUB_BATTLE_CANDIDATE_QUOTA || 0.15),
+        l2LookbackMinutes: Number(process.env.PROXY_HUB_BATTLE_L2_LOOKBACK_MINUTES || 10),
+        timeoutMs: {
+            l1: Number(process.env.PROXY_HUB_BATTLE_L1_TIMEOUT_MS || 5_000),
+            l2: Number(process.env.PROXY_HUB_BATTLE_L2_TIMEOUT_MS || 8_000),
+        },
+        blockedStatusCodes: [401, 403, 429, 503],
+        blockSignals: [
+            'captcha',
+            'security check',
+            'are you human',
+            'access denied',
+            'forbidden',
+            'robot check',
+            '验证码',
+            '访问过于频繁',
+            '异常访问',
+            '人机验证',
+        ],
+        targets: {
+            l1: [
+                { name: 'httpbin/ip', url: 'https://httpbin.org/ip' },
+                { name: 'ipify', url: 'https://api.ipify.org?format=json' },
+            ],
+            l2Primary: [
+                { name: 'ly-flight-main', url: 'https://www.ly.com/flights/itinerary/oneway/BJS-SYX?date=2026-04-01' },
+            ],
+            l2Fallback: [
+                { name: 'baidu-home', url: 'https://www.baidu.com' },
+            ],
+        },
+    },
     source: {
         monosans: {
             name: 'monosans/proxy-list',
@@ -42,9 +80,9 @@
             { rank: '王牌', minHours: 72, minPoints: 980, minSamples: 260 },
         ],
         scoring: {
-            success: 5,
-            successFastBonusLt1200: 2,
-            successFastBonusLt2500: 1,
+            success: 6,
+            successFastBonusLt1200: 0,
+            successFastBonusLt2500: 0,
             blocked: -8,
             timeout: -6,
             networkError: -5,
