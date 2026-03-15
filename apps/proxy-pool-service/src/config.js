@@ -51,7 +51,10 @@
                 { name: 'ipify', url: 'https://api.ipify.org?format=json' },
             ],
             l2Primary: [
-                { name: 'ly-flight-main', url: 'https://www.ly.com/flights/itinerary/oneway/BJS-SYX?date=2026-04-01' },
+                {
+                    name: 'ly-flight-main',
+                    url: process.env.PROXY_HUB_BATTLE_L2_PRIMARY_URL || 'https://www.ly.com/flights/home',
+                },
             ],
             l2Fallback: [
                 { name: 'baidu-home', url: 'https://www.baidu.com' },

@@ -439,6 +439,8 @@ test('battle L2 task should classify blocked/network_error/success branches', as
         ]),
     });
     assert.equal(network.outcome, 'network_error');
+    assert.equal(network.runs[1].outcome, 'success');
+    assert.equal(network.runs[1].reason, 'fallback_ok');
 
     const success = await runBattleL2Task({
         proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
