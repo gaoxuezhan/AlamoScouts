@@ -1,8 +1,31 @@
-﻿const test = require('node:test');
+const test = require('node:test');
 const assert = require('node:assert/strict');
-const config = require('./config');
 
-test('config should expose required default values', () => {
+function loadConfigWithEnv(overrides = {}) {
+    const key = 'PROXY_HUB_BATTLE_L2_PRIMARY_URL';
+    const original = process.env[key];
+
+    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+        process.env[key] = overrides[key];
+    } else {
+        delete process.env[key];
+    }
+
+    const modulePath = require.resolve('./config');
+    delete require.cache[modulePath];
+    const config = require('./config');
+
+    if (original == null) {
+        delete process.env[key];
+    } else {
+        process.env[key] = original;
+    }
+    delete require.cache[modulePath];
+    return config;
+}
+
+test('config should expose required default values', { concurrency: false }, () => {
+    const config = loadConfigWithEnv();
     assert.equal(config.service.name, 'ProxyHub');
     assert.equal(config.service.port, 5070);
     assert.equal(config.service.timezone, 'Asia/Shanghai');
@@ -17,13 +40,23 @@ test('config should expose required default values', () => {
     assert.equal(config.battle.maxBattleL2PerCycle, 20);
     assert.equal(config.battle.candidateQuota, 0.15);
     assert.equal(Array.isArray(config.battle.targets.l1), true);
+    assert.equal(config.battle.targets.l2Primary[0].name, 'ly-flight-main');
+    assert.equal(config.battle.targets.l2Primary[0].url, 'https://www.ly.com/flights/home');
 });
 
-test('config ranks should be ordered and complete', () => {
+test('config ranks should be ordered and complete', { concurrency: false }, () => {
+    const config = loadConfigWithEnv();
     const ranks = config.policy.ranks.map((item) => item.rank);
     assert.deepEqual(ranks, ['新兵', '列兵', '士官', '尉官', '王牌']);
     assert.equal(config.policy.promotionProtectHours, 6);
     assert.equal(config.policy.valueModel.combatPointCap, 1200);
     assert.equal(config.policy.valueModel.lifecycleScoreMap.retired, 8);
     assert.equal(config.soak.durationHours, 10);
+});
+
+test('config should support env override for L2 primary target', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L2_PRIMARY_URL: 'https://example.com/l2-primary',
+    });
+    assert.equal(config.battle.targets.l2Primary[0].url, 'https://example.com/l2-primary');
 });
