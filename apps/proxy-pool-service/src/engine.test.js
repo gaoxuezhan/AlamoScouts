@@ -995,6 +995,7 @@ test('persistSnapshot should emit thread pool alert and auto recovery', () => {
     };
 
     const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T03:00:00.000Z') });
+    engine.started = true;
 
     h.db.upsertSourceBatch(
         [{ ip: '10.0.0.7', port: 80, protocol: 'http' }],
@@ -1018,4 +1019,32 @@ test('persistSnapshot should emit thread pool alert and auto recovery', () => {
     assert.equal(logger.entries.some((e) => e.event === '自动恢复'), true);
 
     cleanupDb(h);
+});
+
+test('persistSnapshot should not throw after db closed during shutdown race', () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const workerPool = {
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T03:00:00.000Z') });
+    engine.started = true;
+    h.db.close();
+
+    assert.doesNotThrow(() => engine.persistSnapshot());
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '快照'), true);
+
+    fs.rmSync(h.dir, { recursive: true, force: true });
 });

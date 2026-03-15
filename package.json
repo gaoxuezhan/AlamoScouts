@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "mycrawleeengineer",
   "version": "1.0.0",
   "main": "index.js",
@@ -9,6 +9,7 @@
     "start:proxyhub": "node apps/proxy-pool-service/src/server.js",
     "dev:proxyhub": "node --watch apps/proxy-pool-service/src/server.js",
     "soak:v1": "node apps/proxy-pool-service/src/soak.js",
+    "watch:soak": "node apps/proxy-pool-service/src/soak-watchdog-v2.js",
     "test:proxyhub": "node --test apps/proxy-pool-service/src/**/*.test.js apps/proxy-pool-service/tests/**/*.integration.test.js",
     "test:proxyhub:unit": "node --test apps/proxy-pool-service/src/**/*.test.js",
     "test:proxyhub:integration": "node --test apps/proxy-pool-service/tests/**/*.integration.test.js",
@@ -28,3 +29,4 @@
     "c8": "^10.1.3"
   }
 }
+
