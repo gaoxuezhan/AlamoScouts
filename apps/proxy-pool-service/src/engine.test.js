@@ -204,6 +204,37 @@ test('engine start/stop should be idempotent and persist snapshot', async () => 
     cleanupDb(h);
 });
 
+test('persistSnapshot should return early when engine not started', () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    let getStatusCalls = 0;
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            getStatusCalls += 1;
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger });
+    engine.persistSnapshot();
+
+    assert.equal(getStatusCalls, 0);
+    assert.equal(h.db.getLatestSnapshot(), null);
+    cleanupDb(h);
+});
+
 test('engine start should execute scheduled callback bodies', async () => {
     const h = createDbHandle();
     const logger = createLogger();
