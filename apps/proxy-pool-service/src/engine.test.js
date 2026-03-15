@@ -204,6 +204,37 @@ test('engine start/stop should be idempotent and persist snapshot', async () => 
     cleanupDb(h);
 });
 
+test('persistSnapshot should return early when engine not started', () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    let getStatusCalls = 0;
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            getStatusCalls += 1;
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger });
+    engine.persistSnapshot();
+
+    assert.equal(getStatusCalls, 0);
+    assert.equal(h.db.getLatestSnapshot(), null);
+    cleanupDb(h);
+});
+
 test('engine start should execute scheduled callback bodies', async () => {
     const h = createDbHandle();
     const logger = createLogger();
@@ -995,6 +1026,7 @@ test('persistSnapshot should emit thread pool alert and auto recovery', () => {
     };
 
     const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T03:00:00.000Z') });
+    engine.started = true;
 
     h.db.upsertSourceBatch(
         [{ ip: '10.0.0.7', port: 80, protocol: 'http' }],
@@ -1018,4 +1050,32 @@ test('persistSnapshot should emit thread pool alert and auto recovery', () => {
     assert.equal(logger.entries.some((e) => e.event === '自动恢复'), true);
 
     cleanupDb(h);
+});
+
+test('persistSnapshot should not throw after db closed during shutdown race', () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const workerPool = {
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T03:00:00.000Z') });
+    engine.started = true;
+    h.db.close();
+
+    assert.doesNotThrow(() => engine.persistSnapshot());
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '快照'), true);
+
+    fs.rmSync(h.dir, { recursive: true, force: true });
 });

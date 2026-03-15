@@ -664,26 +664,45 @@ class ProxyHubEngine extends EventEmitter {
 
     // 0035_persistSnapshot_持久化快照逻辑
     persistSnapshot() {
-        const poolStatus = this.workerPool.getStatus();
-        const sourceDistribution = this.db.getSourceDistribution();
-        const rankDistribution = this.db.getRankBoard().map((item) => ({
-            rank: item.rank,
-            count: item.count,
-        }));
-        const lifecycleDistribution = this.db.getLifecycleDistribution();
+        if (!this.started) {
+            return;
+        }
 
-        this.db.insertPoolSnapshot({
-            timestamp: this.now().toISOString(),
-            workers_total: poolStatus.workersTotal,
-            workers_busy: poolStatus.workersBusy,
-            queue_size: poolStatus.queueSize,
-            completed_tasks: poolStatus.completedTasks,
-            failed_tasks: poolStatus.failedTasks,
-            restarted_workers: poolStatus.restartedWorkers,
-            source_distribution: sourceDistribution,
-            rank_distribution: rankDistribution,
-            lifecycle_distribution: lifecycleDistribution,
-        });
+        const poolStatus = this.workerPool.getStatus();
+        let sourceDistribution = [];
+        let rankDistribution = [];
+        let lifecycleDistribution = [];
+
+        try {
+            sourceDistribution = this.db.getSourceDistribution();
+            rankDistribution = this.db.getRankBoard().map((item) => ({
+                rank: item.rank,
+                count: item.count,
+            }));
+            lifecycleDistribution = this.db.getLifecycleDistribution();
+
+            this.db.insertPoolSnapshot({
+                timestamp: this.now().toISOString(),
+                workers_total: poolStatus.workersTotal,
+                workers_busy: poolStatus.workersBusy,
+                queue_size: poolStatus.queueSize,
+                completed_tasks: poolStatus.completedTasks,
+                failed_tasks: poolStatus.failedTasks,
+                restarted_workers: poolStatus.restartedWorkers,
+                source_distribution: sourceDistribution,
+                rank_distribution: rankDistribution,
+                lifecycle_distribution: lifecycleDistribution,
+            });
+        } catch (error) {
+            this.logger.write({
+                event: '线程池告警',
+                stage: '快照',
+                result: '持久化失败',
+                reason: error?.message || 'snapshot-persist-error',
+                action: '等待下一次快照',
+            });
+            return;
+        }
 
         const highWaterMark = Math.max(20, poolStatus.workersTotal * 8);
         const recoverMark = Math.max(4, poolStatus.workersTotal * 2);
@@ -725,3 +744,4 @@ module.exports = {
     buildBattleCounterUpdates,
     ProxyHubEngine,
 };
+

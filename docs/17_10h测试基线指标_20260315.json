@@ -1,0 +1,153 @@
+{
+  "baseline_id": "proxyhub_soak_10h_20260315_051530_151546_cst",
+  "window": {
+    "start_utc": "2026-03-14T21:15:30.301Z",
+    "end_utc": "2026-03-15T07:15:46.185Z",
+    "start_cst": "2026-03-15 05:15:30",
+    "end_cst": "2026-03-15 15:15:46",
+    "duration_hours": 10.004
+  },
+  "timeline": {
+    "entries": 1220,
+    "sample_count": 1200,
+    "healthy_samples": 1200,
+    "outage_samples": 0,
+    "availability_ratio": 1.0,
+    "queue": {
+      "min": 0,
+      "max": 24,
+      "avg": 11.526,
+      "p50": 12,
+      "p95": 18,
+      "gt0_ratio": 0.791,
+      "ge12_ratio": 0.647,
+      "ge18_ratio": 0.411
+    },
+    "workers_busy": {
+      "min": 0,
+      "max": 6,
+      "avg": 4.888,
+      "p50": 6,
+      "p95": 6,
+      "full_load_ratio": 0.802,
+      "idle_ratio": 0.172
+    },
+    "counters": {
+      "completed_delta": 90818,
+      "completed_per_hour": 9077.795,
+      "failed_delta": 570,
+      "failed_per_hour": 56.975,
+      "failed_ratio": 0.00624,
+      "restarted_delta": 305,
+      "restarted_per_hour": 30.487
+    },
+    "policy_actions": {
+      "planned": 5,
+      "applied": 5,
+      "failed": 0
+    }
+  },
+  "battle": {
+    "l1": {
+      "total": 6884,
+      "success": 1945,
+      "blocked": 59,
+      "timeout": 1054,
+      "network_error": 3788,
+      "invalid_feedback": 38,
+      "success_rate": 0.2825,
+      "avg_latency_ms": 12707.04,
+      "runs_per_hour": 688.12
+    },
+    "l2": {
+      "total": 540,
+      "success": 295,
+      "blocked": 9,
+      "timeout": 103,
+      "network_error": 122,
+      "invalid_feedback": 11,
+      "success_rate": 0.5463,
+      "avg_latency_ms": 12131.66,
+      "runs_per_hour": 53.98
+    },
+    "l2_targets": {
+      "ly-flight-main": {
+        "total": 270,
+        "success": 150,
+        "blocked": 9,
+        "timeout": 51,
+        "network_error": 58,
+        "invalid_feedback": 2,
+        "success_rate": 0.5556,
+        "avg_latency_ms": 12238.03
+      },
+      "baidu-home": {
+        "total": 270,
+        "success": 145,
+        "blocked": 0,
+        "timeout": 52,
+        "network_error": 64,
+        "invalid_feedback": 9,
+        "success_rate": 0.537,
+        "avg_latency_ms": 12025.29
+      }
+    }
+  },
+  "events": {
+    "state_transition": 328,
+    "promotion": 27,
+    "demotion": 1,
+    "retirement": 5,
+    "honor": 0,
+    "state_transition_kind": {
+      "active_to_reserve": 328
+    },
+    "retirement_type": {
+      "discipline": 5
+    }
+  },
+  "snapshot_delta": {
+    "start_total": 714,
+    "end_total": 1758,
+    "lifecycle": {
+      "active": {
+        "start": 47,
+        "end": 85,
+        "delta": 38
+      },
+      "candidate": {
+        "start": 472,
+        "end": 1374,
+        "delta": 902
+      },
+      "reserve": {
+        "start": 195,
+        "end": 294,
+        "delta": 99
+      },
+      "retired": {
+        "start": 0,
+        "end": 5,
+        "delta": 5
+      }
+    },
+    "rank": {
+      "newbie": {
+        "start": 714,
+        "end": 1732,
+        "delta": 1018
+      },
+      "private": {
+        "start": 0,
+        "end": 26,
+        "delta": 26
+      }
+    }
+  },
+  "data_sources": {
+    "timeline_jsonl": "apps/proxy-pool-service/data/soak-timeline-2026-03-14T21-15-30-297Z.jsonl",
+    "soak_report_md": "apps/proxy-pool-service/data/soak-report-2026-03-14T21-15-30-297Z.md",
+    "db_file": "apps/proxy-pool-service/data/proxyhub-v1.db"
+  }
+}
+

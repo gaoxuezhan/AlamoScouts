@@ -1,0 +1,207 @@
+openapi: 3.0.3
+info:
+  title: ProxyHub Lease/Feedback API
+  version: 0.1.0
+  description: >
+    External battle integration APIs for leasing proxies and reporting real-world outcomes.
+servers:
+  - url: http://localhost:5070
+paths:
+  /v1/proxies/lease:
+    post:
+      summary: Lease proxies for external consumers
+      operationId: leaseProxies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaseRequest'
+      responses:
+        '200':
+          description: Lease granted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaseResponse'
+  /v1/proxies/leases/{leaseId}/renew:
+    post:
+      summary: Renew lease TTL
+      operationId: renewLease
+      parameters:
+        - name: leaseId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ttlSec]
+              properties:
+                ttlSec:
+                  type: integer
+                  minimum: 30
+                  maximum: 3600
+      responses:
+        '200':
+          description: Renewed
+  /v1/proxies/leases/{leaseId}/release:
+    post:
+      summary: Release lease
+      operationId: releaseLease
+      parameters:
+        - name: leaseId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Released
+  /v1/proxies/feedback:
+    post:
+      summary: Report external battle outcome
+      operationId: reportFeedback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackRequest'
+      responses:
+        '200':
+          description: Accepted
+        '409':
+          description: Duplicate reportId
+  /v1/proxies/snapshot:
+    get:
+      summary: Get full snapshot + resourceVersion
+      operationId: getSnapshot
+      responses:
+        '200':
+          description: Snapshot
+  /api/proxies/watch:
+    get:
+      summary: SSE watch stream from resourceVersion
+      operationId: watchProxies
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: text/event-stream
+components:
+  schemas:
+    LeaseRequest:
+      type: object
+      required: [consumer, scene, count, ttlSec]
+      properties:
+        consumer:
+          type: string
+        scene:
+          type: string
+        count:
+          type: integer
+          minimum: 1
+          maximum: 100
+        ttlSec:
+          type: integer
+          minimum: 30
+          maximum: 3600
+        filters:
+          type: object
+          properties:
+            lifecycle:
+              type: array
+              items:
+                type: string
+                enum: [candidate, active, reserve, retired]
+            minValueScore:
+              type: number
+            minBattleRatio:
+              type: number
+              minimum: 0
+              maximum: 1
+    LeaseResponse:
+      type: object
+      properties:
+        leases:
+          type: array
+          items:
+            type: object
+            properties:
+              leaseId:
+                type: string
+              expiresAt:
+                type: string
+                format: date-time
+              proxy:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  protocol:
+                    type: string
+                  ip:
+                    type: string
+                  port:
+                    type: integer
+              snapshot:
+                type: object
+                properties:
+                  rank:
+                    type: string
+                  lifecycle:
+                    type: string
+                  ipValueScore:
+                    type: number
+                  battleRatio:
+                    type: number
+    FeedbackRequest:
+      type: object
+      required: [reportId, leaseId, consumer, scene, target, outcome, occurredAt]
+      properties:
+        reportId:
+          type: string
+        leaseId:
+          type: string
+        consumer:
+          type: string
+        scene:
+          type: string
+        target:
+          type: string
+        outcome:
+          type: string
+          enum: [success, blocked, timeout, network_error, invalid_feedback]
+        statusCode:
+          type: integer
+          nullable: true
+        latencyMs:
+          type: integer
+          nullable: true
+        errorCode:
+          type: string
+          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+        occurredAt:
+          type: string
+          format: date-time
