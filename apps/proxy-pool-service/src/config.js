@@ -178,6 +178,38 @@ const l2LookbackByProfile = {
     soak: 25,
 };
 
+// 0232_hasOwnEnv_检查环境变量是否显式配置逻辑
+function hasOwnEnv(name) {
+    return Object.prototype.hasOwnProperty.call(process.env, name);
+}
+
+// 0233_parseLifecycleQuota_解析生命周期配额逻辑
+function parseLifecycleQuota(raw, fallback) {
+    if (raw == null || String(raw).trim() === '') return fallback;
+    try {
+        const parsed = JSON.parse(String(raw));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback;
+        const active = Number(parsed.active);
+        const reserve = Number(parsed.reserve);
+        const candidate = Number(parsed.candidate);
+        if (!Number.isFinite(active) || !Number.isFinite(reserve) || !Number.isFinite(candidate)) return fallback;
+        return { active, reserve, candidate };
+    } catch {
+        return fallback;
+    }
+}
+
+const defaultLifecycleQuota = deepClone(battleL1LifecycleQuotaByProfile[activeProfile]);
+const hasCandidateQuotaEnv = hasOwnEnv('PROXY_HUB_BATTLE_CANDIDATE_QUOTA');
+const hasLifecycleQuotaEnv = hasOwnEnv('PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA');
+const lifecycleQuotaFromEnv = parseLifecycleQuota(
+    process.env.PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA,
+    defaultLifecycleQuota,
+);
+const resolvedLifecycleQuota = hasLifecycleQuotaEnv
+    ? lifecycleQuotaFromEnv
+    : (hasCandidateQuotaEnv ? undefined : defaultLifecycleQuota);
+
 module.exports = {
     service: {
         name: 'ProxyHub',
@@ -227,7 +259,7 @@ module.exports = {
         maxBattleL1PerCycle: Number(process.env.PROXY_HUB_BATTLE_L1_MAX || 60),
         maxBattleL2PerCycle: Number(process.env.PROXY_HUB_BATTLE_L2_MAX || 20),
         candidateQuota: Number(process.env.PROXY_HUB_BATTLE_CANDIDATE_QUOTA || battleL1LifecycleQuotaByProfile[activeProfile].candidate),
-        l1LifecycleQuota: deepClone(battleL1LifecycleQuotaByProfile[activeProfile]),
+        l1LifecycleQuota: resolvedLifecycleQuota,
         l2LookbackMinutes: Number(process.env.PROXY_HUB_BATTLE_L2_LOOKBACK_MINUTES || l2LookbackByProfile[activeProfile]),
         timeoutMs: {
             l1: Number(process.env.PROXY_HUB_BATTLE_L1_TIMEOUT_MS || 5_000),

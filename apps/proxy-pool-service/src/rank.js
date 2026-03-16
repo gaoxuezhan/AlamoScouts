@@ -136,7 +136,7 @@ function minutesSince(iso, nowMs) {
 
 // 0091_isStateStaySatisfied_状态停留满足逻辑
 function isStateStaySatisfied(proxy, nowMs, minStateStayMinutes) {
-    const minMinutes = Math.max(0, Number(minStateStayMinutes || 0));
+    const minMinutes = Math.max(0, Number(minStateStayMinutes ?? 30));
     if (minMinutes <= 0) return true;
     const changedAt = proxy.lifecycle_changed_at || proxy.updated_at || proxy.last_checked_at;
     const stayedMinutes = minutesSince(changedAt, nowMs);
@@ -177,7 +177,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     const ratios = computeWindowStats(trimmedWindow, nowMs, {
         regularWindowSize: demotion.regularWindowSize,
         severeWindowMs: Number(demotion.severeWindowMinutes || 60) * 60 * 1000,
-        transitionWindowSize: lifecyclePolicy.transitionWindowSize || 20,
+        transitionWindowSize: lifecyclePolicy.transitionWindowSize,
     });
 
     const previousCheckedMs = proxy.last_checked_at ? Date.parse(proxy.last_checked_at) : nowMs;
@@ -499,7 +499,7 @@ function evaluateStateTransition({ proxy, nowIso, config }) {
     const ratios = computeWindowStats(windowRecords, nowMs, {
         regularWindowSize: demotion.regularWindowSize,
         severeWindowMs: Number(demotion.severeWindowMinutes || 60) * 60 * 1000,
-        transitionWindowSize: lifecyclePolicy.transitionWindowSize || 20,
+        transitionWindowSize: lifecyclePolicy.transitionWindowSize,
     });
 
     let lifecycle = proxy.lifecycle;
@@ -508,7 +508,7 @@ function evaluateStateTransition({ proxy, nowIso, config }) {
     let trigger = null;
 
     if (features.lifecycleHysteresis) {
-        const staySatisfied = isStateStaySatisfied(proxy, nowMs, lifecyclePolicy.minStateStayMinutes || 30);
+        const staySatisfied = isStateStaySatisfied(proxy, nowMs, lifecyclePolicy.minStateStayMinutes);
         const transitionSampleMin = Number(lifecyclePolicy.minSamplesForTransition || 20);
         if (
             lifecycle === 'active'
@@ -588,7 +588,7 @@ function evaluateStateTransition({ proxy, nowIso, config }) {
         updates,
         change,
         eventDetails: change
-            ? buildEventDetails(trigger || change, {
+            ? buildEventDetails(trigger, {
                 regularSamples: ratios.regular.samples,
                 regularFailRatio: Number(ratios.regular.failRatio.toFixed(4)),
                 regularSuccessRatio: Number(ratios.regular.successRatio.toFixed(4)),

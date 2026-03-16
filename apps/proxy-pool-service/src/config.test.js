@@ -89,3 +89,47 @@ test('config should accept soak policy profile from env', { concurrency: false }
     assert.equal(config.rollout.activeProfile, 'soak');
     assert.equal(config.battle.l1LifecycleQuota.candidate, 0.20);
 });
+
+test('config should keep production profile when profile env is explicitly production', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'production',
+    });
+    assert.equal(config.rollout.activeProfile, 'production');
+});
+
+test('config should keep candidateQuota compatibility when lifecycle quota is not explicitly set', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_CANDIDATE_QUOTA: '0.33',
+    });
+    assert.equal(config.battle.candidateQuota, 0.33);
+    assert.equal(config.battle.l1LifecycleQuota, undefined);
+});
+
+test('config should support explicit l1LifecycleQuota env override', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_CANDIDATE_QUOTA: '0.33',
+        PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA: '{"active":0.4,"reserve":0.4,"candidate":0.2}',
+    });
+    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.4, reserve: 0.4, candidate: 0.2 });
+});
+
+test('config should fallback lifecycle quota when env json is invalid', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA: '{bad-json',
+    });
+    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.55, reserve: 0.30, candidate: 0.15 });
+});
+
+test('config should fallback lifecycle quota when env json shape is invalid', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA: '[]',
+    });
+    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.55, reserve: 0.30, candidate: 0.15 });
+});
+
+test('config should fallback lifecycle quota when env json values are non-finite', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA: '{"active":"x","reserve":0.3,"candidate":0.2}',
+    });
+    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.55, reserve: 0.30, candidate: 0.15 });
+});
