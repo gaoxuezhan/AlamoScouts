@@ -61,6 +61,7 @@ function runMigration(options = {}) {
     }
 }
 
+/* c8 ignore next 5 */
 if (require.main === module) {
     const outcome = runMigration();
     if (!outcome.ok) {

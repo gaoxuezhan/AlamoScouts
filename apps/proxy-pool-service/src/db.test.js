@@ -737,3 +737,111 @@ test('renameAllDisplayNames should rollback when transaction throws', () => {
 
     cleanup(h);
 });
+
+test('renameAllDisplayNames should throw when generated name is invalid', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [{ ip: '10.4.4.1', port: 80, protocol: 'http' }],
+        () => '苍隼-北辰-01',
+        'src-rename-invalid',
+        'batch-rename-invalid',
+        now,
+    );
+
+    assert.throws(
+        () => h.db.renameAllDisplayNames({
+            dryRun: true,
+            generateName: () => '   ',
+        }),
+        /rename-generated-name-invalid/,
+    );
+
+    cleanup(h);
+});
+
+test('renameAllDisplayNames should require generateName callback', () => {
+    const h = createDb();
+    assert.throws(
+        () => h.db.renameAllDisplayNames({
+            dryRun: true,
+        }),
+        /rename-generate-name-required/,
+    );
+    cleanup(h);
+});
+
+test('renameAllDisplayNames should throw when uniqueness check fails', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+    h.db.upsertSourceBatch(
+        [{ ip: '10.5.5.1', port: 80, protocol: 'http' }],
+        () => '苍隼-北辰-01',
+        'src-rename-uniq',
+        'batch-rename-uniq',
+        now,
+    );
+
+    const originalPrepare = h.db.db.prepare.bind(h.db.db);
+    h.db.db.prepare = (sql) => {
+        if (String(sql).includes('COUNT(*) AS total, COUNT(DISTINCT display_name) AS unique_total')) {
+            return {
+                get() {
+                    return { total: 2, unique_total: 1 };
+                },
+            };
+        }
+        return originalPrepare(sql);
+    };
+
+    try {
+        assert.throws(
+            () => h.db.renameAllDisplayNames({
+                dryRun: false,
+                generateName: createNameGenerator(['张三']),
+            }),
+            /rename-uniqueness-check-failed/,
+        );
+    } finally {
+        h.db.db.prepare = originalPrepare;
+    }
+
+    cleanup(h);
+});
+
+test('renameAllDisplayNames should throw when old-style names remain in runtime logs', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [{ ip: '10.6.6.1', port: 80, protocol: 'http' }],
+        () => '苍隼-北辰-01',
+        'src-rename-old-pattern',
+        'batch-rename-old-pattern',
+        now,
+    );
+    h.db.insertRuntimeLog({
+        timestamp: now,
+        event: 'system',
+        proxy_name: '残留-1',
+        ip_source: 'src',
+        stage: 'system',
+        result: 'ok',
+        reason: '-',
+        action: '-',
+    });
+
+    const before = h.db.getProxyList({ limit: 10 })[0].display_name;
+    assert.throws(
+        () => h.db.renameAllDisplayNames({
+            dryRun: false,
+            generateName: createNameGenerator(['张三']),
+        }),
+        /rename-old-pattern-remains:runtime_logs:1/,
+    );
+    const after = h.db.getProxyList({ limit: 10 })[0].display_name;
+    assert.equal(after, before);
+
+    cleanup(h);
+});
