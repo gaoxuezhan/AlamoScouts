@@ -237,6 +237,7 @@ function createRuntime(options = {}) {
     });
 
     let server;
+    let engineStartPromise = null;
 
     // 0094_start_启动逻辑
     async function start() {
@@ -256,15 +257,20 @@ function createRuntime(options = {}) {
                         action: '可访问 /proxy-admin 和 /runtime/logs',
                     });
 
-                    void engine.start().catch((error) => {
-                        logger.write({
-                            event: '线程池告警',
-                            stage: '启动',
-                            result: '引擎启动失败',
-                            reason: error?.message || 'unknown',
-                            action: '保持服务在线并等待下次启动',
+                    engineStartPromise = Promise.resolve()
+                        .then(() => engine.start())
+                        .catch((error) => {
+                            logger.write({
+                                event: '线程池告警',
+                                stage: '启动',
+                                result: '引擎启动失败',
+                                reason: error?.message || 'unknown',
+                                action: '保持服务在线并等待下次启动',
+                            });
+                        })
+                        .finally(() => {
+                            engineStartPromise = null;
                         });
-                    });
 
                     resolve(server);
                 });
@@ -290,6 +296,10 @@ function createRuntime(options = {}) {
             server = null;
         }
 
+        await engine.stop();
+        if (engineStartPromise) {
+            await engineStartPromise;
+        }
         await engine.stop();
         await workerPool.close();
         db.close();

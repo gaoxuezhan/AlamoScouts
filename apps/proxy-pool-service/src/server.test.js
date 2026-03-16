@@ -57,7 +57,7 @@ function createConfig(port = 0) {
 function createStubs() {
     const loggerEvents = new EventEmitter();
     const poolEvents = new EventEmitter();
-    const state = { dbClosed: false, poolClosed: false, engineStarted: false, engineStopped: false };
+    const state = { dbClosed: false, poolClosed: false, engineStarted: false, engineStopped: false, engineStopCalls: 0 };
 
     const db = {
         getSourceDistribution: () => [{ source: 'monosans', count: 2 }],
@@ -109,6 +109,7 @@ function createStubs() {
     };
     engine.stop = async () => {
         state.engineStopped = true;
+        state.engineStopCalls += 1;
     };
 
     return { db, logger, workerPool, engine, state };
@@ -206,6 +207,34 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(stubs.state.dbClosed, true);
     assert.equal(stubs.state.poolClosed, true);
     assert.equal(stubs.state.engineStopped, true);
+});
+
+test('shutdown should wait for in-flight engine start before closing db', async () => {
+    const stubs = createStubs();
+    let releaseStart;
+    const startGate = new Promise((resolve) => {
+        releaseStart = resolve;
+    });
+    stubs.engine.start = async () => {
+        stubs.state.engineStarted = true;
+        await startGate;
+    };
+
+    const { runtime } = await startRuntimeOnRandomPort(stubs);
+    const shutdownPromise = runtime.shutdown('RACE');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(stubs.state.engineStarted, true);
+    assert.equal(stubs.state.engineStopCalls >= 1, true);
+    assert.equal(stubs.state.dbClosed, false);
+    assert.equal(stubs.state.poolClosed, false);
+
+    releaseStart();
+    await shutdownPromise;
+
+    assert.equal(stubs.state.dbClosed, true);
+    assert.equal(stubs.state.poolClosed, true);
+    assert.equal(stubs.state.engineStopCalls >= 2, true);
 });
 
 test('server start should reject when listen emits error', async () => {
