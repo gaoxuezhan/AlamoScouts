@@ -2,23 +2,33 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 function loadConfigWithEnv(overrides = {}) {
-    const key = 'PROXY_HUB_BATTLE_L2_PRIMARY_URL';
-    const original = process.env[key];
-
-    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
-        process.env[key] = overrides[key];
-    } else {
-        delete process.env[key];
+    const managedKeys = new Set([
+        'PROXY_HUB_BATTLE_L2_PRIMARY_URL',
+        'PROXY_HUB_FEATURE_STAGE_WEIGHTING',
+        'PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS',
+        'PROXY_HUB_FEATURE_HONOR_PROMOTION_TUNING',
+        ...Object.keys(overrides),
+    ]);
+    const originals = {};
+    for (const key of managedKeys) {
+        originals[key] = process.env[key];
+        if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+            process.env[key] = overrides[key];
+        } else {
+            delete process.env[key];
+        }
     }
 
     const modulePath = require.resolve('./config');
     delete require.cache[modulePath];
     const config = require('./config');
 
-    if (original == null) {
-        delete process.env[key];
-    } else {
-        process.env[key] = original;
+    for (const key of managedKeys) {
+        if (originals[key] == null) {
+            delete process.env[key];
+        } else {
+            process.env[key] = originals[key];
+        }
     }
     delete require.cache[modulePath];
     return config;
@@ -59,4 +69,23 @@ test('config should support env override for L2 primary target', { concurrency: 
         PROXY_HUB_BATTLE_L2_PRIMARY_URL: 'https://example.com/l2-primary',
     });
     assert.equal(config.battle.targets.l2Primary[0].url, 'https://example.com/l2-primary');
+});
+
+test('config should parse rollout feature bool env values', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_FEATURE_STAGE_WEIGHTING: 'true',
+        PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS: 'false',
+        PROXY_HUB_FEATURE_HONOR_PROMOTION_TUNING: 'unexpected',
+    });
+    assert.equal(config.rollout.features.stageWeighting, true);
+    assert.equal(config.rollout.features.lifecycleHysteresis, false);
+    assert.equal(config.rollout.features.honorPromotionTuning, false);
+});
+
+test('config should accept soak policy profile from env', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'SOAK',
+    });
+    assert.equal(config.rollout.activeProfile, 'soak');
+    assert.equal(config.battle.l1LifecycleQuota.candidate, 0.20);
 });

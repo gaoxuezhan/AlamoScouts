@@ -37,6 +37,8 @@ test('feature patch helpers should validate and apply', () => {
     assert.equal(invalidType.ok, false);
     const invalidKey = normalizeFeaturePatch({ unknown: true });
     assert.equal(invalidKey.ok, false);
+    assert.equal(normalizeFeaturePatch(null).ok, false);
+    assert.equal(normalizeFeaturePatch([]).ok, false);
 });
 
 test('guardrail evaluation should report breaches and rollback recommendations', () => {
@@ -96,4 +98,15 @@ test('computeRecommendedRollbackFeatures should map breach codes', () => {
     ]);
     assert.equal(features.includes('stageWeighting'), true);
     assert.equal(features.includes('lifecycleHysteresis'), true);
+});
+
+test('guardrail evaluation should support missing db metric methods', () => {
+    const report = evaluateRolloutGuardrails({
+        db: {},
+        config: { rollout: {} },
+        nowIso: '2026-03-16T12:00:00.000Z',
+    });
+    assert.equal(report.metrics.activeNow, 0);
+    assert.equal(report.metrics.l2.successRate, 0);
+    assert.equal(Array.isArray(report.metrics.retirementDaily), true);
 });

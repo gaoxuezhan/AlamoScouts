@@ -274,6 +274,35 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(stubs.state.engineStopped, true);
 });
 
+test('rollout rollback endpoint should skip apply when guardrails are healthy', async () => {
+    const stubs = createStubs();
+    stubs.db.getActiveCount = () => 100;
+    stubs.db.getBattleSuccessRateSince = () => ({ stage: 'l2', total: 20, success: 16, successRate: 0.8 });
+    stubs.db.getRetirementsCountSince = () => 1;
+    stubs.db.getRetirementDailyCounts = () => [
+        { day: '2026-03-09', count: 1 },
+        { day: '2026-03-10', count: 1 },
+        { day: '2026-03-11', count: 1 },
+        { day: '2026-03-12', count: 1 },
+        { day: '2026-03-13', count: 1 },
+        { day: '2026-03-14', count: 1 },
+        { day: '2026-03-15', count: 1 },
+    ];
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+    const rollbackRes = await fetch(baseUrl + '/v1/proxies/rollout/guardrails/rollback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(rollbackRes.status, 200);
+    const rollbackPayload = await rollbackRes.json();
+    assert.equal(rollbackPayload.ok, true);
+    assert.equal(rollbackPayload.applied, false);
+    assert.equal(rollbackPayload.guardrails.shouldRollback, false);
+
+    await runtime.shutdown('TEST-ROLLBACK-SKIP');
+});
+
 test('shutdown should wait for in-flight engine start before closing db', async () => {
     const stubs = createStubs();
     let releaseStart;

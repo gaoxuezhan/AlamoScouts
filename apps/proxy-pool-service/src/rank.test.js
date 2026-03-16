@@ -52,6 +52,30 @@ function baseConfig() {
     };
 }
 
+// 0090A_enableHysteresis_启用滞回配置逻辑
+function enableHysteresis(cfg) {
+    cfg.rollout = {
+        features: {
+            stageWeighting: true,
+            lifecycleHysteresis: true,
+            honorPromotionTuning: true,
+        },
+    };
+    cfg.policy.lifecycle = {
+        transitionWindowSize: 20,
+        minSamplesForTransition: 3,
+        minStateStayMinutes: 0,
+        activeToReserveHealthThreshold: 50,
+        activeToReserveFailRatio: 0.8,
+        activeToReserveConsecutiveFail: 2,
+        reserveToActiveHealthThreshold: 60,
+        reserveToActiveSuccessRatio: 0.35,
+        reserveToActiveSuccessCount: 2,
+        reserveToActiveRecentL1SuccessWindowMin: 60,
+        reserveToActiveRecentL1BypassSuccessCount: 4,
+    };
+}
+
 // 0090_baseProxy_代理逻辑
 function baseProxy() {
     return {
@@ -576,4 +600,153 @@ test('state transition updates should include value score fields', () => {
     });
     assert.equal(typeof result.updates.ip_value_score, 'number');
     assert.equal(typeof result.updates.ip_value_breakdown_json, 'string');
+});
+
+test('hysteresis combat should move candidate to active and active to reserve', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const now = new Date().toISOString();
+
+    const candidate = evaluateCombat({
+        proxy: baseProxy(),
+        outcome: 'success',
+        latencyMs: 100,
+        nowIso: now,
+        config: cfg,
+    });
+    assert.equal(candidate.updates.lifecycle, 'active');
+    assert.equal(candidate.updates.lifecycle_changed_at, now);
+
+    const activeProxy = {
+        ...baseProxy(),
+        lifecycle: 'active',
+        health_score: 40,
+        consecutive_fail: 2,
+        recent_window_json: JSON.stringify([
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+        ]),
+    };
+    const demoteLifecycle = evaluateCombat({
+        proxy: activeProxy,
+        outcome: 'blocked',
+        latencyMs: 200,
+        nowIso: now,
+        config: cfg,
+    });
+    assert.equal(demoteLifecycle.updates.lifecycle, 'reserve');
+    assert.equal(demoteLifecycle.updates.lifecycle_changed_at, now);
+});
+
+test('hysteresis state transition should support reserve to active by recent L1 and bypass count', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const reserveRecent = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'reserve',
+            health_score: 80,
+            lifecycle_changed_at: '2026-03-16T10:00:00.000Z',
+            last_l1_success_at: '2026-03-16T11:40:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(reserveRecent.change, 'reserve_to_active');
+    assert.equal(reserveRecent.updates.lifecycle, 'active');
+
+    const reserveBypass = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'reserve',
+            health_score: 80,
+            lifecycle_changed_at: '2026-03-16T10:00:00.000Z',
+            last_l1_success_at: '2026-03-16T07:00:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(reserveBypass.change, 'reserve_to_active');
+    assert.equal(reserveBypass.updates.lifecycle, 'active');
+});
+
+test('hysteresis state transition should move active to reserve when health drops', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const result = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 45,
+            lifecycle_changed_at: '2026-03-16T09:00:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(result.change, 'active_to_reserve');
+    assert.equal(result.updates.lifecycle, 'reserve');
+});
+
+test('hysteresis fail-ratio branches should demote lifecycle with high fail windows', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const combatResult = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 90,
+            consecutive_fail: 1,
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        outcome: 'blocked',
+        latencyMs: 200,
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(combatResult.updates.lifecycle, 'reserve');
+
+    const stateResult = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 90,
+            consecutive_fail: 3,
+            lifecycle_changed_at: '2026-03-16T09:00:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(stateResult.change, 'active_to_reserve');
 });
