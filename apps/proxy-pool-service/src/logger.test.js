@@ -1,6 +1,6 @@
 ﻿const test = require('node:test');
 const assert = require('node:assert/strict');
-const { RuntimeLogger } = require('./logger');
+const { RuntimeLogger, localizeRuntimeText, localizeRuntimeRecord } = require('./logger');
 
 // 0073_createDbStub_创建逻辑
 function createDbStub(throwOnInsert = false) {
@@ -77,4 +77,57 @@ test('logger should fallback to default event name when absent', () => {
     const logger = new RuntimeLogger({ db, retention: 2 });
     const entry = logger.write({});
     assert.equal(entry.event, '系统事件');
+});
+
+test('localizeRuntimeText should map known tokens and lifecycle labels', () => {
+    assert.equal(localizeRuntimeText('success'), '成功');
+    assert.equal(localizeRuntimeText('blocked'), '封禁');
+    assert.equal(localizeRuntimeText('timeout'), '超时');
+    assert.equal(localizeRuntimeText('network_error'), '网络错误');
+    assert.equal(localizeRuntimeText('networkError'), '网络错误');
+    assert.equal(localizeRuntimeText('invalid_feedback'), '反馈无效');
+    assert.equal(localizeRuntimeText('invalidFeedback'), '反馈无效');
+    assert.equal(localizeRuntimeText('active'), '现役');
+    assert.equal(localizeRuntimeText('新兵/active'), '新兵/现役');
+    assert.equal(localizeRuntimeText(' candidate '), '候选');
+    assert.equal(localizeRuntimeText(null), '-');
+    assert.equal(localizeRuntimeText(''), '-');
+});
+
+test('localizeRuntimeRecord should inject raw fields into details when localized', () => {
+    const localized = localizeRuntimeRecord({
+        result: 'network_error',
+        reason: '新兵/active',
+        action: 'wait for timeout',
+        details: { traceId: 'x-1' },
+    });
+
+    assert.equal(localized.result, '网络错误');
+    assert.equal(localized.reason, '新兵/现役');
+    assert.equal(localized.action, 'wait for 超时');
+    assert.equal(localized.details.traceId, 'x-1');
+    assert.equal(localized.details.raw_result, 'network_error');
+    assert.equal(localized.details.raw_reason, '新兵/active');
+    assert.equal(localized.details.raw_action, 'wait for timeout');
+});
+
+test('logger should normalize record fields to chinese and preserve raw values in details', () => {
+    const db = createDbStub(false);
+    const logger = new RuntimeLogger({ db, retention: 2 });
+
+    const entry = logger.write({
+        event: '写数据库成功',
+        result: 'blocked',
+        reason: '列兵/reserve',
+        action: 'retry after timeout',
+        details: 'not-object',
+    });
+
+    assert.equal(entry.result, '封禁');
+    assert.equal(entry.reason, '列兵/预备');
+    assert.equal(entry.action, 'retry after 超时');
+    assert.equal(entry.details.raw_result, 'blocked');
+    assert.equal(entry.details.raw_reason, '列兵/reserve');
+    assert.equal(entry.details.raw_action, 'retry after timeout');
+    assert.equal(db.logs[0].details.raw_result, 'blocked');
 });

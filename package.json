@@ -11,6 +11,7 @@
     "soak:v1": "node apps/proxy-pool-service/src/soak.js",
     "watch:soak": "node apps/proxy-pool-service/src/soak-watchdog-v2.js",
     "migrate:proxyhub:names": "node apps/proxy-pool-service/src/migrate-display-names.js",
+    "migrate:proxyhub:runtime-logs": "node apps/proxy-pool-service/src/migrate-runtime-log-localization.js",
     "test:proxyhub": "node --test apps/proxy-pool-service/src/**/*.test.js apps/proxy-pool-service/tests/**/*.integration.test.js",
     "test:proxyhub:unit": "node --test apps/proxy-pool-service/src/**/*.test.js",
     "test:proxyhub:integration": "node --test apps/proxy-pool-service/tests/**/*.integration.test.js",
