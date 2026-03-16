@@ -88,6 +88,8 @@ class ProxyHubDb {
                 recent_window_json TEXT NOT NULL DEFAULT '[]',
                 honor_history_json TEXT NOT NULL DEFAULT '[]',
                 honor_active_json TEXT NOT NULL DEFAULT '[]',
+                lifecycle_changed_at TEXT,
+                last_l1_success_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL
@@ -219,10 +221,10 @@ class ProxyHubDb {
         this.insertProxyStmt = this.db.prepare(`
             INSERT INTO proxies (
                 unique_key, ip, port, protocol, source, batch_id, display_name,
-                lifecycle, rank, created_at, updated_at, last_seen_at
+                lifecycle, rank, lifecycle_changed_at, created_at, updated_at, last_seen_at
             ) VALUES (
                 @unique_key, @ip, @port, @protocol, @source, @batch_id, @display_name,
-                'candidate', '新兵', @now, @now, @now
+                'candidate', '新兵', @now, @now, @now, @now
             )
         `);
 
@@ -259,6 +261,8 @@ class ProxyHubDb {
             { name: 'battle_fail_count', sql: 'INTEGER NOT NULL DEFAULT 0' },
             { name: 'ip_value_score', sql: 'REAL NOT NULL DEFAULT 0' },
             { name: 'ip_value_breakdown_json', sql: "TEXT NOT NULL DEFAULT '{}'" },
+            { name: 'lifecycle_changed_at', sql: 'TEXT' },
+            { name: 'last_l1_success_at', sql: 'TEXT' },
         ];
 
         for (const column of requiredColumns) {
@@ -525,33 +529,95 @@ class ProxyHubDb {
         `).all(limit);
     }
 
-    // 0192_listProxiesForBattleL1_列出战场L1候选逻辑
+    // 0192_normalizeLifecycleQuota_规范化战场配额逻辑
+    normalizeLifecycleQuota(quota) {
+        if (quota != null && typeof quota === 'object' && !Array.isArray(quota)) {
+            const active = Math.max(0, Number(quota.active) || 0);
+            const reserve = Math.max(0, Number(quota.reserve) || 0);
+            const candidate = Math.max(0, Number(quota.candidate) || 0);
+            const sum = active + reserve + candidate;
+            if (sum > 0) {
+                return {
+                    active: active / sum,
+                    reserve: reserve / sum,
+                    candidate: candidate / sum,
+                };
+            }
+        }
+
+        const normalizedCandidate = Math.max(0, Math.min(1, Number(quota) || 0));
+        const nonCandidate = 1 - normalizedCandidate;
+        return {
+            active: nonCandidate * 0.65,
+            reserve: nonCandidate * 0.35,
+            candidate: normalizedCandidate,
+        };
+    }
+
+    // 0193_pickQuotaCounts_分配候选数量逻辑
+    pickQuotaCounts(limit, quota) {
+        const keys = ['active', 'reserve', 'candidate'];
+        const raw = keys.map((key) => ({
+            key,
+            exact: quota[key] * limit,
+        }));
+        const counts = {};
+        let used = 0;
+
+        for (const item of raw) {
+            const floor = Math.floor(item.exact);
+            counts[item.key] = floor;
+            used += floor;
+        }
+
+        let remain = Math.max(0, limit - used);
+        const byFraction = raw
+            .map((item) => ({ key: item.key, fraction: item.exact - Math.floor(item.exact) }))
+            .sort((a, b) => b.fraction - a.fraction);
+        let idx = 0;
+        while (remain > 0 && byFraction.length > 0) {
+            counts[byFraction[idx % byFraction.length].key] += 1;
+            remain -= 1;
+            idx += 1;
+        }
+
+        return counts;
+    }
+
+    // 0194_listProxiesForBattleL1_列出战场L1候选逻辑
     listProxiesForBattleL1(limit, candidateQuota = 0.15) {
         const safeLimit = Math.max(0, Number(limit) || 0);
         if (safeLimit === 0) return [];
 
-        const normalizedQuota = Math.max(0, Math.min(1, Number(candidateQuota) || 0));
-        const candidateLimit = Math.min(safeLimit, Math.max(0, Math.floor(safeLimit * normalizedQuota)));
-        const coreLimit = Math.max(0, safeLimit - candidateLimit);
+        const normalizedQuota = this.normalizeLifecycleQuota(candidateQuota);
+        const quotaCounts = this.pickQuotaCounts(safeLimit, normalizedQuota);
 
-        const nonCandidate = this.db.prepare(`
+        const actives = this.db.prepare(`
             SELECT * FROM proxies
-            WHERE lifecycle IN ('active', 'reserve')
+            WHERE lifecycle = 'active'
             ORDER BY
                 COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
-                CASE lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 ELSE 2 END ASC,
                 updated_at ASC
             LIMIT ?
-        `).all(coreLimit);
+        `).all(quotaCounts.active);
+
+        const reserves = this.db.prepare(`
+            SELECT * FROM proxies
+            WHERE lifecycle = 'reserve'
+            ORDER BY
+                COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
+                updated_at ASC
+            LIMIT ?
+        `).all(quotaCounts.reserve);
 
         const candidates = this.db.prepare(`
             SELECT * FROM proxies
             WHERE lifecycle = 'candidate'
             ORDER BY COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC, updated_at ASC
             LIMIT ?
-        `).all(candidateLimit);
+        `).all(quotaCounts.candidate);
 
-        const merged = [...nonCandidate, ...candidates];
+        const merged = [...actives, ...reserves, ...candidates];
         if (merged.length >= safeLimit) {
             return merged.slice(0, safeLimit);
         }
@@ -570,7 +636,7 @@ class ProxyHubDb {
         return [...merged, ...filled];
     }
 
-    // 0193_listProxiesForBattleL2_列出战场L2候选逻辑
+    // 0195_listProxiesForBattleL2_列出战场L2候选逻辑
     listProxiesForBattleL2(limit, lookbackMinutes = 10) {
         const safeLimit = Math.max(0, Number(limit) || 0);
         if (safeLimit === 0) return [];
@@ -726,7 +792,7 @@ class ProxyHubDb {
         this.db.prepare('DELETE FROM pool_snapshots WHERE timestamp < ?').run(cutoffIso);
     }
 
-    // 0194_insertBattleTestRun_写入战场测试逻辑
+    // 0196_insertBattleTestRun_写入战场测试逻辑
     insertBattleTestRun(record) {
         this.insertBattleTestRunStmt.run({
             timestamp: record.timestamp,
@@ -739,6 +805,62 @@ class ProxyHubDb {
             reason: record.reason || '',
             details_json: JSON.stringify(record.details || {}),
         });
+    }
+
+    // 0197_getActiveCount_获取active数量逻辑
+    getActiveCount() {
+        const row = this.db.prepare(`
+            SELECT COUNT(*) AS c
+            FROM proxies
+            WHERE lifecycle = 'active'
+        `).get();
+        return row?.c || 0;
+    }
+
+    // 0198_getBattleSuccessRateSince_获取阶段成功率逻辑
+    getBattleSuccessRateSince(stage, sinceIso) {
+        const row = this.db.prepare(`
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success
+            FROM battle_test_runs
+            WHERE stage = ?
+              AND timestamp >= ?
+        `).get(stage, sinceIso);
+
+        const total = row?.total || 0;
+        const success = row?.success || 0;
+        return {
+            stage,
+            total,
+            success,
+            successRate: total > 0 ? success / total : 0,
+        };
+    }
+
+    // 0199_getRetirementsCountSince_获取区间退役数逻辑
+    getRetirementsCountSince(sinceIso) {
+        const row = this.db.prepare(`
+            SELECT COUNT(*) AS c
+            FROM retirements
+            WHERE retired_at >= ?
+        `).get(sinceIso);
+        return row?.c || 0;
+    }
+
+    // 0200_getRetirementDailyCounts_获取按日退役分布逻辑
+    getRetirementDailyCounts(days = 7, endIso = new Date().toISOString()) {
+        const safeDays = Math.max(1, Number(days) || 7);
+        const endAt = Date.parse(endIso);
+        const startIso = new Date(endAt - safeDays * 24 * 60 * 60 * 1000).toISOString();
+        return this.db.prepare(`
+            SELECT substr(retired_at, 1, 10) AS day, COUNT(*) AS count
+            FROM retirements
+            WHERE retired_at >= ?
+              AND retired_at <= ?
+            GROUP BY day
+            ORDER BY day ASC
+        `).all(startIso, endIso);
     }
 
     // 0185_getRuntimeLogs_获取运行时日志逻辑
@@ -783,6 +905,7 @@ class ProxyHubDb {
                 total_samples, retired_type, is_applied, updated_at, last_checked_at,
                 last_validation_at, last_validation_ok, last_validation_reason, last_validation_latency_ms,
                 last_battle_checked_at, last_battle_outcome, battle_success_count, battle_fail_count,
+                lifecycle_changed_at, last_l1_success_at,
                 ip_value_score, ip_value_breakdown_json
             FROM proxies
             ${where}

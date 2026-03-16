@@ -1,5 +1,7 @@
-const { RANKS, RETIREMENT_TYPES, HONOR_TYPES } = require('./constants');
+﻿const { RANKS, RETIREMENT_TYPES, HONOR_TYPES } = require('./constants');
 const { computeProxyValue } = require('./value-model');
+
+const EVENT_VERSION = 'v1.1';
 
 // 0081_clamp_限制逻辑
 function clamp(value, min, max) {
@@ -19,35 +21,71 @@ function safeParseJson(raw, fallback) {
 
 // 0083_rankIndex_军衔逻辑
 function rankIndex(rank) {
-    const idx = RANKS.indexOf(rank);
-    return idx >= 0 ? idx : 0;
+    return RANKS.indexOf(rank);
 }
 
-// 0084_computeRatios_执行computeRatios相关逻辑
-function computeRatios(windowRecords, nowMs, regularWindowSize, severeWindowMs) {
-    const recent = windowRecords.slice(-regularWindowSize);
-    const regularSamples = recent.length;
-    const regularBlocked = recent.filter((item) => item.o === 'blocked').length;
-    const regularBlockedRatio = regularSamples > 0 ? regularBlocked / regularSamples : 0;
-
-    const severe = windowRecords.filter((item) => nowMs - Date.parse(item.t) <= severeWindowMs);
-    const severeSamples = severe.length;
-    const severeBlocked = severe.filter((item) => item.o === 'blocked').length;
-    const severeBlockedRatio = severeSamples > 0 ? severeBlocked / severeSamples : 0;
-
-    const success = recent.filter((item) => item.o === 'success').length;
-    const successRatio = regularSamples > 0 ? success / regularSamples : 0;
-
+// 0084_getFeatureFlags_获取开关逻辑
+function getFeatureFlags(config = {}) {
+    const flags = config.rollout?.features || {};
     return {
-        regularSamples,
-        regularBlockedRatio,
-        severeSamples,
-        severeBlockedRatio,
-        successRatio,
+        stageWeighting: flags.stageWeighting === true,
+        lifecycleHysteresis: flags.lifecycleHysteresis === true,
+        honorPromotionTuning: flags.honorPromotionTuning === true,
     };
 }
 
-// 0085_scoreDelta_评分逻辑
+// 0085_selectThresholds_阈值选择逻辑
+function selectThresholds(policy, features) {
+    const selectedRanks = features.honorPromotionTuning
+        ? (policy.ranks || policy.legacy?.ranks || [])
+        : (policy.legacy?.ranks || policy.ranks || []);
+    const selectedHonors = features.honorPromotionTuning
+        ? (policy.honors || policy.legacy?.honors || {})
+        : (policy.legacy?.honors || policy.honors || {});
+
+    return {
+        ranks: selectedRanks,
+        honors: selectedHonors,
+    };
+}
+
+// 0086_computeWindowStats_计算窗口指标逻辑
+function computeWindowStats(windowRecords, nowMs, options) {
+    const regularWindowSize = Math.max(1, Number(options.regularWindowSize || 50));
+    const severeWindowMs = Math.max(1, Number(options.severeWindowMs || 60 * 60 * 1000));
+    const transitionWindowSize = Math.max(1, Number(options.transitionWindowSize || 20));
+
+    const regular = windowRecords.slice(-regularWindowSize);
+    const severe = windowRecords.filter((item) => {
+        const at = Date.parse(item.t);
+        return Number.isFinite(at) && nowMs - at <= severeWindowMs;
+    });
+    const transition = windowRecords.slice(-transitionWindowSize);
+
+    const build = (records) => {
+        const samples = records.length;
+        const successCount = records.filter((item) => item.o === 'success').length;
+        const blockedCount = records.filter((item) => item.o === 'blocked').length;
+        const failCount = samples - successCount;
+        return {
+            samples,
+            successCount,
+            blockedCount,
+            failCount,
+            successRatio: samples > 0 ? successCount / samples : 0,
+            failRatio: samples > 0 ? failCount / samples : 0,
+            blockedRatio: samples > 0 ? blockedCount / samples : 0,
+        };
+    };
+
+    return {
+        regular: build(regular),
+        severe: build(severe),
+        transition: build(transition),
+    };
+}
+
+// 0087_scoreDelta_评分逻辑
 function scoreDelta(outcome, latencyMs, scoring) {
     let delta = 0;
     if (outcome === 'success') {
@@ -71,13 +109,60 @@ function scoreDelta(outcome, latencyMs, scoring) {
     return delta;
 }
 
-// 0086_evaluateCombat_执行evaluateCombat相关逻辑
-function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
+// 0088_healthDisciplineDelta_健康纪律变化逻辑
+function healthDisciplineDelta(outcome) {
+    if (outcome === 'success') return { health: 1.2, discipline: 0 };
+    if (outcome === 'blocked') return { health: -6, discipline: 0 };
+    if (outcome === 'timeout') return { health: -5, discipline: 0 };
+    if (outcome === 'network_error') return { health: -4, discipline: 0 };
+    return { health: -8, discipline: -10 };
+}
+
+// 0089_stageMultiplier_阶段系数逻辑
+function stageMultiplier(scoring, stage, enabled, type) {
+    if (!enabled) return 1;
+    const map = scoring?.stageMultipliers?.[type] || {};
+    const value = Number(map[stage]);
+    return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+// 0090_minutesSince_距今分钟逻辑
+function minutesSince(iso, nowMs) {
+    if (!iso) return Number.POSITIVE_INFINITY;
+    const at = Date.parse(iso);
+    if (!Number.isFinite(at)) return Number.POSITIVE_INFINITY;
+    return Math.max(0, (nowMs - at) / 60_000);
+}
+
+// 0091_isStateStaySatisfied_状态停留满足逻辑
+function isStateStaySatisfied(proxy, nowMs, minStateStayMinutes) {
+    const minMinutes = Math.max(0, Number(minStateStayMinutes || 0));
+    if (minMinutes <= 0) return true;
+    const changedAt = proxy.lifecycle_changed_at || proxy.updated_at || proxy.last_checked_at;
+    const stayedMinutes = minutesSince(changedAt, nowMs);
+    return stayedMinutes >= minMinutes;
+}
+
+// 0092_buildEventDetails_构建事件详情逻辑
+function buildEventDetails(trigger, metrics, extra = {}) {
+    return {
+        version: EVENT_VERSION,
+        trigger,
+        metrics,
+        ...extra,
+    };
+}
+
+// 0093_evaluateCombat_执行evaluateCombat相关逻辑
+function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1' }) {
     const nowMs = Date.parse(nowIso);
     const policy = config.policy;
-    const scoring = policy.scoring;
-    const demotion = policy.demotion;
-    const retirement = policy.retirement;
+    const scoring = policy.scoring || {};
+    const demotion = policy.demotion || {};
+    const retirement = policy.retirement || {};
+    const lifecyclePolicy = policy.lifecycle || {};
+    const features = getFeatureFlags(config);
+    const selected = selectThresholds(policy, features);
 
     const updates = {};
     const events = [];
@@ -89,33 +174,30 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     windowRecords.push({ t: nowIso, o: outcome });
     const trimmedWindow = windowRecords.slice(-120);
 
-    const ratios = computeRatios(trimmedWindow, nowMs, demotion.regularWindowSize, demotion.severeWindowMinutes * 60 * 1000);
+    const ratios = computeWindowStats(trimmedWindow, nowMs, {
+        regularWindowSize: demotion.regularWindowSize,
+        severeWindowMs: Number(demotion.severeWindowMinutes || 60) * 60 * 1000,
+        transitionWindowSize: lifecyclePolicy.transitionWindowSize || 20,
+    });
 
     const previousCheckedMs = proxy.last_checked_at ? Date.parse(proxy.last_checked_at) : nowMs;
     const deltaHoursRaw = Math.max(0, (nowMs - previousCheckedMs) / 3_600_000);
-    const deltaHours = deltaHoursRaw * policy.serviceHourScale;
+    const deltaHours = deltaHoursRaw * Number(policy.serviceHourScale || 1);
 
     const nextServiceHours = (proxy.service_hours || 0) + deltaHours;
     const nextRankServiceHours = (proxy.rank_service_hours || 0) + deltaHours;
 
-    const pointsDelta = scoreDelta(outcome, latencyMs, scoring);
+    const rawPointsDelta = scoreDelta(outcome, latencyMs, scoring);
+    const scoreMul = stageMultiplier(scoring, stage, features.stageWeighting, 'score');
+    const pointsDelta = Math.round(rawPointsDelta * scoreMul);
     const nextCombatPoints = (proxy.combat_points || 0) + pointsDelta;
 
     let nextHealth = proxy.health_score ?? 60;
     let nextDiscipline = proxy.discipline_score ?? 100;
-
-    if (outcome === 'success') {
-        nextHealth += 1.2;
-    } else if (outcome === 'blocked') {
-        nextHealth -= 6;
-    } else if (outcome === 'timeout') {
-        nextHealth -= 5;
-    } else if (outcome === 'network_error') {
-        nextHealth -= 4;
-    } else {
-        nextHealth -= 8;
-        nextDiscipline -= 10;
-    }
+    const hdDelta = healthDisciplineDelta(outcome);
+    const healthMul = stageMultiplier(scoring, stage, features.stageWeighting, 'health');
+    nextHealth += hdDelta.health * healthMul;
+    nextDiscipline += hdDelta.discipline;
 
     nextHealth = clamp(nextHealth, 0, 100);
     nextDiscipline = clamp(nextDiscipline, 0, 100);
@@ -133,7 +215,8 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
         nextSuccess += 1;
         nextConsecutiveSuccess += 1;
         nextConsecutiveFail = 0;
-        if (ratios.regularBlockedRatio >= 0.35) {
+        const riskyFailRatioThreshold = Number(selected.honors?.riskyFailRatioThreshold ?? 0.65);
+        if (ratios.regular.failRatio >= riskyFailRatioThreshold) {
             nextRiskySuccess += 1;
         }
     } else {
@@ -153,10 +236,33 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     const nextTotalSamples = (proxy.total_samples || 0) + 1;
 
     let nextLifecycle = proxy.lifecycle || 'candidate';
-    if (outcome === 'success' && (nextLifecycle === 'candidate' || nextLifecycle === 'reserve')) {
+    let lifecycleChanged = false;
+
+    if (features.lifecycleHysteresis) {
+        if (outcome === 'success' && nextLifecycle === 'candidate') {
+            nextLifecycle = 'active';
+            lifecycleChanged = true;
+        } else if (
+            outcome !== 'success'
+            && nextLifecycle === 'active'
+            && (
+                nextHealth < Number(lifecyclePolicy.activeToReserveHealthThreshold ?? 50)
+                || (
+                    ratios.transition.samples >= Number(lifecyclePolicy.minSamplesForTransition ?? 20)
+                    && ratios.transition.failRatio >= Number(lifecyclePolicy.activeToReserveFailRatio ?? 0.8)
+                    && nextConsecutiveFail >= Number(lifecyclePolicy.activeToReserveConsecutiveFail ?? 6)
+                )
+            )
+        ) {
+            nextLifecycle = 'reserve';
+            lifecycleChanged = true;
+        }
+    } else if (outcome === 'success' && (nextLifecycle === 'candidate' || nextLifecycle === 'reserve')) {
         nextLifecycle = 'active';
+        lifecycleChanged = true;
     } else if (outcome !== 'success' && nextLifecycle === 'active' && nextHealth < 55) {
         nextLifecycle = 'reserve';
+        lifecycleChanged = true;
     }
 
     let nextRank = proxy.rank || '新兵';
@@ -164,9 +270,9 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     let demoted = false;
     let retiredType = proxy.retired_type || null;
 
-    const currentRankIndex = rankIndex(nextRank);
-    if (currentRankIndex < policy.ranks.length - 1) {
-        const nextRankPolicy = policy.ranks[currentRankIndex + 1];
+    const currentRankIdx = rankIndex(nextRank);
+    if (currentRankIdx >= 0 && currentRankIdx < selected.ranks.length - 1) {
+        const nextRankPolicy = selected.ranks[currentRankIdx + 1];
         if (
             nextRankServiceHours >= nextRankPolicy.minHours
             && nextCombatPoints >= nextRankPolicy.minPoints
@@ -174,12 +280,22 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
             && nextLifecycle !== 'retired'
         ) {
             nextRank = nextRankPolicy.rank;
-            nextProtectUntil = new Date(nowMs + policy.promotionProtectHours * 3_600_000).toISOString();
+            nextProtectUntil = new Date(nowMs + Number(policy.promotionProtectHours || 6) * 3_600_000).toISOString();
             updates.rank_service_hours = 0;
             events.push({
                 event_type: 'promotion',
                 message: `晋升：${proxy.display_name} 晋升为 ${nextRank}`,
-                details: { from: proxy.rank, to: nextRank },
+                details: buildEventDetails('promotion_threshold_met', {
+                    minHours: nextRankPolicy.minHours,
+                    minPoints: nextRankPolicy.minPoints,
+                    minSamples: nextRankPolicy.minSamples,
+                    rankServiceHours: Number(nextRankServiceHours.toFixed(3)),
+                    combatPoints: nextCombatPoints,
+                    totalSamples: nextTotalSamples,
+                }, {
+                    from: proxy.rank,
+                    to: nextRank,
+                }),
             });
         }
     }
@@ -187,69 +303,117 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     const protectedUntilMs = nextProtectUntil ? Date.parse(nextProtectUntil) : 0;
     const inProtectWindow = protectedUntilMs > nowMs;
 
-    const severeDemotion = ratios.severeSamples >= demotion.severeMinSamples
-        && ratios.severeBlockedRatio >= demotion.severeBlockedRatio;
+    const severeFailThreshold = Number(demotion.severeFailRatio ?? demotion.severeBlockedRatio ?? 0.9);
+    const regularFailThreshold = Number(demotion.regularFailRatio ?? demotion.regularBlockedRatio ?? 0.72);
+    const severeDemotion = ratios.severe.samples >= Number(demotion.severeMinSamples || 12)
+        && ratios.severe.failRatio >= severeFailThreshold;
 
-    const regularDemotion = ratios.regularSamples >= demotion.regularMinSamples
+    const regularDemotion = ratios.regular.samples >= Number(demotion.regularMinSamples || 20)
         && (
-            ratios.regularBlockedRatio >= demotion.regularBlockedRatio
-            || nextHealth < demotion.healthThreshold
+            ratios.regular.failRatio >= regularFailThreshold
+            || nextHealth < Number(demotion.healthThreshold ?? 40)
         );
 
-    if (rankIndex(nextRank) > 0) {
+    const currentRankForDemotion = rankIndex(nextRank);
+    if (currentRankForDemotion > 0 && currentRankForDemotion < selected.ranks.length) {
         if (severeDemotion || (!inProtectWindow && regularDemotion)) {
-            nextRank = policy.ranks[rankIndex(nextRank) - 1].rank;
+            nextRank = selected.ranks[currentRankForDemotion - 1].rank;
             demoted = true;
             updates.rank_service_hours = 0;
             events.push({
                 event_type: 'demotion',
                 message: `降级：${proxy.display_name} 降为 ${nextRank}`,
-                details: { severe: severeDemotion },
+                details: buildEventDetails(
+                    severeDemotion ? 'severe_fail_ratio' : 'regular_fail_ratio_or_low_health',
+                    {
+                        severeSamples: ratios.severe.samples,
+                        severeFailRatio: Number(ratios.severe.failRatio.toFixed(4)),
+                        regularSamples: ratios.regular.samples,
+                        regularFailRatio: Number(ratios.regular.failRatio.toFixed(4)),
+                        healthScore: Number(nextHealth.toFixed(2)),
+                        inProtectWindow,
+                    },
+                    { severe: severeDemotion },
+                ),
             });
         }
     }
 
+    const technicalEligible = Array.isArray(retirement.technicalEligibleLifecycles)
+        ? retirement.technicalEligibleLifecycles
+        : ['active', 'reserve'];
+    const overallSuccessRatio = nextTotalSamples > 0 ? nextSuccess / nextTotalSamples : 0;
+
     if (nextLifecycle !== 'retired') {
-        if (nextDiscipline < retirement.disciplineThreshold || nextInvalid >= retirement.disciplineInvalidCount) {
+        if (nextDiscipline < Number(retirement.disciplineThreshold || 40) || nextInvalid >= Number(retirement.disciplineInvalidCount || 5)) {
             nextLifecycle = 'retired';
             retiredType = RETIREMENT_TYPES.DISCIPLINE;
-        } else if (nextHealth < demotion.lowHealthRetireThreshold && ratios.regularBlockedRatio >= retirement.battleDamageBlockedRatio) {
+            lifecycleChanged = true;
+        } else if (
+            ratios.regular.samples >= Number(retirement.battleDamageMinSamples || 20)
+            && nextHealth < Number(demotion.lowHealthRetireThreshold ?? 20)
+            && ratios.regular.failRatio >= Number(retirement.battleDamageFailRatio ?? retirement.battleDamageBlockedRatio ?? 0.85)
+        ) {
             nextLifecycle = 'retired';
             retiredType = RETIREMENT_TYPES.BATTLE_DAMAGE;
-        } else if (nextTotalSamples >= retirement.technicalMinSamples && ratios.successRatio < retirement.technicalSuccessRatio) {
+            lifecycleChanged = true;
+        } else if (
+            technicalEligible.includes(proxy.lifecycle || 'candidate')
+            && nextTotalSamples >= Number(retirement.technicalMinSamples || 80)
+            && overallSuccessRatio < Number(retirement.technicalSuccessRatio || 0.08)
+        ) {
             nextLifecycle = 'retired';
             retiredType = RETIREMENT_TYPES.TECHNICAL;
+            lifecycleChanged = true;
         } else if (
-            nextServiceHours >= retirement.honorMinServiceHours
-            && nextSuccess >= retirement.honorMinSuccess
+            nextServiceHours >= Number(retirement.honorMinServiceHours || 720)
+            && nextSuccess >= Number(retirement.honorMinSuccess || 800)
             && ['尉官', '王牌'].includes(nextRank)
             && nextHealth >= 80
         ) {
             nextLifecycle = 'retired';
             retiredType = RETIREMENT_TYPES.HONOR;
+            lifecycleChanged = true;
         }
     }
 
     if (proxy.lifecycle !== 'retired' && nextLifecycle === 'retired') {
+        const trigger = retiredType === RETIREMENT_TYPES.DISCIPLINE
+            ? 'retire_discipline'
+            : retiredType === RETIREMENT_TYPES.BATTLE_DAMAGE
+                ? 'retire_battle_damage'
+                : retiredType === RETIREMENT_TYPES.TECHNICAL
+                    ? 'retire_technical'
+                    : 'retire_honor';
         events.push({
             event_type: 'retirement',
             message: `退伍：${proxy.display_name} (${retiredType})`,
-            details: { type: retiredType },
+            details: buildEventDetails(trigger, {
+                disciplineScore: Number(nextDiscipline.toFixed(2)),
+                invalidFeedbackCount: nextInvalid,
+                regularSamples: ratios.regular.samples,
+                regularFailRatio: Number(ratios.regular.failRatio.toFixed(4)),
+                totalSamples: nextTotalSamples,
+                overallSuccessRatio: Number(overallSuccessRatio.toFixed(4)),
+                healthScore: Number(nextHealth.toFixed(2)),
+            }, {
+                type: retiredType,
+            }),
         });
     }
 
-    // 0087_hasHonor_荣誉逻辑
+    // 0094_hasHonor_荣誉逻辑
     const hasHonor = (name) => honorHistory.includes(name);
 
-    if (nextConsecutiveSuccess >= policy.honors.steelStreak && !hasHonor(HONOR_TYPES.STEEL_STREAK)) {
+    if (nextConsecutiveSuccess >= Number(selected.honors.steelStreak || 999999) && !hasHonor(HONOR_TYPES.STEEL_STREAK)) {
         honorHistory.push(HONOR_TYPES.STEEL_STREAK);
         awards.push({ type: HONOR_TYPES.STEEL_STREAK, reason: '连续成功达到钢铁连胜标准' });
     }
-    if (nextRiskySuccess >= policy.honors.riskyWarrior && !hasHonor(HONOR_TYPES.RISKY_WARRIOR)) {
+    if (nextRiskySuccess >= Number(selected.honors.riskyWarrior || 999999) && !hasHonor(HONOR_TYPES.RISKY_WARRIOR)) {
         honorHistory.push(HONOR_TYPES.RISKY_WARRIOR);
         awards.push({ type: HONOR_TYPES.RISKY_WARRIOR, reason: '高风险环境成功次数达标' });
     }
-    if (nextTotalSamples >= policy.honors.thousandService && !hasHonor(HONOR_TYPES.THOUSAND_SERVICE)) {
+    if (nextTotalSamples >= Number(selected.honors.thousandService || 999999) && !hasHonor(HONOR_TYPES.THOUSAND_SERVICE)) {
         honorHistory.push(HONOR_TYPES.THOUSAND_SERVICE);
         awards.push({ type: HONOR_TYPES.THOUSAND_SERVICE, reason: '累计服役实战达到千次' });
     }
@@ -258,15 +422,24 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
         events.push({
             event_type: 'honor',
             message: `授予荣誉：${proxy.display_name} 获得 ${award.type}`,
-            details: { honorType: award.type, reason: award.reason },
+            details: buildEventDetails('honor_awarded', {
+                honorType: award.type,
+                consecutiveSuccess: nextConsecutiveSuccess,
+                riskySuccessCount: nextRiskySuccess,
+                totalSamples: nextTotalSamples,
+                regularFailRatio: Number(ratios.regular.failRatio.toFixed(4)),
+            }, {
+                honorType: award.type,
+                reason: award.reason,
+            }),
         });
     }
 
     const activeHonors = [];
-    if (honorHistory.includes(HONOR_TYPES.STEEL_STREAK) && nextConsecutiveSuccess >= policy.honors.steelStreak) {
+    if (honorHistory.includes(HONOR_TYPES.STEEL_STREAK) && nextConsecutiveSuccess >= Number(selected.honors.steelStreak || 999999)) {
         activeHonors.push(HONOR_TYPES.STEEL_STREAK);
     }
-    if (honorHistory.includes(HONOR_TYPES.RISKY_WARRIOR) && nextRiskySuccess >= policy.honors.riskyWarrior) {
+    if (honorHistory.includes(HONOR_TYPES.RISKY_WARRIOR) && nextRiskySuccess >= Number(selected.honors.riskyWarrior || 999999)) {
         activeHonors.push(HONOR_TYPES.RISKY_WARRIOR);
     }
     if (honorHistory.includes(HONOR_TYPES.THOUSAND_SERVICE)) {
@@ -297,6 +470,9 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     updates.recent_window_json = JSON.stringify(trimmedWindow);
     updates.honor_history_json = JSON.stringify(honorHistory);
     updates.honor_active_json = JSON.stringify(activeHonors);
+    if (lifecycleChanged) {
+        updates.lifecycle_changed_at = nowIso;
+    }
     const valuation = computeProxyValue({ ...proxy, ...updates }, policy);
     updates.ip_value_score = valuation.score;
     updates.ip_value_breakdown_json = JSON.stringify(valuation.breakdown);
@@ -310,31 +486,81 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config }) {
     };
 }
 
-// 0088_evaluateStateTransition_状态迁移逻辑
+// 0095_evaluateStateTransition_状态迁移逻辑
 function evaluateStateTransition({ proxy, nowIso, config }) {
     const nowMs = Date.parse(nowIso);
-    const demotion = config.policy.demotion;
-    const retirement = config.policy.retirement;
+    const policy = config.policy || {};
+    const demotion = policy.demotion || {};
+    const retirement = policy.retirement || {};
+    const lifecyclePolicy = policy.lifecycle || {};
+    const features = getFeatureFlags(config);
+
     const windowRecords = safeParseJson(proxy.recent_window_json, []);
-    const ratios = computeRatios(windowRecords, nowMs, demotion.regularWindowSize, demotion.severeWindowMinutes * 60 * 1000);
+    const ratios = computeWindowStats(windowRecords, nowMs, {
+        regularWindowSize: demotion.regularWindowSize,
+        severeWindowMs: Number(demotion.severeWindowMinutes || 60) * 60 * 1000,
+        transitionWindowSize: lifecyclePolicy.transitionWindowSize || 20,
+    });
 
     let lifecycle = proxy.lifecycle;
     let retiredType = proxy.retired_type;
     let change = null;
+    let trigger = null;
 
-    if (lifecycle === 'active' && (proxy.health_score < 55 || ratios.regularBlockedRatio >= 0.5)) {
+    if (features.lifecycleHysteresis) {
+        const staySatisfied = isStateStaySatisfied(proxy, nowMs, lifecyclePolicy.minStateStayMinutes || 30);
+        const transitionSampleMin = Number(lifecyclePolicy.minSamplesForTransition || 20);
+        if (
+            lifecycle === 'active'
+            && staySatisfied
+            && (
+                (proxy.health_score || 0) < Number(lifecyclePolicy.activeToReserveHealthThreshold ?? 50)
+                || (
+                    ratios.transition.samples >= transitionSampleMin
+                    && ratios.transition.failRatio >= Number(lifecyclePolicy.activeToReserveFailRatio ?? 0.8)
+                    && (proxy.consecutive_fail || 0) >= Number(lifecyclePolicy.activeToReserveConsecutiveFail ?? 6)
+                )
+            )
+        ) {
+            lifecycle = 'reserve';
+            change = 'active_to_reserve';
+            trigger = 'hysteresis_active_to_reserve';
+        } else if (
+            lifecycle === 'reserve'
+            && staySatisfied
+            && ratios.transition.samples >= transitionSampleMin
+            && (proxy.health_score || 0) >= Number(lifecyclePolicy.reserveToActiveHealthThreshold ?? 60)
+            && (
+                ratios.transition.successRatio >= Number(lifecyclePolicy.reserveToActiveSuccessRatio ?? 0.35)
+                || ratios.transition.successCount >= Number(lifecyclePolicy.reserveToActiveSuccessCount ?? 4)
+            )
+        ) {
+            const recentL1Minutes = minutesSince(proxy.last_l1_success_at, nowMs);
+            const l1Window = Number(lifecyclePolicy.reserveToActiveRecentL1SuccessWindowMin ?? 60);
+            const bypassSuccessCount = Number(lifecyclePolicy.reserveToActiveRecentL1BypassSuccessCount ?? 6);
+            if (recentL1Minutes <= l1Window || ratios.transition.successCount >= bypassSuccessCount) {
+                lifecycle = 'active';
+                change = 'reserve_to_active';
+                trigger = 'hysteresis_reserve_to_active';
+            }
+        }
+    } else if (lifecycle === 'active' && ((proxy.health_score || 0) < 55 || ratios.regular.blockedRatio >= 0.5)) {
         lifecycle = 'reserve';
         change = 'active_to_reserve';
-    } else if (lifecycle === 'reserve' && proxy.health_score >= 65 && ratios.successRatio >= 0.5) {
+        trigger = 'legacy_active_to_reserve';
+    } else if (lifecycle === 'reserve' && (proxy.health_score || 0) >= 65 && ratios.regular.successRatio >= 0.5) {
         lifecycle = 'active';
         change = 'reserve_to_active';
+        trigger = 'legacy_reserve_to_active';
     }
 
     if (lifecycle !== 'retired') {
-        if (proxy.discipline_score < retirement.disciplineThreshold || proxy.invalid_feedback_count >= retirement.disciplineInvalidCount) {
+        if ((proxy.discipline_score || 0) < Number(retirement.disciplineThreshold || 40)
+            || (proxy.invalid_feedback_count || 0) >= Number(retirement.disciplineInvalidCount || 5)) {
             lifecycle = 'retired';
             retiredType = RETIREMENT_TYPES.DISCIPLINE;
             change = 'retire_discipline';
+            trigger = 'discipline_threshold';
         }
     }
 
@@ -344,18 +570,41 @@ function evaluateStateTransition({ proxy, nowIso, config }) {
             lifecycle,
             retired_type: retiredType,
         },
-        config.policy,
+        policy,
     );
 
+    const updates = {
+        lifecycle,
+        retired_type: retiredType,
+        ip_value_score: valuation.score,
+        ip_value_breakdown_json: JSON.stringify(valuation.breakdown),
+        updated_at: nowIso,
+    };
+    if (change) {
+        updates.lifecycle_changed_at = nowIso;
+    }
+
     return {
-        updates: {
-            lifecycle,
-            retired_type: retiredType,
-            ip_value_score: valuation.score,
-            ip_value_breakdown_json: JSON.stringify(valuation.breakdown),
-            updated_at: nowIso,
-        },
+        updates,
         change,
+        eventDetails: change
+            ? buildEventDetails(trigger || change, {
+                regularSamples: ratios.regular.samples,
+                regularFailRatio: Number(ratios.regular.failRatio.toFixed(4)),
+                regularSuccessRatio: Number(ratios.regular.successRatio.toFixed(4)),
+                transitionSamples: ratios.transition.samples,
+                transitionFailRatio: Number(ratios.transition.failRatio.toFixed(4)),
+                transitionSuccessRatio: Number(ratios.transition.successRatio.toFixed(4)),
+                transitionSuccessCount: ratios.transition.successCount,
+                healthScore: Number((proxy.health_score || 0).toFixed(2)),
+                disciplineScore: Number((proxy.discipline_score || 0).toFixed(2)),
+                consecutiveFail: proxy.consecutive_fail || 0,
+                lastL1SuccessMinutes: Number(minutesSince(proxy.last_l1_success_at, nowMs).toFixed(2)),
+            }, {
+                from: proxy.lifecycle,
+                to: lifecycle,
+            })
+            : null,
     };
 }
 

@@ -268,19 +268,16 @@ test('invalid feedback should lower discipline and retire by discipline', () => 
 test('battle damage retirement should trigger', () => {
     const cfg = baseConfig();
     const now = new Date().toISOString();
+    const records = Array.from({ length: 19 }, () => ({ t: now, o: 'blocked' }));
+    records.push({ t: now, o: 'success' });
     const proxy = {
         ...baseProxy(),
         lifecycle: 'active',
         health_score: 18,
         rank: '列兵',
         total_samples: 100,
-        recent_window_json: JSON.stringify([
-            { t: now, o: 'blocked' },
-            { t: now, o: 'blocked' },
-            { t: now, o: 'blocked' },
-            { t: now, o: 'blocked' },
-            { t: now, o: 'success' },
-        ]),
+        success_count: 50,
+        recent_window_json: JSON.stringify(records),
     };
 
     const result = evaluateCombat({
@@ -379,6 +376,11 @@ test('risky warrior and thousand service honors should be awarded and active', (
         recent_window_json: JSON.stringify([
             { t: now, o: 'blocked' },
             { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
             { t: now, o: 'success' },
             { t: now, o: 'success' },
         ]),
@@ -396,6 +398,29 @@ test('risky warrior and thousand service honors should be awarded and active', (
     assert.equal(awardTypes.includes('逆风勇士'), true);
     assert.equal(awardTypes.includes('千次服役'), true);
     assert.equal(JSON.parse(result.updates.honor_active_json).includes('逆风勇士'), true);
+});
+
+test('combat events should include v1.1 details version', () => {
+    const cfg = baseConfig();
+    const nowIso = new Date().toISOString();
+    const proxy = {
+        ...baseProxy(),
+        rank: '新兵',
+        rank_service_hours: 1.2,
+        combat_points: 8,
+        total_samples: 2,
+    };
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'success',
+        latencyMs: 800,
+        nowIso,
+        config: cfg,
+    });
+
+    const promotion = result.events.find((item) => item.event_type === 'promotion');
+    assert.equal(Boolean(promotion), true);
+    assert.equal(promotion.details.version, 'v1.1');
 });
 
 test('invalid json in history fields should fallback safely', () => {
