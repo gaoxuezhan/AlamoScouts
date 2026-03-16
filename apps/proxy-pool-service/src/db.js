@@ -403,6 +403,7 @@ class ProxyHubDb {
                 UPDATE proxy_events
                 SET display_name = @new_name
                 WHERE proxy_id = @id
+                   OR (proxy_id IS NULL AND display_name = @old_name)
             `);
             const updateHonorsStmt = this.db.prepare(`
                 UPDATE honors
@@ -432,6 +433,7 @@ class ProxyHubDb {
                 tableUpdates.proxy_events += updateEventsStmt.run({
                     id: row.id,
                     new_name: row.newName,
+                    old_name: row.oldName,
                 }).changes;
                 tableUpdates.honors += updateHonorsStmt.run({
                     id: row.id,

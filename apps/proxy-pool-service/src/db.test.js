@@ -711,6 +711,40 @@ test('renameAllDisplayNames apply should sync all display-name tables', () => {
     cleanup(h);
 });
 
+test('renameAllDisplayNames should update legacy proxy_events rows with null proxy_id by old name', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [{ ip: '10.2.3.1', port: 80, protocol: 'http' }],
+        () => '苍隼-北辰-01',
+        'src-rename-legacy-null',
+        'batch-rename-legacy-null',
+        now,
+    );
+
+    const proxy = h.db.getProxyList({ limit: 10 })[0];
+    h.db.insertProxyEvent({
+        timestamp: now,
+        proxy_id: null,
+        display_name: proxy.display_name,
+        event_type: 'legacy',
+        level: 'info',
+        message: 'legacy null proxy id',
+        details: {},
+    });
+
+    const outcome = h.db.renameAllDisplayNames({
+        dryRun: false,
+        generateName: createNameGenerator(['张三']),
+    });
+
+    assert.equal(outcome.applied, true);
+    assert.equal(outcome.oldPatternCounts.proxy_events, 0);
+    assert.equal(h.db.getEvents(10).every((item) => item.display_name === '张三'), true);
+    cleanup(h);
+});
+
 test('renameAllDisplayNames should rollback when transaction throws', () => {
     const h = createDb();
     const now = new Date().toISOString();
