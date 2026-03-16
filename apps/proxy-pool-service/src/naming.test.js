@@ -1,28 +1,36 @@
-﻿const test = require('node:test');
+const test = require('node:test');
 const assert = require('node:assert/strict');
-const { generateRecruitName } = require('./naming');
+const {
+    extractChineseChars,
+    isValidChineseName,
+    generateRecruitName,
+} = require('./naming');
 
-test('generateRecruitName should create unique names with retry', () => {
+test('name helpers should keep only Chinese chars and validate 2/3-char names', () => {
+    assert.equal(extractChineseChars('A张-三01'), '张三');
+    assert.equal(isValidChineseName('张三'), true);
+    assert.equal(isValidChineseName('欧阳明'), true);
+    assert.equal(isValidChineseName('王小小明'), false);
+    assert.equal(isValidChineseName('A张三'), false);
+});
+
+test('generateRecruitName should create unique Chinese names with retry', () => {
     const used = new Set();
-    // 0080_isUnique_判断逻辑
-    const isUnique = (name) => !used.has(name);
-
     for (let i = 0; i < 200; i += 1) {
-        const name = generateRecruitName(isUnique);
+        const name = generateRecruitName((candidate) => !used.has(candidate));
         assert.equal(used.has(name), false);
+        assert.equal(/^[\u3400-\u9fff]{2,3}$/.test(name), true);
         used.add(name);
     }
-
     assert.equal(used.size, 200);
 });
 
-test('generateRecruitName should fallback with checksum when collisions happen', () => {
-    let callCount = 0;
+test('generateRecruitName should continue retrying when collisions happen', () => {
+    let blocked = 20;
     const seen = new Set();
-
     const name = generateRecruitName((candidate) => {
-        callCount += 1;
-        if (callCount <= 10) {
+        if (blocked > 0) {
+            blocked -= 1;
             return false;
         }
         if (seen.has(candidate)) {
@@ -32,12 +40,12 @@ test('generateRecruitName should fallback with checksum when collisions happen',
         return true;
     });
 
-    assert.ok(name.split('-').length >= 4);
+    assert.equal(/^[\u3400-\u9fff]{2,3}$/.test(name), true);
 });
 
 test('generateRecruitName should throw when uniqueness never satisfied', () => {
     assert.throws(
         () => generateRecruitName(() => false),
-        /无法生成唯一的新兵昵称/,
+        /无法生成唯一中文姓名/,
     );
 });

@@ -563,3 +563,177 @@ test('ensureProxyColumns should add missing columns in legacy schema', () => {
     assert.equal(execCalls.length > 0, true);
     assert.equal(execCalls.every((sql) => sql.includes('ALTER TABLE proxies ADD COLUMN')), true);
 });
+
+// 0217_createNameGenerator_创建迁移姓名生成器逻辑
+function createNameGenerator(pool) {
+    const names = [...pool];
+    let index = 0;
+    return (isUnique) => {
+        while (index < names.length) {
+            const candidate = names[index];
+            index += 1;
+            if (isUnique(candidate)) {
+                return candidate;
+            }
+        }
+        throw new Error('name-pool-exhausted');
+    };
+}
+
+test('renameAllDisplayNames dry-run should return mappings without changing data', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [
+            { ip: '10.1.1.1', port: 80, protocol: 'http' },
+            { ip: '10.1.1.2', port: 80, protocol: 'http' },
+        ],
+        (() => {
+            const old = ['苍隼-北辰-01', '雷霄-玄武-08'];
+            let i = 0;
+            return () => old[i++];
+        })(),
+        'src-rename',
+        'batch-rename',
+        now,
+    );
+
+    const before = h.db.getProxyList({ limit: 10 }).map((item) => item.display_name);
+    const preview = h.db.renameAllDisplayNames({
+        dryRun: true,
+        sample: 2,
+        generateName: createNameGenerator(['张三', '李四']),
+    });
+
+    const after = h.db.getProxyList({ limit: 10 }).map((item) => item.display_name);
+    assert.equal(preview.dryRun, true);
+    assert.equal(preview.applied, false);
+    assert.equal(preview.summary.total, 2);
+    assert.equal(preview.sampleMappings.length, 2);
+    assert.deepEqual(after.sort(), before.sort());
+
+    cleanup(h);
+});
+
+test('renameAllDisplayNames apply should sync all display-name tables', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [
+            { ip: '10.2.2.1', port: 80, protocol: 'http' },
+            { ip: '10.2.2.2', port: 80, protocol: 'http' },
+        ],
+        (() => {
+            const old = ['苍隼-北辰-01', '雷霄-玄武-08'];
+            let i = 0;
+            return () => old[i++];
+        })(),
+        'src-rename-apply',
+        'batch-rename-apply',
+        now,
+    );
+
+    const proxies = h.db.getProxyList({ limit: 10 }).sort((a, b) => a.id - b.id);
+    for (const proxy of proxies) {
+        h.db.insertProxyEvent({
+            timestamp: now,
+            proxy_id: proxy.id,
+            display_name: proxy.display_name,
+            event_type: 'promotion',
+            level: 'info',
+            message: `晋升：${proxy.display_name}`,
+            details: {},
+        });
+        h.db.upsertHonor({
+            proxy_id: proxy.id,
+            display_name: proxy.display_name,
+            honor_type: `荣誉-${proxy.id}`,
+            reason: 'x',
+            awarded_at: now,
+        });
+        h.db.insertRetirement({
+            proxy_id: proxy.id,
+            display_name: proxy.display_name,
+            retired_type: '技术退伍',
+            reason: 'x',
+            retired_at: now,
+        });
+        h.db.insertRuntimeLog({
+            timestamp: now,
+            event: '开始评分',
+            proxy_name: proxy.display_name,
+            ip_source: 'src',
+            stage: '评分',
+            result: 'ok',
+            reason: 'x',
+            action: 'x',
+        });
+    }
+    h.db.insertRuntimeLog({
+        timestamp: now,
+        event: '系统事件',
+        proxy_name: '-',
+        ip_source: 'src',
+        stage: '系统',
+        result: 'ok',
+        reason: 'x',
+        action: 'x',
+    });
+
+    const outcome = h.db.renameAllDisplayNames({
+        dryRun: false,
+        sample: 5,
+        generateName: createNameGenerator(['张三', '张三', '李四']),
+    });
+
+    assert.equal(outcome.applied, true);
+    assert.equal(outcome.summary.changed, 2);
+    assert.equal(outcome.tableUpdates.proxies, 2);
+    assert.equal(outcome.tableUpdates.proxy_events >= 2, true);
+    assert.equal(outcome.tableUpdates.honors >= 2, true);
+    assert.equal(outcome.tableUpdates.retirements >= 2, true);
+    assert.equal(outcome.tableUpdates.runtime_logs >= 2, true);
+    assert.equal(outcome.oldPatternCounts.proxies, 0);
+    assert.equal(outcome.oldPatternCounts.proxy_events, 0);
+    assert.equal(outcome.oldPatternCounts.honors, 0);
+    assert.equal(outcome.oldPatternCounts.retirements, 0);
+    assert.equal(outcome.oldPatternCounts.runtime_logs, 0);
+
+    const names = h.db.getProxyList({ limit: 10 }).map((item) => item.display_name).sort();
+    assert.deepEqual(names, ['张三', '李四']);
+    assert.equal(h.db.getEvents(10).every((item) => ['张三', '李四'].includes(item.display_name)), true);
+    assert.equal(h.db.getHonors(10).every((item) => ['张三', '李四'].includes(item.display_name)), true);
+    assert.equal(h.db.getRetirements(10).every((item) => ['张三', '李四'].includes(item.display_name)), true);
+    assert.equal(h.db.getRuntimeLogs(20).some((item) => item.proxy_name === '-'), true);
+
+    cleanup(h);
+});
+
+test('renameAllDisplayNames should rollback when transaction throws', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [{ ip: '10.3.3.1', port: 80, protocol: 'http' }],
+        () => '苍隼-北辰-01',
+        'src-rename-rollback',
+        'batch-rename-rollback',
+        now,
+    );
+
+    const before = h.db.getProxyList({ limit: 10 })[0].display_name;
+    assert.throws(
+        () => h.db.renameAllDisplayNames({
+            dryRun: false,
+            generateName: createNameGenerator(['张三']),
+            debugFailAfterProxyUpdate: true,
+        }),
+        /rename-debug-failure-after-proxy-update/,
+    );
+    const after = h.db.getProxyList({ limit: 10 })[0].display_name;
+    assert.equal(after, before);
+
+    cleanup(h);
+});

@@ -10,6 +10,7 @@
     "dev:proxyhub": "node --watch apps/proxy-pool-service/src/server.js",
     "soak:v1": "node apps/proxy-pool-service/src/soak.js",
     "watch:soak": "node apps/proxy-pool-service/src/soak-watchdog-v2.js",
+    "migrate:proxyhub:names": "node apps/proxy-pool-service/src/migrate-display-names.js",
     "test:proxyhub": "node --test apps/proxy-pool-service/src/**/*.test.js apps/proxy-pool-service/tests/**/*.integration.test.js",
     "test:proxyhub:unit": "node --test apps/proxy-pool-service/src/**/*.test.js",
     "test:proxyhub:integration": "node --test apps/proxy-pool-service/tests/**/*.integration.test.js",
@@ -20,6 +21,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@faker-js/faker": "^9.8.0",
     "better-sqlite3": "^11.8.1",
     "camoufox": "^0.1.19",
     "crawlee": "^3.16.0",
