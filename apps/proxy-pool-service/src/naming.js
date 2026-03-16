@@ -1,55 +1,42 @@
-﻿const crypto = require('node:crypto');
+const { fakerZH_CN } = require('@faker-js/faker');
 
-const PREFIXES = [
-    '苍隼', '铁卫', '长弓', '霆锋', '玄甲', '凌云', '烈风', '破晓', '雷霄', '雪豹',
-    '赤焰', '飞隼', '劲旅', '锋刃', '青锋', '虎贲', '骁骑', '龙卫', '孤鹰', '远征',
-];
+const CHINESE_CHAR_PATTERN = /[\u3400-\u9fff]/g;
+const VALID_CHINESE_NAME_PATTERN = /^[\u3400-\u9fff]{2,3}$/;
 
-const CODENAMES = [
-    '北辰', '天枢', '赤霄', '龙门', '昆仑', '云海', '天穹', '长空', '瀚海', '玄武',
-    '青龙', '白虎', '朱雀', '苍狼', '星河', '曜石', '寒星', '惊雷', '飞廉', '凌霜',
-];
-
-// 0075_randomPick_随机逻辑
-function randomPick(list) {
-    return list[crypto.randomInt(0, list.length)];
+// 0075_extractChineseChars_提取中文字符逻辑
+function extractChineseChars(text) {
+    return String(text || '').match(CHINESE_CHAR_PATTERN)?.join('') || '';
 }
 
-// 0076_randomSerial_随机逻辑
-function randomSerial() {
-    return String(crypto.randomInt(1, 100)).padStart(2, '0');
-}
-
-// 0077_shortCode_执行shortCode相关逻辑
-function shortCode(seed) {
-    return crypto.createHash('sha1').update(seed).digest('hex').slice(0, 2).toUpperCase();
-}
-
-// 0078_buildName_名称逻辑
+// 0076_buildName_构建中文姓名逻辑
 function buildName() {
-    return `${randomPick(PREFIXES)}-${randomPick(CODENAMES)}-${randomSerial()}`;
+    const lastName = extractChineseChars(fakerZH_CN.person.lastName());
+    const firstName = extractChineseChars(fakerZH_CN.person.firstName());
+    return `${lastName}${firstName}`;
+}
+
+// 0077_isValidChineseName_校验中文姓名逻辑
+function isValidChineseName(name) {
+    return VALID_CHINESE_NAME_PATTERN.test(String(name || ''));
 }
 
 // 0079_generateRecruitName_新兵名称逻辑
 function generateRecruitName(isUniqueName) {
-    for (let i = 0; i < 10; i += 1) {
+    for (let i = 0; i < 300; i += 1) {
         const candidate = buildName();
+        if (!isValidChineseName(candidate)) {
+            continue;
+        }
         if (isUniqueName(candidate)) {
             return candidate;
         }
     }
 
-    for (let i = 0; i < 20; i += 1) {
-        const base = buildName();
-        const candidate = `${base}-${shortCode(`${Date.now()}-${i}-${Math.random()}`)}`;
-        if (isUniqueName(candidate)) {
-            return candidate;
-        }
-    }
-
-    throw new Error('无法生成唯一的新兵昵称');
+    throw new Error('无法生成唯一中文姓名');
 }
 
 module.exports = {
+    extractChineseChars,
+    isValidChineseName,
     generateRecruitName,
 };

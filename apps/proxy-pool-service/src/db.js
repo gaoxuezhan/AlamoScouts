@@ -326,6 +326,195 @@ class ProxyHubDb {
         return tx(normalizedProxies);
     }
 
+    // 0214_renameAllDisplayNames_全量重命名逻辑
+    renameAllDisplayNames(options = {}) {
+        const dryRun = options.dryRun !== false;
+        const sample = Math.max(1, Math.min(200, Number(options.sample) || 20));
+        const nowIso = options.nowIso || new Date().toISOString();
+        const generateName = options.generateName;
+        const debugFailAfterProxyUpdate = options.debugFailAfterProxyUpdate === true;
+
+        if (typeof generateName !== 'function') {
+            throw new Error('rename-generate-name-required');
+        }
+
+        const startedAt = Date.now();
+        const proxies = this.db.prepare(`
+            SELECT id, display_name
+            FROM proxies
+            ORDER BY id ASC
+        `).all();
+
+        const usedNames = new Set();
+        const mappings = [];
+        for (const proxy of proxies) {
+            const newName = generateName((candidate) => !usedNames.has(candidate));
+            if (typeof newName !== 'string' || newName.trim().length === 0) {
+                throw new Error('rename-generated-name-invalid');
+            }
+            usedNames.add(newName);
+            mappings.push({
+                id: proxy.id,
+                oldName: proxy.display_name,
+                newName,
+            });
+        }
+
+        const changedMappings = mappings.filter((item) => item.oldName !== item.newName);
+        const summary = {
+            total: mappings.length,
+            changed: changedMappings.length,
+            unchanged: mappings.length - changedMappings.length,
+        };
+
+        if (dryRun) {
+            return {
+                dryRun: true,
+                applied: false,
+                rolledBack: false,
+                summary,
+                sampleMappings: changedMappings.slice(0, sample),
+                tableUpdates: {
+                    proxies: 0,
+                    proxy_events: 0,
+                    honors: 0,
+                    retirements: 0,
+                    runtime_logs: 0,
+                },
+                durationMs: Date.now() - startedAt,
+            };
+        }
+
+        const tx = this.db.transaction((rows) => {
+            const tableUpdates = {
+                proxies: 0,
+                proxy_events: 0,
+                honors: 0,
+                retirements: 0,
+                runtime_logs: 0,
+            };
+
+            const updateProxyStmt = this.db.prepare(`
+                UPDATE proxies
+                SET display_name = @new_name, updated_at = @now
+                WHERE id = @id
+            `);
+            const updateEventsStmt = this.db.prepare(`
+                UPDATE proxy_events
+                SET display_name = @new_name
+                WHERE proxy_id = @id
+                   OR (proxy_id IS NULL AND display_name = @old_name)
+            `);
+            const updateHonorsStmt = this.db.prepare(`
+                UPDATE honors
+                SET display_name = @new_name
+                WHERE proxy_id = @id
+            `);
+            const updateRetirementsStmt = this.db.prepare(`
+                UPDATE retirements
+                SET display_name = @new_name
+                WHERE proxy_id = @id
+            `);
+            const updateRuntimeLogsStmt = this.db.prepare(`
+                UPDATE runtime_logs
+                SET proxy_name = @new_name
+                WHERE proxy_name = @old_name
+            `);
+
+            for (const row of rows) {
+                tableUpdates.proxies += updateProxyStmt.run({
+                    id: row.id,
+                    new_name: row.newName,
+                    now: nowIso,
+                }).changes;
+                if (debugFailAfterProxyUpdate) {
+                    throw new Error('rename-debug-failure-after-proxy-update');
+                }
+                tableUpdates.proxy_events += updateEventsStmt.run({
+                    id: row.id,
+                    new_name: row.newName,
+                    old_name: row.oldName,
+                }).changes;
+                tableUpdates.honors += updateHonorsStmt.run({
+                    id: row.id,
+                    new_name: row.newName,
+                }).changes;
+                tableUpdates.retirements += updateRetirementsStmt.run({
+                    id: row.id,
+                    new_name: row.newName,
+                }).changes;
+                tableUpdates.runtime_logs += updateRuntimeLogsStmt.run({
+                    old_name: row.oldName,
+                    new_name: row.newName,
+                }).changes;
+            }
+
+            const uniqueness = this.db.prepare(`
+                SELECT COUNT(*) AS total, COUNT(DISTINCT display_name) AS unique_total
+                FROM proxies
+            `).get();
+            if (uniqueness.total !== uniqueness.unique_total) {
+                throw new Error('rename-uniqueness-check-failed');
+            }
+
+            const oldPatternCounts = {
+                proxies: this.db.prepare(`
+                    SELECT COUNT(*) AS c
+                    FROM proxies
+                    WHERE display_name GLOB '*-*'
+                       OR display_name GLOB '*[0-9]*'
+                `).get().c,
+                proxy_events: this.db.prepare(`
+                    SELECT COUNT(*) AS c
+                    FROM proxy_events
+                    WHERE display_name IS NOT NULL
+                      AND (display_name GLOB '*-*' OR display_name GLOB '*[0-9]*')
+                `).get().c,
+                honors: this.db.prepare(`
+                    SELECT COUNT(*) AS c
+                    FROM honors
+                    WHERE display_name GLOB '*-*'
+                       OR display_name GLOB '*[0-9]*'
+                `).get().c,
+                retirements: this.db.prepare(`
+                    SELECT COUNT(*) AS c
+                    FROM retirements
+                    WHERE display_name GLOB '*-*'
+                       OR display_name GLOB '*[0-9]*'
+                `).get().c,
+                runtime_logs: this.db.prepare(`
+                    SELECT COUNT(*) AS c
+                    FROM runtime_logs
+                    WHERE proxy_name != '-'
+                      AND (proxy_name GLOB '*-*' OR proxy_name GLOB '*[0-9]*')
+                `).get().c,
+            };
+
+            for (const key of Object.keys(oldPatternCounts)) {
+                if (oldPatternCounts[key] > 0) {
+                    throw new Error(`rename-old-pattern-remains:${key}:${oldPatternCounts[key]}`);
+                }
+            }
+
+            return {
+                tableUpdates,
+                oldPatternCounts,
+            };
+        });
+
+        const applied = tx(changedMappings);
+        return {
+            dryRun: false,
+            applied: true,
+            rolledBack: false,
+            summary,
+            sampleMappings: changedMappings.slice(0, sample),
+            tableUpdates: applied.tableUpdates,
+            oldPatternCounts: applied.oldPatternCounts,
+            durationMs: Date.now() - startedAt,
+        };
+    }
+
     // 0008_listProxiesForValidation_列出校验逻辑
     listProxiesForValidation(limit) {
         return this.db.prepare(`
