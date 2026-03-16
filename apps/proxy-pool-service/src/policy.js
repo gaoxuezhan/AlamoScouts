@@ -34,6 +34,8 @@ const ALLOWED_KEYS = new Set([
     'demotion',
     'retirement',
     'honors',
+    'lifecycle',
+    'legacy',
     'valueModel',
 ]);
 
@@ -116,10 +118,17 @@ function validatePolicy(policy) {
     const ratioFields = [
         policy.demotion?.regularBlockedRatio,
         policy.demotion?.severeBlockedRatio,
+        policy.demotion?.regularFailRatio,
+        policy.demotion?.severeFailRatio,
         policy.retirement?.technicalSuccessRatio,
         policy.retirement?.battleDamageBlockedRatio,
+        policy.retirement?.battleDamageFailRatio,
+        policy.lifecycle?.activeToReserveFailRatio,
+        policy.lifecycle?.reserveToActiveSuccessRatio,
+        policy.honors?.riskyFailRatioThreshold,
     ];
     for (const value of ratioFields) {
+        if (value == null) continue;
         const num = toFinite(value);
         if (num == null || num < 0 || num > 1) {
             return { ok: false, error: 'ratio-invalid' };

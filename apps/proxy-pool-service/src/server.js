@@ -8,6 +8,12 @@ const { ProxyHubEngine } = require('./engine');
 const { renderProxyAdminPage } = require('./views/proxy-admin');
 const { renderRuntimeLogsPage } = require('./views/runtime-logs');
 const { normalizePolicyPatch, applyPolicyPatch, validatePolicy } = require('./policy');
+const {
+    ensureRolloutConfig,
+    normalizeFeaturePatch,
+    applyFeaturePatch,
+    evaluateRolloutGuardrails,
+} = require('./rollout-guardrails');
 
 // 0091_sendSse_发送SSE逻辑
 function sendSse(res, payload) {
@@ -24,6 +30,7 @@ function normalizeLimit(value, fallback, min, max) {
 // 0093_createRuntime_创建运行时逻辑
 function createRuntime(options = {}) {
     const config = options.config || defaultConfig;
+    ensureRolloutConfig(config);
     const app = options.app || express();
     if (typeof app.use === 'function') {
         app.use(express.json());
@@ -137,6 +144,22 @@ function createRuntime(options = {}) {
         });
     });
 
+    app.get('/v1/proxies/rollout', (_req, res) => {
+        res.json({
+            rollout: config.rollout,
+        });
+    });
+
+    app.get('/v1/proxies/rollout/guardrails', (_req, res) => {
+        res.json({
+            guardrails: evaluateRolloutGuardrails({
+                db,
+                config,
+                nowIso: new Date().toISOString(),
+            }),
+        });
+    });
+
     app.post('/v1/proxies/policy', (req, res) => {
         const normalized = normalizePolicyPatch(req.body);
         if (!normalized.ok) {
@@ -169,6 +192,77 @@ function createRuntime(options = {}) {
         res.json({
             ok: true,
             policy: config.policy,
+        });
+    });
+
+    app.post('/v1/proxies/rollout/features', (req, res) => {
+        const normalized = normalizeFeaturePatch(req.body);
+        if (!normalized.ok) {
+            res.status(400).json({
+                ok: false,
+                error: normalized.error,
+            });
+            return;
+        }
+
+        const features = applyFeaturePatch(config, normalized.patch);
+        logger.write({
+            event: '策略调整',
+            stage: 'rollout',
+            result: '特性开关已更新',
+            action: '即时生效',
+            details: {
+                patch: normalized.patch,
+                features,
+            },
+        });
+
+        res.json({
+            ok: true,
+            features,
+        });
+    });
+
+    app.post('/v1/proxies/rollout/guardrails/rollback', (_req, res) => {
+        const report = evaluateRolloutGuardrails({
+            db,
+            config,
+            nowIso: new Date().toISOString(),
+        });
+
+        if (!report.shouldRollback) {
+            res.json({
+                ok: true,
+                applied: false,
+                features: config.rollout.features,
+                guardrails: report,
+            });
+            return;
+        }
+
+        const patch = {};
+        for (const key of report.recommendedRollbackFeatures) {
+            patch[key] = false;
+        }
+        const features = applyFeaturePatch(config, patch);
+
+        logger.write({
+            event: '自动恢复',
+            stage: 'rollout',
+            result: '触发建议回滚',
+            action: '已关闭建议特性开关',
+            details: {
+                patch,
+                breaches: report.breaches,
+            },
+        });
+
+        res.json({
+            ok: true,
+            applied: true,
+            patch,
+            features,
+            guardrails: report,
         });
     });
 

@@ -154,5 +154,19 @@ test('validatePolicy should cover invalid branches and success', () => {
     delete p9.valueModel;
     assert.equal(validatePolicy(p9).ok, true);
 
+    const p10 = basePolicy();
+    p10.lifecycle = {
+        activeToReserveFailRatio: 0.8,
+        reserveToActiveSuccessRatio: 0.35,
+    };
+    assert.equal(validatePolicy(p10).ok, true);
+
+    const p11 = basePolicy();
+    p11.lifecycle = {
+        activeToReserveFailRatio: 1.2,
+        reserveToActiveSuccessRatio: 0.35,
+    };
+    assert.equal(validatePolicy(p11).error, 'ratio-invalid');
+
     assert.equal(validatePolicy(basePolicy()).ok, true);
 });

@@ -74,14 +74,18 @@ function pickValidationFailureOutcome(validation) {
 }
 
 // 0209_buildBattleCounterUpdates_构建战场计数更新逻辑
-function buildBattleCounterUpdates(proxy, nowIso, outcome) {
+function buildBattleCounterUpdates(proxy, nowIso, outcome, stage) {
     const isSuccess = outcome === 'success';
-    return {
+    const updates = {
         last_battle_checked_at: nowIso,
         last_battle_outcome: outcome,
         battle_success_count: (proxy.battle_success_count || 0) + (isSuccess ? 1 : 0),
         battle_fail_count: (proxy.battle_fail_count || 0) + (isSuccess ? 0 : 1),
     };
+    if (stage === 'l1' && isSuccess) {
+        updates.last_l1_success_at = nowIso;
+    }
+    return updates;
 }
 
 class ProxyHubEngine extends EventEmitter {
@@ -278,7 +282,16 @@ class ProxyHubEngine extends EventEmitter {
     }
 
     // 0211_applyCombatOutcome_应用评分结果逻辑
-    async applyCombatOutcome({ proxyId, sourceName, outcome, latencyMs, nowIso, stage, extraUpdates = {} }) {
+    async applyCombatOutcome({
+        proxyId,
+        sourceName,
+        outcome,
+        latencyMs,
+        nowIso,
+        stage,
+        combatStage = 'l1',
+        extraUpdates = {},
+    }) {
         const currentProxy = this.db.getProxyById(proxyId);
         if (!currentProxy) {
             return;
@@ -290,6 +303,7 @@ class ProxyHubEngine extends EventEmitter {
             latencyMs,
             nowIso,
             config: this.config,
+            stage: combatStage,
         });
 
         this.db.updateProxyById(proxyId, {
@@ -406,6 +420,7 @@ class ProxyHubEngine extends EventEmitter {
                         latencyMs: validation.latencyMs || 0,
                         nowIso,
                         stage: '评分(L0回退)',
+                        combatStage: 'l0',
                     });
 
                     this.logger.write({
@@ -429,6 +444,7 @@ class ProxyHubEngine extends EventEmitter {
                 latencyMs: validation.latencyMs || 0,
                 nowIso,
                 stage: '评分(L0)',
+                combatStage: 'l0',
             });
 
             this.logger.write({
@@ -466,7 +482,7 @@ class ProxyHubEngine extends EventEmitter {
         try {
             const candidates = this.db.listProxiesForBattleL1(
                 this.config.battle.maxBattleL1PerCycle,
-                this.config.battle.candidateQuota,
+                this.config.battle.l1LifecycleQuota || this.config.battle.candidateQuota,
             );
             if (candidates.length === 0) {
                 return;
@@ -502,7 +518,7 @@ class ProxyHubEngine extends EventEmitter {
                 }
 
                 const latest = this.db.getProxyById(proxy.id);
-                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome);
+                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l1');
                 await this.applyCombatOutcome({
                     proxyId: proxy.id,
                     sourceName,
@@ -510,6 +526,7 @@ class ProxyHubEngine extends EventEmitter {
                     latencyMs: result.latencyMs || 0,
                     nowIso,
                     stage: '评分(L1)',
+                    combatStage: 'l1',
                     extraUpdates: battleUpdates,
                 });
             });
@@ -575,7 +592,7 @@ class ProxyHubEngine extends EventEmitter {
                 }
 
                 const latest = this.db.getProxyById(proxy.id);
-                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome);
+                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l2');
                 await this.applyCombatOutcome({
                     proxyId: proxy.id,
                     sourceName,
@@ -583,6 +600,7 @@ class ProxyHubEngine extends EventEmitter {
                     latencyMs: result.latencyMs || 0,
                     nowIso,
                     stage: '评分(L2)',
+                    combatStage: 'l2',
                     extraUpdates: battleUpdates,
                 });
             });
@@ -637,7 +655,10 @@ class ProxyHubEngine extends EventEmitter {
                     event_type: 'state_transition',
                     level: EVENT_LEVEL.INFO,
                     message: msg,
-                    details: { change: result.change },
+                    details: {
+                        change: result.change,
+                        ...(result.eventDetails || {}),
+                    },
                 });
 
                 this.logger.write({

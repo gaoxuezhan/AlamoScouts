@@ -822,6 +822,37 @@ test('runBattleL1Cycle should cover guard and error branches', async () => {
     cleanupDb(h);
 });
 
+test('runBattleL1Cycle should fallback to candidateQuota when l1LifecycleQuota is undefined', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-l1quota.db'));
+    config.battle.enabled = true;
+    config.battle.maxBattleL1PerCycle = 10;
+    config.battle.l1LifecycleQuota = undefined;
+    config.battle.candidateQuota = 0.33;
+
+    let receivedQuota = null;
+    const db = {
+        listProxiesForBattleL1(limit, quota) {
+            receivedQuota = quota;
+            return [];
+        },
+    };
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger, now: () => new Date() });
+    engine.started = true;
+    await engine.runBattleL1Cycle();
+
+    assert.equal(receivedQuota, 0.33);
+});
+
 test('runBattleL2Cycle should process candidates and cover guard/error branches', async () => {
     const h = createDbHandle();
     const logger = createLogger();
@@ -1004,6 +1035,71 @@ test('runStateReviewCycle should fallback state-review-error reason when thrown 
     cleanupDb(h);
 });
 
+test('runStateReviewCycle should include empty event details fallback when rank result details are missing', async () => {
+    const enginePath = require.resolve('./engine');
+    const rankPath = require.resolve('./rank');
+    const rankExports = require.cache[rankPath].exports;
+
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.88', port: 8088, protocol: 'http' }],
+        () => '雷霄-北辰-88',
+        'src',
+        'batch',
+        new Date('2026-03-14T08:00:00.000Z').toISOString(),
+    );
+
+    try {
+        require.cache[rankPath].exports = {
+            ...rankExports,
+            evaluateStateTransition() {
+                return {
+                    updates: {
+                        lifecycle: 'reserve',
+                        retired_type: null,
+                        ip_value_score: 50,
+                        ip_value_breakdown_json: '{}',
+                        updated_at: '2026-03-14T08:00:00.000Z',
+                    },
+                    change: 'active_to_reserve',
+                    eventDetails: null,
+                };
+            },
+        };
+        delete require.cache[enginePath];
+        const { ProxyHubEngine: PatchedEngine } = require('./engine');
+
+        const workerPool = {
+            async runTask() {
+                return { ok: true };
+            },
+            getStatus() {
+                return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+            },
+        };
+
+        const engine = new PatchedEngine({
+            config: h.config,
+            db: h.db,
+            workerPool,
+            logger,
+            now: () => new Date('2026-03-14T08:00:00.000Z'),
+        });
+        engine.started = true;
+        await engine.runStateReviewCycle();
+
+        const stateEvent = h.db.getEvents(20).find((item) => item.event_type === 'state_transition');
+        assert.equal(Boolean(stateEvent), true);
+        assert.deepEqual(JSON.parse(stateEvent.details_json), { change: 'active_to_reserve' });
+    } finally {
+        require.cache[rankPath].exports = rankExports;
+        delete require.cache[enginePath];
+        require('./engine');
+        cleanupDb(h);
+    }
+});
+
 test('persistSnapshot should emit thread pool alert and auto recovery', () => {
     const h = createDbHandle();
     const logger = createLogger();
@@ -1050,6 +1146,36 @@ test('persistSnapshot should emit thread pool alert and auto recovery', () => {
     assert.equal(logger.entries.some((e) => e.event === '自动恢复'), true);
 
     cleanupDb(h);
+});
+
+test('persistSnapshot should fallback snapshot error reason when thrown value has no message', () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-snapshot-fallback.db'));
+    const db = {
+        getSourceDistribution() {
+            throw null;
+        },
+    };
+    const workerPool = {
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger });
+    engine.started = true;
+    engine.persistSnapshot();
+
+    assert.equal(logger.entries.some((entry) => entry.event === '线程池告警' && entry.reason === 'snapshot-persist-error'), true);
 });
 
 test('persistSnapshot should not throw after db closed during shutdown race', () => {

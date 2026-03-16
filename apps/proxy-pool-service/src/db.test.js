@@ -395,6 +395,92 @@ test('battle APIs should persist run details and support L1/L2 candidate selecti
     cleanup(h);
 });
 
+test('retirement stats APIs should return count and daily series', () => {
+    const h = createDb();
+    const now = '2026-03-16T12:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '8.8.4.4', port: 80, protocol: 'http' }],
+        () => '统计-退役-01',
+        'src-stats',
+        'batch-stats',
+        now,
+    );
+    const proxy = h.db.getProxyByKey('8.8.4.4:80:http');
+    h.db.insertRetirement({
+        proxy_id: proxy.id,
+        display_name: proxy.display_name,
+        retired_type: '技术退伍',
+        reason: 'x',
+        retired_at: '2026-03-15T01:00:00.000Z',
+    });
+    h.db.insertRetirement({
+        proxy_id: proxy.id,
+        display_name: proxy.display_name,
+        retired_type: '纪律退伍',
+        reason: 'x',
+        retired_at: '2026-03-16T02:00:00.000Z',
+    });
+
+    assert.equal(h.db.getRetirementsCountSince('2026-03-15T00:00:00.000Z'), 2);
+    const daily = h.db.getRetirementDailyCounts(7, now);
+    assert.equal(Array.isArray(daily), true);
+    assert.equal(daily.some((item) => item.day === '2026-03-16' && item.count >= 1), true);
+
+    cleanup(h);
+});
+
+test('battle stats APIs should return active count and stage success rate', () => {
+    const h = createDb();
+    const now = '2026-03-16T12:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '1.2.3.4', port: 80, protocol: 'http' }],
+        () => '统计-战场-01',
+        'src-battle-stats',
+        'batch-battle-stats',
+        now,
+    );
+    const proxy = h.db.getProxyByKey('1.2.3.4:80:http');
+    h.db.updateProxyById(proxy.id, {
+        lifecycle: 'active',
+        updated_at: now,
+    });
+
+    h.db.insertBattleTestRun({
+        timestamp: '2026-03-16T10:00:00.000Z',
+        proxy_id: proxy.id,
+        stage: 'l2',
+        target: 'ly',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 100,
+        reason: 'ok',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: '2026-03-16T10:10:00.000Z',
+        proxy_id: proxy.id,
+        stage: 'l2',
+        target: 'ly',
+        outcome: 'blocked',
+        status_code: 403,
+        latency_ms: 100,
+        reason: 'blocked',
+        details: {},
+    });
+
+    assert.equal(h.db.getActiveCount(), 1);
+    const l2 = h.db.getBattleSuccessRateSince('l2', '2026-03-16T09:00:00.000Z');
+    assert.equal(l2.total, 2);
+    assert.equal(l2.success, 1);
+    assert.equal(l2.successRate, 0.5);
+
+    const noData = h.db.getBattleSuccessRateSince('l1', '2099-01-01T00:00:00.000Z');
+    assert.equal(noData.total, 0);
+    assert.equal(noData.successRate, 0);
+
+    cleanup(h);
+});
+
 test('snapshot APIs should persist and apply retention cleanup', () => {
     const h = createDb({ snapshotRetentionDays: 0 });
 

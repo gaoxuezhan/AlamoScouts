@@ -19,6 +19,7 @@ function createConfig(port = 0) {
             maxBattleL1PerCycle: 60,
             maxBattleL2PerCycle: 20,
             candidateQuota: 0.15,
+            l1LifecycleQuota: { active: 0.55, reserve: 0.30, candidate: 0.15 },
             l2LookbackMinutes: 10,
             timeoutMs: { l1: 5000, l2: 8000 },
             blockedStatusCodes: [401, 403, 429, 503],
@@ -31,6 +32,26 @@ function createConfig(port = 0) {
         },
         source: { monosans: { name: 'monosans', url: 'https://x', enabled: true } },
         validation: { allowedProtocols: ['http'], maxTimeoutMs: 1000 },
+        rollout: {
+            version: 'v1.1',
+            activeProfile: 'production',
+            features: {
+                stageWeighting: true,
+                lifecycleHysteresis: true,
+                honorPromotionTuning: false,
+            },
+            guardrails: {
+                windowHours: 24,
+                activeDropThreshold: 0.2,
+                l2DropPpThreshold: 0.03,
+                retiredDailyMultiplier: 2,
+                retiredDailyMinAbs: 5,
+                baseline: {
+                    activeCount: 100,
+                    l2SuccessRate: 0.7,
+                },
+            },
+        },
         policy: {
             serviceHourScale: 3,
             promotionProtectHours: 6,
@@ -70,6 +91,18 @@ function createStubs() {
         getRankBoard: () => [{ rank: '新兵', count: 1 }],
         getHonors: () => [{ id: 3 }],
         getRetirements: () => [{ id: 4 }],
+        getActiveCount: () => 60,
+        getBattleSuccessRateSince: () => ({ stage: 'l2', total: 50, success: 30, successRate: 0.6 }),
+        getRetirementsCountSince: () => 12,
+        getRetirementDailyCounts: () => [
+            { day: '2026-03-09', count: 1 },
+            { day: '2026-03-10', count: 2 },
+            { day: '2026-03-11', count: 3 },
+            { day: '2026-03-12', count: 2 },
+            { day: '2026-03-13', count: 3 },
+            { day: '2026-03-14', count: 4 },
+            { day: '2026-03-15', count: 2 },
+        ],
         getRuntimeLogs: () => [{ id: 5, event: '开始抓源' }],
         close: () => {
             state.dbClosed = true;
@@ -152,6 +185,8 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/value-board?limit=20',
         '/v1/proxies/value-board?limit=20&lifecycle=active',
         '/v1/proxies/policy',
+        '/v1/proxies/rollout',
+        '/v1/proxies/rollout/guardrails',
         '/v1/proxies/ranks/board',
         '/v1/proxies/honors?limit=1000',
         '/v1/proxies/retirements?limit=-1',
@@ -189,6 +224,36 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     });
     assert.equal(patchInvalidValue.status, 400);
 
+    const featurePatchOk = await fetch(baseUrl + '/v1/proxies/rollout/features', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            honorPromotionTuning: true,
+        }),
+    });
+    assert.equal(featurePatchOk.status, 200);
+
+    const featurePatchInvalid = await fetch(baseUrl + '/v1/proxies/rollout/features', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            unknownFeature: true,
+        }),
+    });
+    assert.equal(featurePatchInvalid.status, 400);
+
+    const rollbackRes = await fetch(baseUrl + '/v1/proxies/rollout/guardrails/rollback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(rollbackRes.status, 200);
+    const rollbackPayload = await rollbackRes.json();
+    assert.equal(rollbackPayload.ok, true);
+    assert.equal(rollbackPayload.applied, true);
+    assert.equal(rollbackPayload.guardrails.shouldRollback, true);
+    assert.equal(Array.isArray(rollbackPayload.guardrails.breaches), true);
+    assert.equal(typeof rollbackPayload.features.lifecycleHysteresis, 'boolean');
+
     const sseLogs = await fetch(baseUrl + '/api/runtime/logs/stream', {
         headers: { Accept: 'text/event-stream' },
         signal: AbortSignal.timeout(5000),
@@ -207,6 +272,35 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(stubs.state.dbClosed, true);
     assert.equal(stubs.state.poolClosed, true);
     assert.equal(stubs.state.engineStopped, true);
+});
+
+test('rollout rollback endpoint should skip apply when guardrails are healthy', async () => {
+    const stubs = createStubs();
+    stubs.db.getActiveCount = () => 100;
+    stubs.db.getBattleSuccessRateSince = () => ({ stage: 'l2', total: 20, success: 16, successRate: 0.8 });
+    stubs.db.getRetirementsCountSince = () => 1;
+    stubs.db.getRetirementDailyCounts = () => [
+        { day: '2026-03-09', count: 1 },
+        { day: '2026-03-10', count: 1 },
+        { day: '2026-03-11', count: 1 },
+        { day: '2026-03-12', count: 1 },
+        { day: '2026-03-13', count: 1 },
+        { day: '2026-03-14', count: 1 },
+        { day: '2026-03-15', count: 1 },
+    ];
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+    const rollbackRes = await fetch(baseUrl + '/v1/proxies/rollout/guardrails/rollback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(rollbackRes.status, 200);
+    const rollbackPayload = await rollbackRes.json();
+    assert.equal(rollbackPayload.ok, true);
+    assert.equal(rollbackPayload.applied, false);
+    assert.equal(rollbackPayload.guardrails.shouldRollback, false);
+
+    await runtime.shutdown('TEST-ROLLBACK-SKIP');
 });
 
 test('shutdown should wait for in-flight engine start before closing db', async () => {

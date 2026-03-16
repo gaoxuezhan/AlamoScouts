@@ -52,6 +52,30 @@ function baseConfig() {
     };
 }
 
+// 0090A_enableHysteresis_启用滞回配置逻辑
+function enableHysteresis(cfg) {
+    cfg.rollout = {
+        features: {
+            stageWeighting: true,
+            lifecycleHysteresis: true,
+            honorPromotionTuning: true,
+        },
+    };
+    cfg.policy.lifecycle = {
+        transitionWindowSize: 20,
+        minSamplesForTransition: 3,
+        minStateStayMinutes: 0,
+        activeToReserveHealthThreshold: 50,
+        activeToReserveFailRatio: 0.8,
+        activeToReserveConsecutiveFail: 2,
+        reserveToActiveHealthThreshold: 60,
+        reserveToActiveSuccessRatio: 0.35,
+        reserveToActiveSuccessCount: 2,
+        reserveToActiveRecentL1SuccessWindowMin: 60,
+        reserveToActiveRecentL1BypassSuccessCount: 4,
+    };
+}
+
 // 0090_baseProxy_代理逻辑
 function baseProxy() {
     return {
@@ -268,19 +292,16 @@ test('invalid feedback should lower discipline and retire by discipline', () => 
 test('battle damage retirement should trigger', () => {
     const cfg = baseConfig();
     const now = new Date().toISOString();
+    const records = Array.from({ length: 19 }, () => ({ t: now, o: 'blocked' }));
+    records.push({ t: now, o: 'success' });
     const proxy = {
         ...baseProxy(),
         lifecycle: 'active',
         health_score: 18,
         rank: '列兵',
         total_samples: 100,
-        recent_window_json: JSON.stringify([
-            { t: now, o: 'blocked' },
-            { t: now, o: 'blocked' },
-            { t: now, o: 'blocked' },
-            { t: now, o: 'blocked' },
-            { t: now, o: 'success' },
-        ]),
+        success_count: 50,
+        recent_window_json: JSON.stringify(records),
     };
 
     const result = evaluateCombat({
@@ -379,6 +400,11 @@ test('risky warrior and thousand service honors should be awarded and active', (
         recent_window_json: JSON.stringify([
             { t: now, o: 'blocked' },
             { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
             { t: now, o: 'success' },
             { t: now, o: 'success' },
         ]),
@@ -396,6 +422,29 @@ test('risky warrior and thousand service honors should be awarded and active', (
     assert.equal(awardTypes.includes('逆风勇士'), true);
     assert.equal(awardTypes.includes('千次服役'), true);
     assert.equal(JSON.parse(result.updates.honor_active_json).includes('逆风勇士'), true);
+});
+
+test('combat events should include v1.1 details version', () => {
+    const cfg = baseConfig();
+    const nowIso = new Date().toISOString();
+    const proxy = {
+        ...baseProxy(),
+        rank: '新兵',
+        rank_service_hours: 1.2,
+        combat_points: 8,
+        total_samples: 2,
+    };
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'success',
+        latencyMs: 800,
+        nowIso,
+        config: cfg,
+    });
+
+    const promotion = result.events.find((item) => item.event_type === 'promotion');
+    assert.equal(Boolean(promotion), true);
+    assert.equal(promotion.details.version, 'v1.1');
 });
 
 test('invalid json in history fields should fallback safely', () => {
@@ -551,4 +600,685 @@ test('state transition updates should include value score fields', () => {
     });
     assert.equal(typeof result.updates.ip_value_score, 'number');
     assert.equal(typeof result.updates.ip_value_breakdown_json, 'string');
+});
+
+test('hysteresis combat should move candidate to active and active to reserve', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const now = new Date().toISOString();
+
+    const candidate = evaluateCombat({
+        proxy: baseProxy(),
+        outcome: 'success',
+        latencyMs: 100,
+        nowIso: now,
+        config: cfg,
+    });
+    assert.equal(candidate.updates.lifecycle, 'active');
+    assert.equal(candidate.updates.lifecycle_changed_at, now);
+
+    const activeProxy = {
+        ...baseProxy(),
+        lifecycle: 'active',
+        health_score: 40,
+        consecutive_fail: 2,
+        recent_window_json: JSON.stringify([
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+            { t: now, o: 'blocked' },
+        ]),
+    };
+    const demoteLifecycle = evaluateCombat({
+        proxy: activeProxy,
+        outcome: 'blocked',
+        latencyMs: 200,
+        nowIso: now,
+        config: cfg,
+    });
+    assert.equal(demoteLifecycle.updates.lifecycle, 'reserve');
+    assert.equal(demoteLifecycle.updates.lifecycle_changed_at, now);
+});
+
+test('hysteresis state transition should support reserve to active by recent L1 and bypass count', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const reserveRecent = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'reserve',
+            health_score: 80,
+            lifecycle_changed_at: '2026-03-16T10:00:00.000Z',
+            last_l1_success_at: '2026-03-16T11:40:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(reserveRecent.change, 'reserve_to_active');
+    assert.equal(reserveRecent.updates.lifecycle, 'active');
+
+    const reserveBypass = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'reserve',
+            health_score: 80,
+            lifecycle_changed_at: '2026-03-16T10:00:00.000Z',
+            last_l1_success_at: '2026-03-16T07:00:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(reserveBypass.change, 'reserve_to_active');
+    assert.equal(reserveBypass.updates.lifecycle, 'active');
+});
+
+test('hysteresis state transition should move active to reserve when health drops', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const result = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 45,
+            lifecycle_changed_at: '2026-03-16T09:00:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(result.change, 'active_to_reserve');
+    assert.equal(result.updates.lifecycle, 'reserve');
+});
+
+test('hysteresis fail-ratio branches should demote lifecycle with high fail windows', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const combatResult = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 90,
+            consecutive_fail: 1,
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        outcome: 'blocked',
+        latencyMs: 200,
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(combatResult.updates.lifecycle, 'reserve');
+
+    const stateResult = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 90,
+            consecutive_fail: 3,
+            lifecycle_changed_at: '2026-03-16T09:00:00.000Z',
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(stateResult.change, 'active_to_reserve');
+});
+
+test('combat should use legacy fallback thresholds when honor tuning is enabled', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    const fallbackRanks = cfg.policy.ranks;
+    cfg.policy.ranks = null;
+    cfg.policy.honors = null;
+    cfg.policy.legacy = {
+        ranks: fallbackRanks,
+        honors: {
+            steelStreak: 1,
+            riskyWarrior: 1,
+            thousandService: 1,
+            riskyFailRatioThreshold: 0,
+        },
+    };
+    cfg.policy.serviceHourScale = 0;
+    cfg.policy.promotionProtectHours = 0;
+
+    const nowIso = '2026-03-16T12:00:00.000Z';
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            rank: '新兵',
+            rank_service_hours: 1,
+            combat_points: 8,
+            total_samples: 9,
+            success_count: 3,
+            consecutive_success: 0,
+            risky_success_count: 0,
+            last_checked_at: '2026-03-16T11:00:00.000Z',
+            recent_window_json: '[]',
+        },
+        outcome: 'success',
+        latencyMs: 800,
+        nowIso,
+        config: cfg,
+    });
+
+    assert.equal(result.updates.rank, '列兵');
+    assert.equal(result.updates.service_hours, 1);
+    assert.equal(result.awards.some((a) => a.type === '钢铁连胜'), true);
+    assert.equal(result.awards.some((a) => a.type === '逆风勇士'), true);
+    assert.equal(result.awards.some((a) => a.type === '千次服役'), true);
+});
+
+test('combat should keep steel and risky honors inactive when thresholds are missing', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    cfg.policy.honors = null;
+    cfg.policy.legacy = {
+        ...(cfg.policy.legacy || {}),
+        ranks: cfg.policy.ranks,
+        honors: null,
+    };
+
+    const nowIso = '2026-03-16T12:00:00.000Z';
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            rank: '士官',
+            total_samples: 999,
+            success_count: 800,
+            consecutive_success: 998,
+            risky_success_count: 998,
+            honor_history_json: JSON.stringify(['钢铁连胜', '逆风勇士', '千次服役']),
+            recent_window_json: JSON.stringify([{ t: nowIso, o: 'success' }]),
+        },
+        outcome: 'success',
+        latencyMs: 500,
+        nowIso,
+        config: cfg,
+    });
+
+    assert.equal(result.awards.length, 0);
+    assert.deepEqual(JSON.parse(result.updates.honor_active_json), ['千次服役']);
+});
+
+test('combat should apply retirement fallbacks when policy values are absent', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    cfg.policy.retirement = {
+        disciplineThreshold: 0,
+        disciplineInvalidCount: 99,
+        technicalEligibleLifecycles: undefined,
+        technicalMinSamples: undefined,
+        technicalSuccessRatio: undefined,
+        battleDamageFailRatio: undefined,
+        battleDamageBlockedRatio: undefined,
+        battleDamageMinSamples: undefined,
+        honorMinServiceHours: undefined,
+        honorMinSuccess: undefined,
+    };
+    cfg.policy.demotion.lowHealthRetireThreshold = 0;
+
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            rank: '列兵',
+            total_samples: 79,
+            success_count: 0,
+            health_score: 90,
+        },
+        outcome: 'blocked',
+        latencyMs: 500,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.updates.lifecycle, 'retired');
+    assert.equal(result.updates.retired_type, '技术退伍');
+});
+
+test('combat should handle non-positive sample edge for overall success ratio fallback', () => {
+    const cfg = baseConfig();
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'reserve',
+            rank: '列兵',
+            total_samples: -1,
+            success_count: 0,
+        },
+        outcome: 'blocked',
+        latencyMs: 600,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.updates.total_samples, 0);
+    assert.equal(result.updates.rank, '列兵');
+});
+
+test('state transition should use hysteresis defaults with sparse policy and fallback timestamps', () => {
+    const nowIso = '2026-03-16T12:00:00.000Z';
+    const cfg = {
+        rollout: {
+            features: {
+                lifecycleHysteresis: true,
+            },
+        },
+        policy: {},
+    };
+
+    const activeResult = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 49,
+            lifecycle_changed_at: null,
+            updated_at: '2026-03-16T10:00:00.000Z',
+            recent_window_json: JSON.stringify([{ t: nowIso, o: 'blocked' }]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(activeResult.change, 'active_to_reserve');
+
+    const reserveResult = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'reserve',
+            health_score: 70,
+            lifecycle_changed_at: null,
+            updated_at: null,
+            last_checked_at: '2026-03-16T10:00:00.000Z',
+            last_l1_success_at: 'invalid-date',
+            recent_window_json: JSON.stringify(Array.from({ length: 20 }, () => ({ t: nowIso, o: 'success' }))),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(reserveResult.change, 'reserve_to_active');
+});
+
+test('state transition legacy and discipline fallback branches should be covered', () => {
+    const cfg = baseConfig();
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const activeByBlocked = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 0,
+            discipline_score: 100,
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'blocked' },
+                { t: nowIso, o: 'success' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(activeByBlocked.change, 'active_to_reserve');
+    assert.equal(activeByBlocked.eventDetails.metrics.healthScore, 0);
+    assert.equal(activeByBlocked.eventDetails.metrics.disciplineScore, 100);
+
+    const reserveToActive = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'reserve',
+            health_score: 70,
+            recent_window_json: JSON.stringify([
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'success' },
+                { t: nowIso, o: 'blocked' },
+            ]),
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(reserveToActive.change, 'reserve_to_active');
+
+    const retireByInvalid = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            discipline_score: 0,
+            invalid_feedback_count: 5,
+        },
+        nowIso,
+        config: cfg,
+    });
+    assert.equal(retireByInvalid.change, 'retire_discipline');
+    assert.equal(retireByInvalid.eventDetails.metrics.disciplineScore, 0);
+});
+
+test('combat should fallback to empty honors when legacy and primary honors are absent', () => {
+    const cfg = baseConfig();
+    cfg.policy.honors = null;
+    cfg.policy.legacy = {
+        ranks: cfg.policy.ranks,
+        honors: null,
+    };
+
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            rank: '士官',
+            honor_history_json: JSON.stringify(['钢铁连胜', '逆风勇士']),
+        },
+        outcome: 'success',
+        latencyMs: 800,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.awards.length, 0);
+    assert.deepEqual(JSON.parse(result.updates.honor_active_json), []);
+});
+
+test('combat should cover severe-window and health-threshold fallback branches', () => {
+    const cfg = baseConfig();
+    cfg.policy.demotion = {
+        regularWindowSize: 20,
+        regularMinSamples: 1,
+        regularFailRatio: 1.1,
+        severeWindowMinutes: 'not-a-number',
+        severeMinSamples: 999,
+        severeFailRatio: 1,
+        healthThreshold: null,
+        lowHealthRetireThreshold: 0,
+    };
+    cfg.policy.retirement = {
+        technicalEligibleLifecycles: 'active',
+        technicalMinSamples: 999,
+        technicalSuccessRatio: 0,
+    };
+
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            rank: '士官',
+            health_score: 20,
+            recent_window_json: JSON.stringify([{ t: '2026-03-16T12:00:00.000Z', o: 'success' }]),
+        },
+        outcome: 'blocked',
+        latencyMs: 200,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.demoted, true);
+    assert.equal(result.updates.rank, '列兵');
+});
+
+test('combat should apply stage multiplier positive and fallback branches', () => {
+    const cfg = baseConfig();
+    cfg.rollout = {
+        features: {
+            stageWeighting: true,
+            lifecycleHysteresis: false,
+            honorPromotionTuning: false,
+        },
+    };
+    cfg.policy.scoring.stageMultipliers = {
+        score: { l2: 1.5, l0: 0 },
+        health: { l2: 1.2, l0: 0 },
+    };
+
+    const boosted = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+        },
+        outcome: 'success',
+        latencyMs: 800,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+        stage: 'l2',
+    });
+
+    const fallback = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+        },
+        outcome: 'success',
+        latencyMs: 800,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+        stage: 'l0',
+    });
+
+    assert.equal(boosted.updates.combat_points > fallback.updates.combat_points, true);
+    assert.equal(boosted.updates.health_score > fallback.updates.health_score, true);
+});
+
+test('combat should support missing scoring demotion and retirement objects', () => {
+    const cfg = {
+        rollout: {
+            features: {
+                stageWeighting: false,
+                lifecycleHysteresis: false,
+                honorPromotionTuning: false,
+            },
+        },
+        policy: {
+            serviceHourScale: 1,
+            promotionProtectHours: 6,
+            ranks: baseConfig().policy.ranks,
+            honors: baseConfig().policy.honors,
+            legacy: {
+                ranks: baseConfig().policy.ranks,
+                honors: baseConfig().policy.honors,
+            },
+        },
+    };
+
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            rank: '列兵',
+        },
+        outcome: 'success',
+        latencyMs: 900,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.updates.total_samples, 1);
+    assert.equal(result.updates.rank, '列兵');
+});
+
+test('combat should use explicit technical lifecycle allow-list when provided', () => {
+    const cfg = baseConfig();
+    cfg.policy.retirement.technicalEligibleLifecycles = ['active'];
+    cfg.policy.retirement.technicalMinSamples = 1;
+    cfg.policy.retirement.technicalSuccessRatio = 1;
+    cfg.policy.retirement.disciplineThreshold = 0;
+    cfg.policy.retirement.disciplineInvalidCount = 99;
+
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            rank: '列兵',
+            total_samples: 10,
+            success_count: 0,
+            health_score: 90,
+        },
+        outcome: 'blocked',
+        latencyMs: 1000,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.updates.retired_type, '技术退伍');
+});
+
+test('state transition should cover negative stay window and consecutive fail fallback', () => {
+    const cfg = baseConfig();
+    enableHysteresis(cfg);
+    cfg.policy.lifecycle.minStateStayMinutes = -1;
+    cfg.policy.lifecycle.minSamplesForTransition = 1;
+    cfg.policy.lifecycle.activeToReserveFailRatio = 0;
+    cfg.policy.lifecycle.activeToReserveConsecutiveFail = 0;
+
+    const result = evaluateStateTransition({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            health_score: 90,
+            consecutive_fail: undefined,
+            recent_window_json: JSON.stringify([{ t: '2026-03-16T12:00:00.000Z', o: 'blocked' }]),
+        },
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.change, 'active_to_reserve');
+});
+
+test('rank branch matrix should exercise fallback and short-circuit paths', () => {
+    const outcomes = ['success', 'blocked', 'timeout', 'network_error', 'invalid_payload'];
+    const stages = ['l0', 'l1', 'l2'];
+    const nowMs = Date.parse('2026-03-16T12:00:00.000Z');
+    const fallbackRanks = baseConfig().policy.ranks;
+    const fallbackHonors = baseConfig().policy.honors;
+
+    for (let i = 0; i < 180; i += 1) {
+        const cfg = baseConfig();
+        cfg.rollout = {
+            features: {
+                stageWeighting: i % 2 === 0,
+                lifecycleHysteresis: i % 3 !== 0,
+                honorPromotionTuning: i % 4 === 0,
+            },
+        };
+
+        if (i % 3 === 0) cfg.policy.ranks = null;
+        if (i % 4 === 0) cfg.policy.honors = null;
+        if (i % 5 === 0) cfg.policy.scoring = {};
+        if (i % 6 === 0) cfg.policy.demotion = {};
+        if (i % 7 === 0) cfg.policy.retirement = {};
+        if (i % 8 === 0) cfg.policy.lifecycle = {};
+        if (i % 9 === 0) cfg.policy.serviceHourScale = 0;
+        if (i % 10 === 0) cfg.policy.promotionProtectHours = 0;
+        if (i % 11 === 0) cfg.policy.demotion = { regularBlockedRatio: 0.7, severeBlockedRatio: 0.8 };
+        if (i % 12 === 0) cfg.policy.retirement = { technicalEligibleLifecycles: 'invalid' };
+        if (i % 13 === 0) cfg.policy.lifecycle = { minStateStayMinutes: 0 };
+        if (i % 14 === 0) cfg.policy.scoring = { stageMultipliers: { score: {}, health: {} } };
+        if (i % 15 === 0) cfg.policy.legacy = {};
+        if (i % 16 === 0) cfg.policy.legacy = { ranks: fallbackRanks };
+        if (i % 17 === 0) cfg.policy.legacy = { honors: fallbackHonors };
+        if (i % 18 === 0) cfg.policy.legacy = { ranks: fallbackRanks, honors: fallbackHonors };
+
+        const nowIso = new Date(nowMs + i * 60_000).toISOString();
+        const windowSize = i % 26;
+        const recentWindow = Array.from({ length: windowSize }, (_, idx) => {
+            const eventAt = new Date(nowMs - idx * 120_000).toISOString();
+            const windowOutcome = outcomes[(i + idx) % outcomes.length];
+            return {
+                t: idx % 7 === 0 ? 'invalid-date' : eventAt,
+                o: windowOutcome === 'invalid_payload' ? 'blocked' : windowOutcome,
+            };
+        });
+        const honors = [];
+        if (i % 3 === 0) honors.push('钢铁连胜');
+        if (i % 5 === 0) honors.push('逆风勇士');
+        if (i % 7 === 0) honors.push('千次服役');
+
+        const proxy = {
+            ...baseProxy(),
+            rank: ['新兵', '列兵', '士官', '尉官', '王牌', '未知军衔'][i % 6],
+            lifecycle: ['candidate', 'active', 'reserve', 'retired', undefined][i % 5],
+            service_hours: [0, 12, 780, null][i % 4],
+            rank_service_hours: [0, 1.5, 5.5, null][i % 4],
+            combat_points: [0, 20, 260, 900][i % 4],
+            health_score: [null, 0, 18, 45, 62, 88][i % 6],
+            discipline_score: [null, 0, 20, 40, 100][i % 5],
+            success_count: [0, 1, 30, 850][i % 4],
+            block_count: [0, 2, 10, 60][i % 4],
+            timeout_count: [0, 1, 6, 30][i % 4],
+            network_error_count: [0, 1, 5, 20][i % 4],
+            invalid_feedback_count: [0, 1, 2, 5, 7][i % 5],
+            total_samples: [0, 1, 9, 79, 120, -1][i % 6],
+            consecutive_success: [0, 1, 3, 16, 30][i % 5],
+            consecutive_fail: [0, 1, 2, 6, 9][i % 5],
+            risky_success_count: [0, 1, 3, 10, 20][i % 5],
+            retired_type: null,
+            recent_window_json: JSON.stringify(recentWindow),
+            honor_history_json: JSON.stringify(honors),
+            honor_active_json: JSON.stringify([]),
+            last_checked_at: i % 4 === 0 ? null : new Date(nowMs - (i % 8) * 3_600_000).toISOString(),
+            lifecycle_changed_at: i % 3 === 0 ? null : new Date(nowMs - (i % 6) * 3_600_000).toISOString(),
+            updated_at: i % 3 === 0 ? new Date(nowMs - 5 * 3_600_000).toISOString() : null,
+            last_l1_success_at: [
+                null,
+                'invalid-date',
+                new Date(nowMs - 30 * 60_000).toISOString(),
+                new Date(nowMs - 4 * 3_600_000).toISOString(),
+            ][i % 4],
+        };
+
+        assert.doesNotThrow(() => {
+            evaluateCombat({
+                proxy,
+                outcome: outcomes[i % outcomes.length],
+                latencyMs: [0, 500, 1500, 3000, Number.NaN][i % 5],
+                nowIso,
+                config: cfg,
+                stage: stages[i % stages.length],
+            });
+        });
+
+        assert.doesNotThrow(() => {
+            evaluateStateTransition({
+                proxy,
+                nowIso,
+                config: cfg,
+            });
+        });
+
+        assert.doesNotThrow(() => {
+            evaluateStateTransition({
+                proxy,
+                nowIso,
+                config: {
+                    rollout: cfg.rollout,
+                },
+            });
+        });
+    }
 });
