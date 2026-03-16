@@ -45,10 +45,10 @@ async function runWithConcurrency(items, limit, handler) {
 // 0025_outcomeLabel_结果标签逻辑
 function outcomeLabel(outcome) {
     if (outcome === 'success') return '成功';
-    if (outcome === 'blocked') return 'blocked';
-    if (outcome === 'timeout') return 'timeout';
-    if (outcome === 'network_error') return 'networkError';
-    if (outcome === 'invalid_feedback') return 'invalidFeedback';
+    if (outcome === 'blocked') return '封禁';
+    if (outcome === 'timeout') return '超时';
+    if (outcome === 'network_error') return '网络错误';
+    if (outcome === 'invalid_feedback') return '反馈无效';
     return '未知';
 }
 

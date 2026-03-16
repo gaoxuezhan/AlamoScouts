@@ -117,10 +117,10 @@ test('engine utility functions should cover helper branches', async () => {
     assert.deepEqual(parseArrayJson('{}'), []);
     assert.deepEqual(parseArrayJson('{bad'), []);
     assert.equal(outcomeLabel('success'), '成功');
-    assert.equal(outcomeLabel('blocked'), 'blocked');
-    assert.equal(outcomeLabel('timeout'), 'timeout');
-    assert.equal(outcomeLabel('network_error'), 'networkError');
-    assert.equal(outcomeLabel('invalid_feedback'), 'invalidFeedback');
+    assert.equal(outcomeLabel('blocked'), '封禁');
+    assert.equal(outcomeLabel('timeout'), '超时');
+    assert.equal(outcomeLabel('network_error'), '网络错误');
+    assert.equal(outcomeLabel('invalid_feedback'), '反馈无效');
     assert.equal(outcomeLabel('other'), '未知');
 
     assert.equal(mapEventTypeToChinese('promotion'), '晋升');
