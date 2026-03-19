@@ -88,6 +88,32 @@ function buildBattleCounterUpdates(proxy, nowIso, outcome, stage) {
     return updates;
 }
 
+// 0258_readCandidateControl_读取新兵治理配置逻辑
+function readCandidateControl(config = {}) {
+    const raw = config.candidateControl || {};
+    return {
+        max: Math.max(0, Number(raw.max) || 0),
+        gateOverride: raw.gateOverride === true,
+        sweepMs: Math.max(60_000, Number(raw.sweepMs) || 900_000),
+        staleHours: Math.max(1, Number(raw.staleHours) || 24),
+        staleMinSamples: Math.max(0, Number(raw.staleMinSamples) || 3),
+        timeoutHours: Math.max(1, Number(raw.timeoutHours) || 72),
+        maxRetirePerCycle: Math.max(1, Math.min(5000, Number(raw.maxRetirePerCycle) || 2000)),
+    };
+}
+
+// 0259_buildCandidateGateState_构建新兵闸门状态逻辑
+function buildCandidateGateState(config = {}, candidateCount = 0) {
+    const control = readCandidateControl(config);
+    const gatedByThreshold = control.max > 0 && candidateCount >= control.max;
+    return {
+        ...control,
+        candidateCount: Math.max(0, Number(candidateCount) || 0),
+        gatedByThreshold,
+        gateActive: gatedByThreshold && !control.gateOverride,
+    };
+}
+
 class ProxyHubEngine extends EventEmitter {
     // 0027_constructor_初始化实例逻辑
     constructor({ config, db, workerPool, logger, now }) {
@@ -104,11 +130,13 @@ class ProxyHubEngine extends EventEmitter {
         this.snapshotTimer = null;
         this.battleL1Timer = null;
         this.battleL2Timer = null;
+        this.candidateSweepTimer = null;
 
         this.isSourceCycleRunning = false;
         this.isStateReviewRunning = false;
         this.isBattleL1Running = false;
         this.isBattleL2Running = false;
+        this.isCandidateSweepRunning = false;
         this.threadPoolAlerting = false;
     }
 
@@ -127,6 +155,7 @@ class ProxyHubEngine extends EventEmitter {
 
         await this.runSourceCycle();
         await this.runStateReviewCycle();
+        await this.runCandidateSweepCycle();
         if (this.isBattleEnabled()) {
             await this.runBattleL1Cycle();
             await this.runBattleL2Cycle();
@@ -140,6 +169,11 @@ class ProxyHubEngine extends EventEmitter {
         this.stateReviewTimer = setInterval(() => {
             void this.runStateReviewCycle();
         }, this.config.scheduler.stateReviewMs);
+
+        const candidateControl = readCandidateControl(this.config);
+        this.candidateSweepTimer = setInterval(() => {
+            void this.runCandidateSweepCycle();
+        }, candidateControl.sweepMs);
 
         if (this.isBattleEnabled()) {
             this.battleL1Timer = setInterval(() => {
@@ -189,6 +223,10 @@ class ProxyHubEngine extends EventEmitter {
             clearInterval(this.battleL2Timer);
             this.battleL2Timer = null;
         }
+        if (this.candidateSweepTimer) {
+            clearInterval(this.candidateSweepTimer);
+            this.candidateSweepTimer = null;
+        }
     }
 
     // 0030_createRecruitName_创建新兵名称逻辑
@@ -228,22 +266,50 @@ class ProxyHubEngine extends EventEmitter {
 
             const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             const nowIso = this.now().toISOString();
+            const candidateCount = Number(this.db.getLifecycleCount?.('candidate') || 0);
+            const gateState = buildCandidateGateState(this.config, candidateCount);
             const upsertStats = this.db.upsertSourceBatch(
                 fetchResult.proxies,
                 () => this.createRecruitName(),
                 sourceName,
                 batchId,
                 nowIso,
+                {
+                    allowInsert: !gateState.gateActive,
+                },
             );
 
             this.logger.write({
                 event: '抓源成功',
                 stage: '抓源',
                 ipSource: sourceName,
-                result: `总 ${fetchResult.normalized}，新增 ${upsertStats.inserted}，更新 ${upsertStats.touched}`,
+                result: `总 ${fetchResult.normalized}，新增 ${upsertStats.inserted}，更新 ${upsertStats.touched}，跳过 ${upsertStats.skipped || 0}`,
                 durationMs: Date.now() - startedAt,
-                action: '进入校验队列',
+                action: gateState.gateActive ? 'candidate闸门生效，仅更新存量代理' : '进入校验队列',
             });
+
+            if (gateState.gateActive || (gateState.gatedByThreshold && gateState.gateOverride)) {
+                const gateMessage = gateState.gateActive
+                    ? `candidate 闸门生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
+                    : `candidate 闸门已手工 override：当前 ${gateState.candidateCount}，上限 ${gateState.max}`;
+                this.db.insertProxyEvent({
+                    timestamp: nowIso,
+                    proxy_id: null,
+                    display_name: null,
+                    event_type: 'candidate_gate',
+                    level: EVENT_LEVEL.INFO,
+                    message: gateMessage,
+                    details: {
+                        candidateCount: gateState.candidateCount,
+                        candidateMax: gateState.max,
+                        gateActive: gateState.gateActive,
+                        gateOverride: gateState.gateOverride,
+                        inserted: upsertStats.inserted,
+                        touched: upsertStats.touched,
+                        skipped: upsertStats.skipped || 0,
+                    },
+                });
+            }
 
             await this.runValidationCycle(sourceName);
             this.logger.write({
@@ -265,6 +331,85 @@ class ProxyHubEngine extends EventEmitter {
             });
         } finally {
             this.isSourceCycleRunning = false;
+        }
+    }
+
+    // 0260_runCandidateSweepCycle_执行新兵清库存轮次逻辑
+    async runCandidateSweepCycle() {
+        if (!this.started || this.isCandidateSweepRunning) {
+            return;
+        }
+        this.isCandidateSweepRunning = true;
+
+        try {
+            const control = readCandidateControl(this.config);
+            const nowIso = this.now().toISOString();
+            const candidates = this.db.listCandidatesForSweep({
+                nowIso,
+                staleHours: control.staleHours,
+                staleMinSamples: control.staleMinSamples,
+                timeoutHours: control.timeoutHours,
+                limit: control.maxRetirePerCycle,
+            });
+
+            if (candidates.length === 0) {
+                return;
+            }
+
+            const summary = {
+                stale_candidate: 0,
+                stale_timeout: 0,
+            };
+
+            for (const candidate of candidates) {
+                const retiredType = String(candidate.sweep_reason || 'stale_candidate');
+                summary[retiredType] = (summary[retiredType] || 0) + 1;
+
+                this.db.updateProxyById(candidate.id, {
+                    lifecycle: 'retired',
+                    retired_type: retiredType,
+                    lifecycle_changed_at: nowIso,
+                    updated_at: nowIso,
+                });
+                this.db.insertRetirement({
+                    proxy_id: candidate.id,
+                    display_name: candidate.display_name,
+                    retired_type: retiredType,
+                    reason: `candidate_sweeper:${retiredType}`,
+                    retired_at: nowIso,
+                });
+                this.db.insertProxyEvent({
+                    timestamp: nowIso,
+                    proxy_id: candidate.id,
+                    display_name: candidate.display_name,
+                    event_type: 'retirement',
+                    level: EVENT_LEVEL.INFO,
+                    message: `退伍：${candidate.display_name} (${retiredType})`,
+                    details: {
+                        trigger: 'candidate_sweeper',
+                        reason: retiredType,
+                        ageHours: candidate.sweep_age_hours,
+                        totalSamples: candidate.total_samples || 0,
+                    },
+                });
+            }
+
+            this.logger.write({
+                event: '自动恢复',
+                stage: 'candidate-sweeper',
+                result: `清库存完成，共退役 ${candidates.length}`,
+                action: `stale_candidate=${summary.stale_candidate || 0}, stale_timeout=${summary.stale_timeout || 0}`,
+            });
+        } catch (error) {
+            this.logger.write({
+                event: '线程池告警',
+                stage: 'candidate-sweeper',
+                result: '清库存异常',
+                reason: error?.message || 'candidate-sweeper-error',
+                action: '等待自动恢复',
+            });
+        } finally {
+            this.isCandidateSweepRunning = false;
         }
     }
 
@@ -763,6 +908,8 @@ module.exports = {
     mapEventTypeToChinese,
     pickValidationFailureOutcome,
     buildBattleCounterUpdates,
+    readCandidateControl,
+    buildCandidateGateState,
     ProxyHubEngine,
 };
 

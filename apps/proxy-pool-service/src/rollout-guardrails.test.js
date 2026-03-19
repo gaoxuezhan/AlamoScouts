@@ -90,6 +90,39 @@ test('guardrail evaluation should report breaches and rollback recommendations',
     assert.equal(report.recommendedRollbackFeatures.includes('stageWeighting'), true);
     assert.equal(report.recommendedRollbackFeatures.includes('lifecycleHysteresis'), true);
     assert.equal(report.metrics.retirementDaily.length, 7);
+    assert.equal(typeof report.metrics.rollingBaselines.activeMedian7d, 'number');
+    assert.equal(typeof report.metrics.rollingBaselines.l2SuccessMedian7d, 'number');
+});
+
+test('guardrail evaluation should prefer rolling median baseline when available', () => {
+    const report = evaluateRolloutGuardrails({
+        db: {
+            getActiveCount: () => 70,
+            getLifecycleSnapshotMedian: () => 80,
+            getBattleSuccessRateSince: () => ({ total: 20, success: 12, successRate: 0.6 }),
+            getBattleDailySuccessRates: () => [
+                { day: '2026-03-10', total: 10, success: 8, successRate: 0.8 },
+                { day: '2026-03-11', total: 10, success: 7, successRate: 0.7 },
+                { day: '2026-03-12', total: 10, success: 7, successRate: 0.7 },
+            ],
+            getRetirementsCountSince: () => 1,
+            getRetirementDailyCounts: () => [],
+        },
+        config: {
+            rollout: {
+                guardrails: {
+                    baseline: {
+                        activeCount: 200,
+                        l2SuccessRate: 0.95,
+                    },
+                },
+            },
+        },
+        nowIso: '2026-03-16T12:00:00.000Z',
+    });
+
+    assert.equal(report.thresholds.baselineActiveCount, 80);
+    assert.equal(report.thresholds.baselineL2SuccessRate, 0.7);
 });
 
 test('computeRecommendedRollbackFeatures should map breach codes', () => {

@@ -328,10 +328,12 @@ class ProxyHubDb {
     }
 
     // 0007_upsertSourceBatch_插入更新来源批次逻辑
-    upsertSourceBatch(normalizedProxies, createName, source, batchId, nowIso) {
+    upsertSourceBatch(normalizedProxies, createName, source, batchId, nowIso, options = {}) {
+        const allowInsert = options.allowInsert !== false;
         const tx = this.db.transaction((items) => {
             let inserted = 0;
             let touched = 0;
+            let skipped = 0;
             for (const item of items) {
                 const uniqueKey = `${item.ip}:${item.port}:${item.protocol}`;
                 const existing = this.getProxyByKey(uniqueKey);
@@ -343,6 +345,11 @@ class ProxyHubDb {
                         now: nowIso,
                     });
                     touched += 1;
+                    continue;
+                }
+
+                if (!allowInsert) {
+                    skipped += 1;
                     continue;
                 }
 
@@ -358,7 +365,7 @@ class ProxyHubDb {
                 });
                 inserted += 1;
             }
-            return { inserted, touched };
+            return { inserted, touched, skipped };
         });
 
         return tx(normalizedProxies);
@@ -851,6 +858,16 @@ class ProxyHubDb {
         return row?.c || 0;
     }
 
+    // 0254_getLifecycleCount_获取生命周期数量逻辑
+    getLifecycleCount(lifecycle) {
+        const row = this.db.prepare(`
+            SELECT COUNT(*) AS c
+            FROM proxies
+            WHERE lifecycle = ?
+        `).get(String(lifecycle || ''));
+        return row?.c || 0;
+    }
+
     // 0198_getBattleSuccessRateSince_获取阶段成功率逻辑
     getBattleSuccessRateSince(stage, sinceIso) {
         const row = this.db.prepare(`
@@ -870,6 +887,36 @@ class ProxyHubDb {
             success,
             successRate: total > 0 ? success / total : 0,
         };
+    }
+
+    // 0255_getBattleDailySuccessRates_获取按日成功率逻辑
+    getBattleDailySuccessRates(stage, days = 7, endIso = new Date().toISOString()) {
+        const safeDays = Math.max(1, Number(days) || 7);
+        const endAt = Date.parse(endIso);
+        const startIso = new Date(endAt - safeDays * 24 * 60 * 60 * 1000).toISOString();
+        const rows = this.db.prepare(`
+            SELECT
+                substr(timestamp, 1, 10) AS day,
+                COUNT(*) AS total,
+                SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS success
+            FROM battle_test_runs
+            WHERE stage = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            GROUP BY day
+            ORDER BY day ASC
+        `).all(String(stage || ''), startIso, endIso);
+
+        return rows.map((row) => {
+            const total = Number(row.total) || 0;
+            const success = Number(row.success) || 0;
+            return {
+                day: row.day,
+                total,
+                success,
+                successRate: total > 0 ? success / total : 0,
+            };
+        });
     }
 
     // 0199_getRetirementsCountSince_获取区间退役数逻辑
@@ -895,6 +942,80 @@ class ProxyHubDb {
             GROUP BY day
             ORDER BY day ASC
         `).all(startIso, endIso);
+    }
+
+    // 0256_getLifecycleSnapshotMedian_获取生命周期快照中位数逻辑
+    getLifecycleSnapshotMedian(lifecycle, days = 7, endIso = new Date().toISOString()) {
+        const safeDays = Math.max(1, Number(days) || 7);
+        const endAt = Date.parse(endIso);
+        const startIso = new Date(endAt - safeDays * 24 * 60 * 60 * 1000).toISOString();
+        const rows = this.db.prepare(`
+            SELECT lifecycle_distribution_json
+            FROM pool_snapshots
+            WHERE timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp ASC
+        `).all(startIso, endIso);
+
+        const lifecycleKey = String(lifecycle || '');
+        const values = rows
+            .map((row) => parseJsonArray(row.lifecycle_distribution_json))
+            .map((items) => items.find((item) => String(item.lifecycle) === lifecycleKey))
+            .map((item) => Number(item?.count))
+            .filter((num) => Number.isFinite(num))
+            .sort((a, b) => a - b);
+
+        if (values.length === 0) return 0;
+        const mid = Math.floor(values.length / 2);
+        if (values.length % 2 === 1) return values[mid];
+        return (values[mid - 1] + values[mid]) / 2;
+    }
+
+    // 0257_listCandidatesForSweep_列出新兵清库存候选逻辑
+    listCandidatesForSweep({
+        nowIso = new Date().toISOString(),
+        staleHours = 24,
+        staleMinSamples = 3,
+        timeoutHours = 72,
+        limit = 2000,
+    } = {}) {
+        const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 2000));
+        const safeStaleHours = Math.max(1, Number(staleHours) || 24);
+        const safeTimeoutHours = Math.max(safeStaleHours, Number(timeoutHours) || 72);
+        const safeMinSamples = Math.max(0, Number(staleMinSamples) || 3);
+
+        const staleBeforeIso = new Date(Date.parse(nowIso) - safeStaleHours * 3_600_000).toISOString();
+        const timeoutBeforeIso = new Date(Date.parse(nowIso) - safeTimeoutHours * 3_600_000).toISOString();
+
+        const rows = this.db.prepare(`
+            SELECT *
+            FROM proxies
+            WHERE lifecycle = 'candidate'
+              AND (
+                (created_at <= @stale_before AND total_samples < @stale_min_samples)
+                OR created_at <= @timeout_before
+              )
+            ORDER BY created_at ASC
+            LIMIT @limit
+        `).all({
+            stale_before: staleBeforeIso,
+            stale_min_samples: safeMinSamples,
+            timeout_before: timeoutBeforeIso,
+            limit: safeLimit,
+        });
+
+        return rows.map((row) => {
+            const createdAtMs = Date.parse(row.created_at);
+            const ageHours = Number.isFinite(createdAtMs)
+                ? (Date.parse(nowIso) - createdAtMs) / 3_600_000
+                : 0;
+            const isTimeout = Number.isFinite(ageHours) && ageHours >= safeTimeoutHours;
+            return {
+                ...row,
+                sweep_reason: isTimeout ? 'stale_timeout' : 'stale_candidate',
+                sweep_age_hours: Number.isFinite(ageHours) ? Number(ageHours.toFixed(3)) : null,
+            };
+        });
     }
 
     // 0185_getRuntimeLogs_获取运行时日志逻辑

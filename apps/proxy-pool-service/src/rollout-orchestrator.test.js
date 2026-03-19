@@ -306,6 +306,35 @@ test('tick should cover cooldown_hold and safe_realign branches', async () => {
     assert.equal(safeRealign.config.rollout.features.stageWeighting, true);
 });
 
+test('tick should not emit rollback patch repeatedly during cooldown breaches', async () => {
+    const h = createHarness({
+        features: {
+            stageWeighting: true,
+            lifecycleHysteresis: true,
+            honorPromotionTuning: false,
+        },
+        state: {
+            mode: 'COOLDOWN',
+            stable_since: null,
+            cooldown_until: '2026-03-16T13:00:00.000Z',
+        },
+        nowSeq: ['2026-03-16T12:00:00.000Z'],
+        metrics: {
+            activeNow: 50,
+            l2Total: 30,
+            l2Success: 10,
+            l2Rate: 0.33,
+            retired24h: 20,
+        },
+    });
+
+    const out = await h.orchestrator.tick({ trigger: 'manual' });
+    assert.equal(out.action, 'cooldown_hold');
+    assert.equal(out.applied, false);
+    assert.equal(h.events[0].action, 'cooldown_hold');
+    assert.equal(h.events[0].details.guardrails.breachObserved, true);
+});
+
 test('tick should recover cooldown without cooldown_until and hold safe when l2 samples are zero', async () => {
     const recoverWithoutUntil = createHarness({
         state: {

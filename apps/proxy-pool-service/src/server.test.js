@@ -31,6 +31,15 @@ function createConfig(port = 0) {
             },
         },
         source: { monosans: { name: 'monosans', url: 'https://x', enabled: true } },
+        candidateControl: {
+            max: 3000,
+            gateOverride: false,
+            sweepMs: 900000,
+            staleHours: 24,
+            staleMinSamples: 3,
+            timeoutHours: 72,
+            maxRetirePerCycle: 2000,
+        },
         validation: { allowedProtocols: ['http'], maxTimeoutMs: 1000 },
         rollout: {
             version: 'v1.1',
@@ -232,6 +241,7 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/rollout/guardrails',
         '/v1/proxies/rollout/orchestrator/state',
         '/v1/proxies/rollout/orchestrator/events',
+        '/v1/proxies/candidate-control',
         '/v1/proxies/ranks/board',
         '/v1/proxies/honors?limit=1000',
         '/v1/proxies/retirements?limit=-1',
@@ -306,6 +316,29 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(manualTickRes.status, 200);
     const manualTick = await manualTickRes.json();
     assert.equal(typeof manualTick.ok, 'boolean');
+
+    const candidateControlPatch = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            max: 1234,
+            gateOverride: true,
+        }),
+    });
+    assert.equal(candidateControlPatch.status, 200);
+    const candidateControlBody = await candidateControlPatch.json();
+    assert.equal(candidateControlBody.ok, true);
+    assert.equal(candidateControlBody.candidateControl.max, 1234);
+    assert.equal(candidateControlBody.candidateControl.gateOverride, true);
+
+    const candidateControlInvalid = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            gateOverride: 'yes',
+        }),
+    });
+    assert.equal(candidateControlInvalid.status, 400);
 
     const sseLogs = await fetch(baseUrl + '/api/runtime/logs/stream', {
         headers: { Accept: 'text/event-stream' },
