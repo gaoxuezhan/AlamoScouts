@@ -143,7 +143,7 @@ class RolloutOrchestrator {
                 last_tick_at: null,
                 last_error: null,
             };
-            const currentFeatures = { ...(rollout.features || {}) };
+            const currentFeatures = { ...rollout.features };
             const modeBefore = pickCurrentMode(state, currentFeatures, nowIso);
             const guardrails = evaluateRolloutGuardrails({
                 db: this.db,
@@ -158,7 +158,7 @@ class RolloutOrchestrator {
             let patch = {};
 
             if (guardrails.shouldRollback) {
-                for (const key of guardrails.recommendedRollbackFeatures || []) {
+                for (const key of guardrails.recommendedRollbackFeatures) {
                     patch[key] = false;
                 }
                 patch.honorPromotionTuning = false;
@@ -227,7 +227,7 @@ class RolloutOrchestrator {
                     },
                     features: {
                         before: currentFeatures,
-                        after: { ...(this.config.rollout?.features || {}) },
+                        after: { ...this.config.rollout.features },
                     },
                 },
             });

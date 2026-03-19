@@ -122,6 +122,7 @@ test('helpers should build patches and mode decisions', () => {
     assert.equal(pickCurrentMode({ mode: 'COOLDOWN', cooldown_until: '2026-03-17T00:00:00.000Z' }, SAFE_FEATURES, '2026-03-16T00:00:00.000Z'), 'COOLDOWN');
     assert.equal(pickCurrentMode({ mode: 'SAFE' }, FULL_FEATURES, '2026-03-16T00:00:00.000Z'), 'FULL');
     assert.equal(pickCurrentMode({ mode: 'SAFE' }, SAFE_FEATURES, '2026-03-16T00:00:00.000Z'), 'SAFE');
+    assert.equal(pickCurrentMode({}, SAFE_FEATURES, '2026-03-16T00:00:00.000Z'), 'SAFE');
 });
 
 test('tick should rollback on guardrail breach and enter cooldown', async () => {
@@ -305,6 +306,30 @@ test('tick should cover cooldown_hold and safe_realign branches', async () => {
     assert.equal(safeRealign.config.rollout.features.stageWeighting, true);
 });
 
+test('tick should recover cooldown without cooldown_until and hold safe when l2 samples are zero', async () => {
+    const recoverWithoutUntil = createHarness({
+        state: {
+            mode: 'COOLDOWN',
+            stable_since: null,
+            cooldown_until: null,
+        },
+        nowSeq: ['2026-03-16T12:00:00.000Z'],
+        metrics: { l2Total: 10, l2Success: 8, l2Rate: 0.8, retired24h: 1 },
+    });
+    const recoverOut = await recoverWithoutUntil.orchestrator.tick({ trigger: 'manual' });
+    assert.equal(recoverOut.action, 'cooldown_recover');
+    assert.equal(recoverOut.state.mode, 'SAFE');
+
+    const zeroSamples = createHarness({
+        features: SAFE_FEATURES,
+        state: { mode: 'SAFE', stable_since: '2026-03-16T11:00:00.000Z' },
+        nowSeq: ['2026-03-16T12:00:00.000Z'],
+        metrics: { l2Total: 0, l2Success: 0, l2Rate: 0, retired24h: 1 },
+    });
+    const zeroOut = await zeroSamples.orchestrator.tick({ trigger: 'manual' });
+    assert.equal(zeroOut.action, 'safe_hold');
+});
+
 test('tick should default lease to true and handle error branch', async () => {
     const leaseDefault = createHarness({
         state: {
@@ -336,6 +361,20 @@ test('tick should default lease to true and handle error branch', async () => {
     assert.equal(errOut.error, 'lease-broken');
     assert.equal(err.events.some((x) => x.action === 'error'), true);
     assert.equal(err.logs.some((x) => String(x.result || '').includes('自动编排失败')), true);
+});
+
+test('tick should fallback unknown error message when thrown value has no message', async () => {
+    const errUnknown = createHarness({
+        dbOverrides: {
+            acquireRolloutSwitchLease: () => {
+                throw null;
+            },
+        },
+    });
+    const out = await errUnknown.orchestrator.tick({ trigger: 'manual' });
+    assert.equal(out.ok, false);
+    assert.equal(out.error, 'orchestrator-tick-failed');
+    assert.equal(errUnknown.events.some((x) => x.action === 'error'), true);
 });
 
 test('tick should fallback to default state when db state is missing', async () => {

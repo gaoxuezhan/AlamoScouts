@@ -629,9 +629,33 @@ test('runCli should create runtime when runtime is not injected', async () => {
 
     await runCli({ runtimeOptions: { config }, processRef });
     processEvents.SIGTERM();
-    await new Promise((r) => setTimeout(r, 50));
+    for (let i = 0; i < 100 && processRef.exitCode == null; i += 1) {
+        await new Promise((r) => setTimeout(r, 20));
+    }
     assert.equal(processRef.exitCode, 0);
     fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('rollout orchestrator endpoints should fallback when db methods are missing', async () => {
+    const stubs = createStubs();
+    stubs.db.getRolloutSwitchState = undefined;
+    stubs.db.getRolloutSwitchEvents = undefined;
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+
+    try {
+        const stateRes = await fetch(baseUrl + '/v1/proxies/rollout/orchestrator/state');
+        assert.equal(stateRes.status, 200);
+        const stateBody = await stateRes.json();
+        assert.equal(stateBody.state, null);
+        assert.equal(stateBody.config.enabled, true);
+
+        const eventsRes = await fetch(baseUrl + '/v1/proxies/rollout/orchestrator/events?limit=10');
+        assert.equal(eventsRes.status, 200);
+        const eventsBody = await eventsRes.json();
+        assert.deepEqual(eventsBody.items, []);
+    } finally {
+        await runtime.shutdown('TEST-MISSING-ROLL-DB');
+    }
 });
 
 test('server runtime should cover default dependency wiring and SSE fanout loops', async () => {

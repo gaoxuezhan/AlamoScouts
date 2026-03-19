@@ -1016,3 +1016,58 @@ test('rollout switch state and events APIs should work', () => {
 
     cleanup(h);
 });
+
+test('rollout helpers should cover fallback branches for defaults and normalization', () => {
+    const h = createDb();
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const normalized = h.db.normalizeLifecycleQuota({
+        active: 'bad',
+        reserve: undefined,
+        candidate: null,
+    });
+    assert.equal(normalized.candidate, 0);
+    assert.equal(normalized.active > 0, true);
+
+    const lease = h.db.acquireRolloutSwitchLease({
+        nowIso,
+        ttlMs: 'bad',
+    });
+    assert.equal(lease, true);
+
+    h.db.updateRolloutSwitchState({
+        mode: null,
+        stable_since: null,
+        cooldown_until: null,
+        last_tick_at: null,
+        last_error: null,
+        nowIso,
+    });
+    h.db.updateRolloutSwitchState({
+        mode: 'SAFE',
+        stable_since: '2026-03-16T11:00:00.000Z',
+        cooldown_until: '2026-03-17T11:00:00.000Z',
+        last_tick_at: '2026-03-16T12:00:00.000Z',
+        last_error: 'none',
+        nowIso: '2026-03-16T12:05:00.000Z',
+    });
+    h.db.updateRolloutSwitchState({
+        mode: 'SAFE',
+        nowIso: '2026-03-16T12:10:00.000Z',
+    });
+
+    h.db.insertRolloutSwitchEvent({
+        timestamp: nowIso,
+    });
+    const events = h.db.getRolloutSwitchEvents('bad');
+    assert.equal(events.length >= 1, true);
+    assert.equal(events[0].trigger, 'manual');
+    assert.equal(events[0].action, 'steady');
+    assert.deepEqual(events[0].patch, {});
+    assert.deepEqual(events[0].details, {});
+
+    const retirementDaily = h.db.getRetirementDailyCounts('bad', nowIso);
+    assert.equal(Array.isArray(retirementDaily), true);
+
+    cleanup(h);
+});

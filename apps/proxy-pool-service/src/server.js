@@ -169,7 +169,7 @@ function createRuntime(options = {}) {
     app.get('/v1/proxies/rollout/orchestrator/state', (_req, res) => {
         res.json({
             state: db.getRolloutSwitchState?.(new Date().toISOString()) || null,
-            config: config.rollout?.orchestrator || null,
+            config: config.rollout.orchestrator,
             instanceId: orchestrator.instanceId,
         });
     });
