@@ -17,13 +17,19 @@ const legacyRanks = [
     { rank: '列兵', minHours: 12, minPoints: 80, minSamples: 20 },
     { rank: '士官', minHours: 24, minPoints: 220, minSamples: 60 },
     { rank: '尉官', minHours: 48, minPoints: 520, minSamples: 140 },
-    { rank: '王牌', minHours: 72, minPoints: 980, minSamples: 260 },
+    { rank: '校官', minHours: 56, minPoints: 680, minSamples: 180 },
+    { rank: '将官', minHours: 68, minPoints: 860, minSamples: 250 },
+    { rank: '王牌', minHours: 84, minPoints: 1080, minSamples: 320 },
 ];
 
 const legacyHonors = {
     steelStreak: 30,
     riskyWarrior: 20,
     thousandService: 1000,
+    l2Mastery: 180,
+    disciplineGuardMinScore: 92,
+    disciplineGuardMaxInvalid: 2,
+    disciplineGuardMinSamples: 300,
     riskyFailRatioThreshold: 0.35,
 };
 
@@ -111,12 +117,18 @@ const policyProfiles = {
             { rank: '列兵', minHours: 10, minPoints: 60, minSamples: 20 },
             { rank: '士官', minHours: 22, minPoints: 180, minSamples: 70 },
             { rank: '尉官', minHours: 44, minPoints: 430, minSamples: 180 },
-            { rank: '王牌', minHours: 70, minPoints: 860, minSamples: 320 },
+            { rank: '校官', minHours: 52, minPoints: 560, minSamples: 220 },
+            { rank: '将官', minHours: 64, minPoints: 760, minSamples: 290 },
+            { rank: '王牌', minHours: 82, minPoints: 980, minSamples: 380 },
         ],
         honors: {
             steelStreak: 16,
             riskyWarrior: 15,
             thousandService: 800,
+            l2Mastery: 120,
+            disciplineGuardMinScore: 90,
+            disciplineGuardMaxInvalid: 2,
+            disciplineGuardMinSamples: 220,
             riskyFailRatioThreshold: 0.65,
         },
         scoring: {
@@ -138,12 +150,18 @@ const policyProfiles = {
             { rank: '列兵', minHours: 8, minPoints: 45, minSamples: 16 },
             { rank: '士官', minHours: 18, minPoints: 130, minSamples: 50 },
             { rank: '尉官', minHours: 36, minPoints: 320, minSamples: 120 },
-            { rank: '王牌', minHours: 60, minPoints: 640, minSamples: 220 },
+            { rank: '校官', minHours: 42, minPoints: 420, minSamples: 150 },
+            { rank: '将官', minHours: 52, minPoints: 580, minSamples: 210 },
+            { rank: '王牌', minHours: 72, minPoints: 760, minSamples: 280 },
         ],
         honors: {
             steelStreak: 8,
             riskyWarrior: 8,
             thousandService: 300,
+            l2Mastery: 70,
+            disciplineGuardMinScore: 88,
+            disciplineGuardMaxInvalid: 2,
+            disciplineGuardMinSamples: 120,
             riskyFailRatioThreshold: 0.65,
         },
         scoring: {

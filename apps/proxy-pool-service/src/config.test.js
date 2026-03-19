@@ -78,7 +78,7 @@ test('config should expose required default values', { concurrency: false }, () 
 test('config ranks should be ordered and complete', { concurrency: false }, () => {
     const config = loadConfigWithEnv();
     const ranks = config.policy.ranks.map((item) => item.rank);
-    assert.deepEqual(ranks, ['新兵', '列兵', '士官', '尉官', '王牌']);
+    assert.deepEqual(ranks, ['新兵', '列兵', '士官', '尉官', '校官', '将官', '王牌']);
     assert.equal(config.policy.promotionProtectHours, 6);
     assert.equal(config.policy.valueModel.combatPointCap, 1200);
     assert.equal(config.policy.valueModel.lifecycleScoreMap.retired, 8);

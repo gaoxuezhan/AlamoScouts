@@ -1,4 +1,4 @@
-﻿const RANKS = ['新兵', '列兵', '士官', '尉官', '王牌'];
+const RANKS = ['新兵', '列兵', '士官', '尉官', '校官', '将官', '王牌'];
 const LIFECYCLE = ['candidate', 'active', 'reserve', 'retired'];
 
 const RETIREMENT_TYPES = {
@@ -12,6 +12,8 @@ const HONOR_TYPES = {
     STEEL_STREAK: '钢铁连胜',
     RISKY_WARRIOR: '逆风勇士',
     THOUSAND_SERVICE: '千次服役',
+    L2_MASTERY: '攻坚大师',
+    DISCIPLINE_GUARD: '铁纪标兵',
 };
 
 const EVENT_LEVEL = {
