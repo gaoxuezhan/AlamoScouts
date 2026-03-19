@@ -395,6 +395,60 @@ test('battle APIs should persist run details and support L1/L2 candidate selecti
     cleanup(h);
 });
 
+test('candidate selectors should skip proxies in failure backoff window', () => {
+    const h = createDb();
+    const now = '2026-03-16T12:00:00.000Z';
+    const future = '2026-03-16T13:00:00.000Z';
+
+    h.db.upsertSourceBatch(
+        [
+            { ip: '17.7.7.1', port: 80, protocol: 'http' },
+            { ip: '17.7.7.2', port: 80, protocol: 'http' },
+            { ip: '17.7.7.3', port: 80, protocol: 'http' },
+        ],
+        (() => {
+            let i = 0;
+            return () => `退避-${++i}`;
+        })(),
+        'src-backoff',
+        'batch-backoff',
+        now,
+    );
+
+    const all = h.db.getProxyList({ limit: 10 });
+    h.db.updateProxyById(all[0].id, { lifecycle: 'active', backoff_until: future, backoff_reason: 'l1:network_error', updated_at: now });
+    h.db.updateProxyById(all[1].id, { lifecycle: 'reserve', updated_at: now });
+    h.db.updateProxyById(all[2].id, { lifecycle: 'candidate', updated_at: now });
+
+    const validationCandidates = h.db.listProxiesForValidation(10, now);
+    assert.equal(validationCandidates.some((item) => item.id === all[0].id), false);
+
+    const l1Candidates = h.db.listProxiesForBattleL1(3, { active: 0.5, reserve: 0.3, candidate: 0.2 }, now);
+    assert.equal(l1Candidates.some((item) => item.id === all[0].id), false);
+
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[1].id,
+        stage: 'l1',
+        target: 'httpbin/ip',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 50,
+        reason: 'ok',
+        details: {},
+    });
+    h.db.updateProxyById(all[1].id, {
+        backoff_until: future,
+        backoff_reason: 'l2:network_error',
+        updated_at: now,
+    });
+
+    const l2Candidates = h.db.listProxiesForBattleL2(3, 120, now);
+    assert.equal(l2Candidates.some((item) => item.id === all[1].id), false);
+
+    cleanup(h);
+});
+
 test('retirement stats APIs should return count and daily series', () => {
     const h = createDb();
     const now = '2026-03-16T12:00:00.000Z';
@@ -625,6 +679,39 @@ test('db branch helpers should cover migration and battle edge branches', () => 
     assert.equal(runs[0].status_code, null);
     assert.equal(runs[0].latency_ms, null);
 
+    cleanup(h);
+});
+
+test('candidate selectors should accept invalid nowIso fallback path', () => {
+    const h = createDb();
+    const now = '2026-03-16T12:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '18.8.8.8', port: 8080, protocol: 'http' }],
+        () => '覆盖-时间回退-01',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyByKey('18.8.8.8:8080:http');
+    h.db.updateProxyById(proxy.id, {
+        lifecycle: 'active',
+        updated_at: now,
+    });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: proxy.id,
+        stage: 'l1',
+        target: 'ipify',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 20,
+        reason: 'ok',
+        details: {},
+    });
+
+    assert.equal(Array.isArray(h.db.listProxiesForValidation(5, 'invalid-now')), true);
+    assert.equal(Array.isArray(h.db.listProxiesForBattleL1(5, 0.2, 'invalid-now')), true);
+    assert.equal(Array.isArray(h.db.listProxiesForBattleL2(5, 30, 'invalid-now')), true);
     cleanup(h);
 });
 

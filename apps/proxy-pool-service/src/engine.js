@@ -114,6 +114,57 @@ function buildCandidateGateState(config = {}, candidateCount = 0) {
     };
 }
 
+// 0263_readFailureBackoff_读取失败退避配置逻辑
+function readFailureBackoff(config = {}) {
+    const raw = config.failureBackoff || {};
+    const multiplier = Number(raw.multiplier);
+    return {
+        enabled: raw.enabled !== false,
+        l0BaseMs: Math.max(60_000, Number(raw.l0BaseMs) || 300_000),
+        l1BaseMs: Math.max(60_000, Number(raw.l1BaseMs) || 600_000),
+        l2BaseMs: Math.max(60_000, Number(raw.l2BaseMs) || 900_000),
+        multiplier: Number.isFinite(multiplier) && multiplier >= 1 ? multiplier : 1.8,
+        maxMs: Math.max(60_000, Number(raw.maxMs) || 21_600_000),
+    };
+}
+
+// 0264_resolveFailureBackoff_计算失败退避窗口逻辑
+function resolveFailureBackoff({
+    config = {},
+    proxy = {},
+    nowIso = new Date().toISOString(),
+    outcome = 'network_error',
+    stage = 'l0',
+} = {}) {
+    const policy = readFailureBackoff(config);
+    if (!policy.enabled || outcome === 'success') {
+        return {
+            enabled: policy.enabled,
+            shouldBackoff: false,
+            delayMs: 0,
+            untilIso: null,
+            failStreak: 0,
+        };
+    }
+
+    const failStreak = Math.max(1, Number(proxy?.consecutive_fail) || 1);
+    const baseMs = stage === 'l2'
+        ? policy.l2BaseMs
+        : (stage === 'l1' ? policy.l1BaseMs : policy.l0BaseMs);
+    const rawDelay = baseMs * (policy.multiplier ** Math.max(0, failStreak - 1));
+    const delayMs = Math.max(baseMs, Math.min(policy.maxMs, Math.round(rawDelay)));
+    const nowMs = Date.parse(nowIso);
+    const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+
+    return {
+        enabled: policy.enabled,
+        shouldBackoff: true,
+        delayMs,
+        untilIso: new Date(safeNowMs + delayMs).toISOString(),
+        failStreak,
+    };
+}
+
 class ProxyHubEngine extends EventEmitter {
     // 0027_constructor_初始化实例逻辑
     constructor({ config, db, workerPool, logger, now }) {
@@ -457,7 +508,57 @@ class ProxyHubEngine extends EventEmitter {
             updated_at: nowIso,
         });
 
-        const updatedProxy = this.db.getProxyById(proxyId);
+        let updatedProxy = this.db.getProxyById(proxyId);
+        const backoff = resolveFailureBackoff({
+            config: this.config,
+            proxy: updatedProxy,
+            nowIso,
+            outcome,
+            stage: combatStage,
+        });
+        if (backoff.shouldBackoff) {
+            this.db.updateProxyById(proxyId, {
+                backoff_until: backoff.untilIso,
+                backoff_reason: `${combatStage}:${outcome}`,
+                updated_at: nowIso,
+            });
+            updatedProxy = this.db.getProxyById(proxyId);
+            this.db.insertProxyEvent({
+                timestamp: nowIso,
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                event_type: 'backoff',
+                level: EVENT_LEVEL.INFO,
+                message: `失败退避：${updatedProxy.display_name} 暂停至 ${backoff.untilIso}`,
+                details: {
+                    stage: combatStage,
+                    outcome,
+                    failStreak: backoff.failStreak,
+                    delayMs: backoff.delayMs,
+                    until: backoff.untilIso,
+                },
+            });
+        } else if (outcome === 'success' && (updatedProxy.backoff_until || updatedProxy.backoff_reason)) {
+            this.db.updateProxyById(proxyId, {
+                backoff_until: null,
+                backoff_reason: null,
+                updated_at: nowIso,
+            });
+            updatedProxy = this.db.getProxyById(proxyId);
+            this.db.insertProxyEvent({
+                timestamp: nowIso,
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                event_type: 'backoff_clear',
+                level: EVENT_LEVEL.INFO,
+                message: `退避解除：${updatedProxy.display_name}`,
+                details: {
+                    stage: combatStage,
+                    outcome,
+                },
+            });
+        }
+
         const activeHonors = parseArrayJson(updatedProxy.honor_active_json);
 
         for (const award of combat.awards) {
@@ -602,6 +703,20 @@ class ProxyHubEngine extends EventEmitter {
                 action: '提交本轮结果',
             });
         } catch (error) {
+            const nowIso = this.now().toISOString();
+            const reason = error?.message || 'unknown';
+            try {
+                await this.applyCombatOutcome({
+                    proxyId: proxy.id,
+                    sourceName,
+                    outcome: 'network_error',
+                    latencyMs: 0,
+                    nowIso,
+                    stage: '评分(L0-异常)',
+                    combatStage: 'l0',
+                });
+            } catch {}
+
             this.logger.write({
                 event: '写数据库失败',
                 proxyName: proxy.display_name,
@@ -609,8 +724,8 @@ class ProxyHubEngine extends EventEmitter {
                 stage: '入库',
                 result: '失败',
                 durationMs: Date.now() - cycleStart,
-                reason: error?.message || 'unknown',
-                action: '等待下轮重试',
+                reason,
+                action: '已触发失败退避，等待下轮重试',
             });
         }
     }
@@ -635,45 +750,70 @@ class ProxyHubEngine extends EventEmitter {
 
             const concurrency = Math.max(2, Math.min(this.config.threadPool.workers, 10));
             await runWithConcurrency(candidates, concurrency, async (proxy) => {
-                const result = await this.workerPool.runTask('battle-l1', {
-                    proxy: {
-                        ip: proxy.ip,
-                        port: proxy.port,
-                        protocol: proxy.protocol,
-                    },
-                    targets: this.config.battle.targets.l1,
-                    timeoutMs: this.config.battle.timeoutMs.l1,
-                    blockedStatusCodes: this.config.battle.blockedStatusCodes,
-                    blockSignals: this.config.battle.blockSignals,
-                });
-
                 const nowIso = this.now().toISOString();
-                for (const run of result.runs || []) {
-                    this.db.insertBattleTestRun({
-                        timestamp: nowIso,
-                        proxy_id: proxy.id,
-                        stage: 'l1',
-                        target: run.target,
-                        outcome: run.outcome,
-                        status_code: run.statusCode,
-                        latency_ms: run.latencyMs,
-                        reason: run.reason,
-                        details: run.details,
+                try {
+                    const result = await this.workerPool.runTask('battle-l1', {
+                        proxy: {
+                            ip: proxy.ip,
+                            port: proxy.port,
+                            protocol: proxy.protocol,
+                        },
+                        targets: this.config.battle.targets.l1,
+                        timeoutMs: this.config.battle.timeoutMs.l1,
+                        blockedStatusCodes: this.config.battle.blockedStatusCodes,
+                        blockSignals: this.config.battle.blockSignals,
+                    });
+
+                    for (const run of result.runs || []) {
+                        this.db.insertBattleTestRun({
+                            timestamp: nowIso,
+                            proxy_id: proxy.id,
+                            stage: 'l1',
+                            target: run.target,
+                            outcome: run.outcome,
+                            status_code: run.statusCode,
+                            latency_ms: run.latencyMs,
+                            reason: run.reason,
+                            details: run.details,
+                        });
+                    }
+
+                    const latest = this.db.getProxyById(proxy.id);
+                    const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l1');
+                    await this.applyCombatOutcome({
+                        proxyId: proxy.id,
+                        sourceName,
+                        outcome: result.outcome,
+                        latencyMs: result.latencyMs || 0,
+                        nowIso,
+                        stage: '评分(L1)',
+                        combatStage: 'l1',
+                        extraUpdates: battleUpdates,
+                    });
+                } catch (error) {
+                    const latest = this.db.getProxyById(proxy.id) || proxy;
+                    const battleUpdates = buildBattleCounterUpdates(latest, nowIso, 'network_error', 'l1');
+                    await this.applyCombatOutcome({
+                        proxyId: proxy.id,
+                        sourceName,
+                        outcome: 'network_error',
+                        latencyMs: 0,
+                        nowIso,
+                        stage: '评分(L1-异常)',
+                        combatStage: 'l1',
+                        extraUpdates: battleUpdates,
+                    });
+
+                    this.logger.write({
+                        event: '战场测试L1失败',
+                        proxyName: proxy.display_name,
+                        ipSource: sourceName,
+                        stage: '战场测试L1',
+                        result: '异常',
+                        reason: error?.message || 'battle-l1-task-error',
+                        action: '已触发失败退避',
                     });
                 }
-
-                const latest = this.db.getProxyById(proxy.id);
-                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l1');
-                await this.applyCombatOutcome({
-                    proxyId: proxy.id,
-                    sourceName,
-                    outcome: result.outcome,
-                    latencyMs: result.latencyMs || 0,
-                    nowIso,
-                    stage: '评分(L1)',
-                    combatStage: 'l1',
-                    extraUpdates: battleUpdates,
-                });
             });
         } catch (error) {
             this.logger.write({
@@ -708,46 +848,71 @@ class ProxyHubEngine extends EventEmitter {
 
             const concurrency = Math.max(1, Math.min(this.config.threadPool.workers, 6));
             await runWithConcurrency(candidates, concurrency, async (proxy) => {
-                const result = await this.workerPool.runTask('battle-l2', {
-                    proxy: {
-                        ip: proxy.ip,
-                        port: proxy.port,
-                        protocol: proxy.protocol,
-                    },
-                    primaryTargets: this.config.battle.targets.l2Primary,
-                    fallbackTargets: this.config.battle.targets.l2Fallback,
-                    timeoutMs: this.config.battle.timeoutMs.l2,
-                    blockedStatusCodes: this.config.battle.blockedStatusCodes,
-                    blockSignals: this.config.battle.blockSignals,
-                });
-
                 const nowIso = this.now().toISOString();
-                for (const run of result.runs || []) {
-                    this.db.insertBattleTestRun({
-                        timestamp: nowIso,
-                        proxy_id: proxy.id,
-                        stage: 'l2',
-                        target: run.target,
-                        outcome: run.outcome,
-                        status_code: run.statusCode,
-                        latency_ms: run.latencyMs,
-                        reason: run.reason,
-                        details: run.details,
+                try {
+                    const result = await this.workerPool.runTask('battle-l2', {
+                        proxy: {
+                            ip: proxy.ip,
+                            port: proxy.port,
+                            protocol: proxy.protocol,
+                        },
+                        primaryTargets: this.config.battle.targets.l2Primary,
+                        fallbackTargets: this.config.battle.targets.l2Fallback,
+                        timeoutMs: this.config.battle.timeoutMs.l2,
+                        blockedStatusCodes: this.config.battle.blockedStatusCodes,
+                        blockSignals: this.config.battle.blockSignals,
+                    });
+
+                    for (const run of result.runs || []) {
+                        this.db.insertBattleTestRun({
+                            timestamp: nowIso,
+                            proxy_id: proxy.id,
+                            stage: 'l2',
+                            target: run.target,
+                            outcome: run.outcome,
+                            status_code: run.statusCode,
+                            latency_ms: run.latencyMs,
+                            reason: run.reason,
+                            details: run.details,
+                        });
+                    }
+
+                    const latest = this.db.getProxyById(proxy.id);
+                    const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l2');
+                    await this.applyCombatOutcome({
+                        proxyId: proxy.id,
+                        sourceName,
+                        outcome: result.outcome,
+                        latencyMs: result.latencyMs || 0,
+                        nowIso,
+                        stage: '评分(L2)',
+                        combatStage: 'l2',
+                        extraUpdates: battleUpdates,
+                    });
+                } catch (error) {
+                    const latest = this.db.getProxyById(proxy.id) || proxy;
+                    const battleUpdates = buildBattleCounterUpdates(latest, nowIso, 'network_error', 'l2');
+                    await this.applyCombatOutcome({
+                        proxyId: proxy.id,
+                        sourceName,
+                        outcome: 'network_error',
+                        latencyMs: 0,
+                        nowIso,
+                        stage: '评分(L2-异常)',
+                        combatStage: 'l2',
+                        extraUpdates: battleUpdates,
+                    });
+
+                    this.logger.write({
+                        event: '战场测试L2失败',
+                        proxyName: proxy.display_name,
+                        ipSource: sourceName,
+                        stage: '战场测试L2',
+                        result: '异常',
+                        reason: error?.message || 'battle-l2-task-error',
+                        action: '已触发失败退避',
                     });
                 }
-
-                const latest = this.db.getProxyById(proxy.id);
-                const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l2');
-                await this.applyCombatOutcome({
-                    proxyId: proxy.id,
-                    sourceName,
-                    outcome: result.outcome,
-                    latencyMs: result.latencyMs || 0,
-                    nowIso,
-                    stage: '评分(L2)',
-                    combatStage: 'l2',
-                    extraUpdates: battleUpdates,
-                });
             });
         } catch (error) {
             this.logger.write({
@@ -910,6 +1075,8 @@ module.exports = {
     buildBattleCounterUpdates,
     readCandidateControl,
     buildCandidateGateState,
+    readFailureBackoff,
+    resolveFailureBackoff,
     ProxyHubEngine,
 };
 

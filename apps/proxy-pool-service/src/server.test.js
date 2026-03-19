@@ -430,6 +430,28 @@ test('candidate control endpoint should initialize control object when missing',
     }
 });
 
+test('candidate control GET should fallback when db method or config is missing', async () => {
+    const stubs = createStubs();
+    stubs.db.getLifecycleDistribution = undefined;
+    stubs.db.getLifecycleCount = undefined;
+    const config = createConfig(0);
+    delete config.candidateControl;
+    const runtime = createRuntime({ config, ...stubs });
+    const server = await runtime.start();
+    const addr = server.address();
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/candidate-control');
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.candidateCount, 0);
+        assert.deepEqual(body.candidateControl, {});
+    } finally {
+        await runtime.shutdown('TEST-CANDIDATE-CONTROL-GET-FALLBACK');
+    }
+});
+
 test('shutdown should wait for in-flight engine start before closing db', async () => {
     const stubs = createStubs();
     let releaseStart;

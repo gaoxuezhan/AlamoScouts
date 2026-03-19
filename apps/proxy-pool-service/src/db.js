@@ -29,6 +29,15 @@ function parseJsonObject(raw) {
     }
 }
 
+// 0262_normalizeIso_规范化时间戳逻辑
+function normalizeIso(value, fallback = new Date().toISOString()) {
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) {
+        return fallback;
+    }
+    return new Date(ms).toISOString();
+}
+
 class ProxyHubDb {
     // 0001_constructor_初始化实例逻辑
     constructor(config) {
@@ -90,6 +99,8 @@ class ProxyHubDb {
                 honor_active_json TEXT NOT NULL DEFAULT '[]',
                 lifecycle_changed_at TEXT,
                 last_l1_success_at TEXT,
+                backoff_until TEXT,
+                backoff_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL
@@ -229,6 +240,9 @@ class ProxyHubDb {
 
             CREATE INDEX IF NOT EXISTS idx_proxies_last_battle
             ON proxies(last_battle_checked_at);
+
+            CREATE INDEX IF NOT EXISTS idx_proxies_backoff_until
+            ON proxies(backoff_until);
         `);
 
         this.insertRuntimeLogStmt = this.db.prepare(`
@@ -297,6 +311,8 @@ class ProxyHubDb {
             { name: 'ip_value_breakdown_json', sql: "TEXT NOT NULL DEFAULT '{}'" },
             { name: 'lifecycle_changed_at', sql: 'TEXT' },
             { name: 'last_l1_success_at', sql: 'TEXT' },
+            { name: 'backoff_until', sql: 'TEXT' },
+            { name: 'backoff_reason', sql: 'TEXT' },
         ];
 
         for (const column of requiredColumns) {
@@ -561,13 +577,15 @@ class ProxyHubDb {
     }
 
     // 0008_listProxiesForValidation_列出校验逻辑
-    listProxiesForValidation(limit) {
+    listProxiesForValidation(limit, nowIso = new Date().toISOString()) {
+        const safeNowIso = normalizeIso(nowIso);
         return this.db.prepare(`
             SELECT * FROM proxies
             WHERE lifecycle != 'retired'
+              AND (backoff_until IS NULL OR backoff_until <= ?)
             ORDER BY COALESCE(last_validation_at, '1970-01-01T00:00:00.000Z') ASC, updated_at ASC
             LIMIT ?
-        `).all(limit);
+        `).all(safeNowIso, limit);
     }
 
     // 0192_normalizeLifecycleQuota_规范化战场配额逻辑
@@ -626,9 +644,10 @@ class ProxyHubDb {
     }
 
     // 0194_listProxiesForBattleL1_列出战场L1候选逻辑
-    listProxiesForBattleL1(limit, candidateQuota = 0.15) {
+    listProxiesForBattleL1(limit, candidateQuota = 0.15, nowIso = new Date().toISOString()) {
         const safeLimit = Math.max(0, Number(limit) || 0);
         if (safeLimit === 0) return [];
+        const safeNowIso = normalizeIso(nowIso);
 
         const normalizedQuota = this.normalizeLifecycleQuota(candidateQuota);
         const quotaCounts = this.pickQuotaCounts(safeLimit, normalizedQuota);
@@ -636,27 +655,30 @@ class ProxyHubDb {
         const actives = this.db.prepare(`
             SELECT * FROM proxies
             WHERE lifecycle = 'active'
+              AND (backoff_until IS NULL OR backoff_until <= ?)
             ORDER BY
                 COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
                 updated_at ASC
             LIMIT ?
-        `).all(quotaCounts.active);
+        `).all(safeNowIso, quotaCounts.active);
 
         const reserves = this.db.prepare(`
             SELECT * FROM proxies
             WHERE lifecycle = 'reserve'
+              AND (backoff_until IS NULL OR backoff_until <= ?)
             ORDER BY
                 COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
                 updated_at ASC
             LIMIT ?
-        `).all(quotaCounts.reserve);
+        `).all(safeNowIso, quotaCounts.reserve);
 
         const candidates = this.db.prepare(`
             SELECT * FROM proxies
             WHERE lifecycle = 'candidate'
+              AND (backoff_until IS NULL OR backoff_until <= ?)
             ORDER BY COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC, updated_at ASC
             LIMIT ?
-        `).all(quotaCounts.candidate);
+        `).all(safeNowIso, quotaCounts.candidate);
 
         const merged = [...actives, ...reserves, ...candidates];
         if (merged.length >= safeLimit) {
@@ -666,23 +688,25 @@ class ProxyHubDb {
         const filled = this.db.prepare(`
             SELECT * FROM proxies
             WHERE lifecycle != 'retired'
+              AND (backoff_until IS NULL OR backoff_until <= ?)
               AND id NOT IN (${merged.length > 0 ? merged.map(() => '?').join(',') : '-1'})
             ORDER BY
                 COALESCE(last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
                 CASE lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC,
                 updated_at ASC
             LIMIT ?
-        `).all(...merged.map((item) => item.id), safeLimit - merged.length);
+        `).all(safeNowIso, ...merged.map((item) => item.id), safeLimit - merged.length);
 
         return [...merged, ...filled];
     }
 
     // 0195_listProxiesForBattleL2_列出战场L2候选逻辑
-    listProxiesForBattleL2(limit, lookbackMinutes = 10) {
+    listProxiesForBattleL2(limit, lookbackMinutes = 10, nowIso = new Date().toISOString()) {
         const safeLimit = Math.max(0, Number(limit) || 0);
         if (safeLimit === 0) return [];
+        const safeNowIso = normalizeIso(nowIso);
 
-        const cutoffIso = new Date(Date.now() - Math.max(1, lookbackMinutes) * 60_000).toISOString();
+        const cutoffIso = new Date(Date.parse(safeNowIso) - Math.max(1, lookbackMinutes) * 60_000).toISOString();
         return this.db.prepare(`
             SELECT p.*
             FROM proxies p
@@ -693,12 +717,13 @@ class ProxyHubDb {
                 GROUP BY proxy_id
             ) l1 ON l1.proxy_id = p.id
             WHERE p.lifecycle != 'retired'
+              AND (p.backoff_until IS NULL OR p.backoff_until <= ?)
             ORDER BY
                 COALESCE(p.last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
                 CASE p.lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC,
                 l1.latest_l1_success_at DESC
             LIMIT ?
-        `).all(cutoffIso, safeLimit);
+        `).all(cutoffIso, safeNowIso, safeLimit);
     }
 
     // 0009_listProxiesForStateReview_列出状态巡检逻辑

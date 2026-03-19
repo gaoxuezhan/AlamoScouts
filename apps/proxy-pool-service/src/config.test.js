@@ -20,6 +20,12 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_CANDIDATE_STALE_MIN_SAMPLES',
         'PROXY_HUB_CANDIDATE_TIMEOUT_HOURS',
         'PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE',
+        'PROXY_HUB_FAILURE_BACKOFF_ENABLED',
+        'PROXY_HUB_FAILURE_BACKOFF_L0_MS',
+        'PROXY_HUB_FAILURE_BACKOFF_L1_MS',
+        'PROXY_HUB_FAILURE_BACKOFF_L2_MS',
+        'PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER',
+        'PROXY_HUB_FAILURE_BACKOFF_MAX_MS',
         ...Object.keys(overrides),
     ]);
     const originals = {};
@@ -62,6 +68,8 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.battle.maxBattleL1PerCycle, 60);
     assert.equal(config.battle.maxBattleL2PerCycle, 20);
     assert.equal(config.battle.candidateQuota, 0.30);
+    assert.equal(config.failureBackoff.enabled, true);
+    assert.equal(config.failureBackoff.maxMs, 21600000);
     assert.equal(Array.isArray(config.battle.targets.l1), true);
     assert.equal(config.battle.targets.l2Primary[0].name, 'ly-flight-main');
     assert.equal(config.battle.targets.l2Primary[0].url, 'https://www.ly.com/flights/home');
@@ -129,6 +137,23 @@ test('config should parse candidate control env values', { concurrency: false },
     assert.equal(config.candidateControl.staleMinSamples, 2);
     assert.equal(config.candidateControl.timeoutHours, 60);
     assert.equal(config.candidateControl.maxRetirePerCycle, 333);
+});
+
+test('config should parse failure backoff env values', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_FAILURE_BACKOFF_ENABLED: 'false',
+        PROXY_HUB_FAILURE_BACKOFF_L0_MS: '111000',
+        PROXY_HUB_FAILURE_BACKOFF_L1_MS: '222000',
+        PROXY_HUB_FAILURE_BACKOFF_L2_MS: '333000',
+        PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER: '2.5',
+        PROXY_HUB_FAILURE_BACKOFF_MAX_MS: '444000',
+    });
+    assert.equal(config.failureBackoff.enabled, false);
+    assert.equal(config.failureBackoff.l0BaseMs, 111000);
+    assert.equal(config.failureBackoff.l1BaseMs, 222000);
+    assert.equal(config.failureBackoff.l2BaseMs, 333000);
+    assert.equal(config.failureBackoff.multiplier, 2.5);
+    assert.equal(config.failureBackoff.maxMs, 444000);
 });
 
 test('config should accept soak policy profile from env', { concurrency: false }, () => {

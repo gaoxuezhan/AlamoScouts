@@ -241,6 +241,14 @@ module.exports = {
         timeoutHours: Number(process.env.PROXY_HUB_CANDIDATE_TIMEOUT_HOURS || 72),
         maxRetirePerCycle: Number(process.env.PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE || 2000),
     },
+    failureBackoff: {
+        enabled: toBool(process.env.PROXY_HUB_FAILURE_BACKOFF_ENABLED, true),
+        l0BaseMs: Number(process.env.PROXY_HUB_FAILURE_BACKOFF_L0_MS || 300_000),
+        l1BaseMs: Number(process.env.PROXY_HUB_FAILURE_BACKOFF_L1_MS || 600_000),
+        l2BaseMs: Number(process.env.PROXY_HUB_FAILURE_BACKOFF_L2_MS || 900_000),
+        multiplier: Number(process.env.PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER || 1.8),
+        maxMs: Number(process.env.PROXY_HUB_FAILURE_BACKOFF_MAX_MS || 21_600_000),
+    },
     rollout: {
         version: 'v1.1',
         activeProfile,
