@@ -40,6 +40,14 @@ function createConfig(port = 0) {
                 lifecycleHysteresis: true,
                 honorPromotionTuning: false,
             },
+            orchestrator: {
+                enabled: true,
+                intervalMs: 900000,
+                stableHours: 48,
+                cooldownHours: 24,
+                minL2Samples: 20,
+                leaseTtlMs: 120000,
+            },
             guardrails: {
                 windowHours: 24,
                 activeDropThreshold: 0.2,
@@ -78,7 +86,25 @@ function createConfig(port = 0) {
 function createStubs() {
     const loggerEvents = new EventEmitter();
     const poolEvents = new EventEmitter();
-    const state = { dbClosed: false, poolClosed: false, engineStarted: false, engineStopped: false, engineStopCalls: 0 };
+    const state = {
+        dbClosed: false,
+        poolClosed: false,
+        engineStarted: false,
+        engineStopped: false,
+        engineStopCalls: 0,
+        rolloutState: {
+            id: 1,
+            mode: 'SAFE',
+            stable_since: '2026-03-16T00:00:00.000Z',
+            cooldown_until: null,
+            last_tick_at: null,
+            last_error: null,
+            lease_owner: null,
+            lease_until: null,
+            updated_at: '2026-03-16T00:00:00.000Z',
+        },
+        rolloutEvents: [],
+    };
 
     const db = {
         getSourceDistribution: () => [{ source: 'monosans', count: 2 }],
@@ -103,6 +129,23 @@ function createStubs() {
             { day: '2026-03-14', count: 4 },
             { day: '2026-03-15', count: 2 },
         ],
+        getRolloutSwitchState: () => ({ ...state.rolloutState }),
+        acquireRolloutSwitchLease: ({ owner, nowIso }) => {
+            state.rolloutState.lease_owner = owner;
+            state.rolloutState.lease_until = nowIso;
+            return true;
+        },
+        updateRolloutSwitchState: (patch) => {
+            state.rolloutState = { ...state.rolloutState, ...patch };
+            return { ...state.rolloutState };
+        },
+        insertRolloutSwitchEvent: (event) => {
+            state.rolloutEvents.push({
+                id: state.rolloutEvents.length + 1,
+                ...event,
+            });
+        },
+        getRolloutSwitchEvents: (limit = 200) => state.rolloutEvents.slice(-limit).reverse(),
         getRuntimeLogs: () => [{ id: 5, event: '开始抓源' }],
         close: () => {
             state.dbClosed = true;
@@ -187,6 +230,8 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/policy',
         '/v1/proxies/rollout',
         '/v1/proxies/rollout/guardrails',
+        '/v1/proxies/rollout/orchestrator/state',
+        '/v1/proxies/rollout/orchestrator/events',
         '/v1/proxies/ranks/board',
         '/v1/proxies/honors?limit=1000',
         '/v1/proxies/retirements?limit=-1',
@@ -253,6 +298,14 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(rollbackPayload.guardrails.shouldRollback, true);
     assert.equal(Array.isArray(rollbackPayload.guardrails.breaches), true);
     assert.equal(typeof rollbackPayload.features.lifecycleHysteresis, 'boolean');
+
+    const manualTickRes = await fetch(baseUrl + '/v1/proxies/rollout/orchestrator/tick', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(manualTickRes.status, 200);
+    const manualTick = await manualTickRes.json();
+    assert.equal(typeof manualTick.ok, 'boolean');
 
     const sseLogs = await fetch(baseUrl + '/api/runtime/logs/stream', {
         headers: { Accept: 'text/event-stream' },
@@ -379,6 +432,71 @@ test('server start should handle sync listen throw and engine async start failur
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(stubsMsg.logger.entries.some((e) => e.reason === 'engine-start-fail'), true);
     await runtimeMsg.shutdown('TEST4-MSG');
+});
+
+test('server start should log orchestrator async start failure', async () => {
+    const stubs = createStubs();
+    const orchestrator = {
+        instanceId: 'orch-test',
+        async start() {
+            throw new Error('orch-start-fail');
+        },
+        async stop() {},
+    };
+
+    const { runtime } = await startRuntimeOnRandomPort({ ...stubs, orchestrator });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(stubs.logger.entries.some((e) => e.result === '自动编排启动失败' && e.reason === 'orch-start-fail'), true);
+    await runtime.shutdown('TEST-ORCH-FAIL');
+});
+
+test('server start should fallback orchestrator start failure reason to unknown', async () => {
+    const stubs = createStubs();
+    const orchestrator = {
+        instanceId: 'orch-test-null',
+        async start() {
+            throw null;
+        },
+        async stop() {},
+    };
+
+    const { runtime } = await startRuntimeOnRandomPort({ ...stubs, orchestrator });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(stubs.logger.entries.some((e) => e.result === '自动编排启动失败' && e.reason === 'unknown'), true);
+    await runtime.shutdown('TEST-ORCH-FAIL-NULL');
+});
+
+test('shutdown should wait for in-flight orchestrator start before closing db', async () => {
+    const stubs = createStubs();
+    let releaseStart;
+    const startGate = new Promise((resolve) => {
+        releaseStart = resolve;
+    });
+    const orchestrator = {
+        instanceId: 'orch-gate',
+        stopped: false,
+        async start() {
+            await startGate;
+        },
+        async stop() {
+            this.stopped = true;
+        },
+    };
+
+    const { runtime } = await startRuntimeOnRandomPort({ ...stubs, orchestrator });
+    const shutdownPromise = runtime.shutdown('RACE-ORCH');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(stubs.state.dbClosed, false);
+    assert.equal(stubs.state.poolClosed, false);
+    assert.equal(orchestrator.stopped, false);
+
+    releaseStart();
+    await shutdownPromise;
+
+    assert.equal(stubs.state.dbClosed, true);
+    assert.equal(stubs.state.poolClosed, true);
+    assert.equal(orchestrator.stopped, true);
 });
 
 test('runCli should register signals and handle startup failure', async () => {

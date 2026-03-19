@@ -965,3 +965,54 @@ test('renameAllDisplayNames should throw when old-style names remain in runtime 
 
     cleanup(h);
 });
+
+test('rollout switch state and events APIs should work', () => {
+    const h = createDb();
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const state0 = h.db.getRolloutSwitchState(nowIso);
+    assert.equal(state0.mode, 'SAFE');
+    assert.equal(typeof state0.stable_since, 'string');
+
+    const leaseA = h.db.acquireRolloutSwitchLease({
+        owner: 'owner-a',
+        nowIso,
+        ttlMs: 120000,
+    });
+    assert.equal(leaseA, true);
+
+    const leaseB = h.db.acquireRolloutSwitchLease({
+        owner: 'owner-b',
+        nowIso,
+        ttlMs: 120000,
+    });
+    assert.equal(leaseB, false);
+
+    h.db.updateRolloutSwitchState({
+        mode: 'COOLDOWN',
+        stable_since: null,
+        cooldown_until: '2026-03-17T12:00:00.000Z',
+        last_tick_at: nowIso,
+        last_error: null,
+        nowIso,
+    });
+    const state1 = h.db.getRolloutSwitchState(nowIso);
+    assert.equal(state1.mode, 'COOLDOWN');
+    assert.equal(state1.cooldown_until, '2026-03-17T12:00:00.000Z');
+
+    h.db.insertRolloutSwitchEvent({
+        timestamp: nowIso,
+        trigger: 'manual',
+        action: 'rollback',
+        mode_before: 'FULL',
+        mode_after: 'COOLDOWN',
+        patch: { honorPromotionTuning: false },
+        details: { breaches: ['l2_drop'] },
+    });
+    const events = h.db.getRolloutSwitchEvents(10);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].action, 'rollback');
+    assert.equal(events[0].patch.honorPromotionTuning, false);
+
+    cleanup(h);
+});

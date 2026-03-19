@@ -23,6 +23,8 @@ test('ensureRolloutConfig should backfill rollout defaults', () => {
     assert.equal(rollout.features.stageWeighting, true);
     assert.equal(rollout.features.lifecycleHysteresis, true);
     assert.equal(rollout.features.honorPromotionTuning, false);
+    assert.equal(rollout.orchestrator.enabled, true);
+    assert.equal(rollout.orchestrator.intervalMs, 900000);
     assert.equal(typeof rollout.guardrails.baseline.activeCount, 'number');
 });
 

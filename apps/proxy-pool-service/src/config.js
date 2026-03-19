@@ -240,6 +240,14 @@ module.exports = {
             lifecycleHysteresis: toBool(process.env.PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS, true),
             honorPromotionTuning: toBool(process.env.PROXY_HUB_FEATURE_HONOR_PROMOTION_TUNING, false),
         },
+        orchestrator: {
+            enabled: toBool(process.env.PROXY_HUB_ROLLOUT_ORCHESTRATOR_ENABLED, true),
+            intervalMs: Number(process.env.PROXY_HUB_ROLLOUT_ORCHESTRATOR_INTERVAL_MS || 900_000),
+            stableHours: Number(process.env.PROXY_HUB_ROLLOUT_STABLE_HOURS || 48),
+            cooldownHours: Number(process.env.PROXY_HUB_ROLLOUT_COOLDOWN_HOURS || 24),
+            minL2Samples: Number(process.env.PROXY_HUB_ROLLOUT_MIN_L2_SAMPLES || 20),
+            leaseTtlMs: Number(process.env.PROXY_HUB_ROLLOUT_LEASE_TTL_MS || 120_000),
+        },
         guardrails: {
             windowHours: Number(process.env.PROXY_HUB_ROLLBACK_WINDOW_HOURS || 24),
             activeDropThreshold: Number(process.env.PROXY_HUB_ROLLBACK_ACTIVE_DROP_RATIO || 0.20),

@@ -34,6 +34,15 @@ function ensureRolloutConfig(config = {}) {
         ...DEFAULT_FEATURES,
         ...(config.rollout.features || {}),
     };
+    const orchestrator = config.rollout.orchestrator || {};
+    config.rollout.orchestrator = {
+        enabled: orchestrator.enabled !== false,
+        intervalMs: toNumber(orchestrator.intervalMs, 900_000),
+        stableHours: toNumber(orchestrator.stableHours, 48),
+        cooldownHours: toNumber(orchestrator.cooldownHours, 24),
+        minL2Samples: toNumber(orchestrator.minL2Samples, 20),
+        leaseTtlMs: toNumber(orchestrator.leaseTtlMs, 120_000),
+    };
 
     const guardrails = config.rollout.guardrails || {};
     config.rollout.guardrails = {

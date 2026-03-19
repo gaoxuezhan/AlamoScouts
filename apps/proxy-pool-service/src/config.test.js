@@ -7,6 +7,12 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_FEATURE_STAGE_WEIGHTING',
         'PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS',
         'PROXY_HUB_FEATURE_HONOR_PROMOTION_TUNING',
+        'PROXY_HUB_ROLLOUT_ORCHESTRATOR_ENABLED',
+        'PROXY_HUB_ROLLOUT_ORCHESTRATOR_INTERVAL_MS',
+        'PROXY_HUB_ROLLOUT_STABLE_HOURS',
+        'PROXY_HUB_ROLLOUT_COOLDOWN_HOURS',
+        'PROXY_HUB_ROLLOUT_MIN_L2_SAMPLES',
+        'PROXY_HUB_ROLLOUT_LEASE_TTL_MS',
         ...Object.keys(overrides),
     ]);
     const originals = {};
@@ -80,6 +86,23 @@ test('config should parse rollout feature bool env values', { concurrency: false
     assert.equal(config.rollout.features.stageWeighting, true);
     assert.equal(config.rollout.features.lifecycleHysteresis, false);
     assert.equal(config.rollout.features.honorPromotionTuning, false);
+});
+
+test('config should parse rollout orchestrator env values', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_ROLLOUT_ORCHESTRATOR_ENABLED: 'false',
+        PROXY_HUB_ROLLOUT_ORCHESTRATOR_INTERVAL_MS: '120000',
+        PROXY_HUB_ROLLOUT_STABLE_HOURS: '36',
+        PROXY_HUB_ROLLOUT_COOLDOWN_HOURS: '12',
+        PROXY_HUB_ROLLOUT_MIN_L2_SAMPLES: '30',
+        PROXY_HUB_ROLLOUT_LEASE_TTL_MS: '90000',
+    });
+    assert.equal(config.rollout.orchestrator.enabled, false);
+    assert.equal(config.rollout.orchestrator.intervalMs, 120000);
+    assert.equal(config.rollout.orchestrator.stableHours, 36);
+    assert.equal(config.rollout.orchestrator.cooldownHours, 12);
+    assert.equal(config.rollout.orchestrator.minL2Samples, 30);
+    assert.equal(config.rollout.orchestrator.leaseTtlMs, 90000);
 });
 
 test('config should accept soak policy profile from env', { concurrency: false }, () => {
