@@ -20,7 +20,11 @@ function safeParseJson(raw, fallback) {
 }
 
 // 0083_rankIndex_军衔逻辑
-function rankIndex(rank) {
+function rankIndex(rank, rankPolicies = []) {
+    if (Array.isArray(rankPolicies) && rankPolicies.length > 0) {
+        const idx = rankPolicies.findIndex((item) => item && item.rank === rank);
+        if (idx >= 0) return idx;
+    }
     return RANKS.indexOf(rank);
 }
 
@@ -211,11 +215,17 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     let nextConsecutiveSuccess = proxy.consecutive_success || 0;
     let nextConsecutiveFail = proxy.consecutive_fail || 0;
     let nextRiskySuccess = proxy.risky_success_count || 0;
+    let nextBattleSuccess = proxy.battle_success_count || 0;
+    let nextBattleFail = proxy.battle_fail_count || 0;
+    const isBattleStage = stage === 'l1' || stage === 'l2';
 
     if (outcome === 'success') {
         nextSuccess += 1;
         nextConsecutiveSuccess += 1;
         nextConsecutiveFail = 0;
+        if (isBattleStage) {
+            nextBattleSuccess += 1;
+        }
         const riskyFailRatioThreshold = Number(selected.honors?.riskyFailRatioThreshold ?? 0.65);
         if (ratios.regular.failRatio >= riskyFailRatioThreshold) {
             nextRiskySuccess += 1;
@@ -223,6 +233,9 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     } else {
         nextConsecutiveSuccess = 0;
         nextConsecutiveFail += 1;
+        if (isBattleStage) {
+            nextBattleFail += 1;
+        }
         if (outcome === 'blocked') {
             nextBlock += 1;
         } else if (outcome === 'timeout') {
@@ -271,7 +284,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     let demoted = false;
     let retiredType = proxy.retired_type || null;
 
-    const currentRankIdx = rankIndex(nextRank);
+    const currentRankIdx = rankIndex(nextRank, selected.ranks);
     if (currentRankIdx >= 0 && currentRankIdx < selected.ranks.length - 1) {
         const nextRankPolicy = selected.ranks[currentRankIdx + 1];
         if (
@@ -315,7 +328,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
             || nextHealth < Number(demotion.healthThreshold ?? 40)
         );
 
-    const currentRankForDemotion = rankIndex(nextRank);
+    const currentRankForDemotion = rankIndex(nextRank, selected.ranks);
     if (currentRankForDemotion > 0 && currentRankForDemotion < selected.ranks.length) {
         if (severeDemotion || (!inProtectWindow && regularDemotion)) {
             nextRank = selected.ranks[currentRankForDemotion - 1].rank;
@@ -386,7 +399,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
         } else if (
             nextServiceHours >= Number(retirement.honorMinServiceHours || 720)
             && nextSuccess >= Number(retirement.honorMinSuccess || 800)
-            && ['尉官', '王牌'].includes(nextRank)
+            && ['尉官', '校官', '将官', '王牌'].includes(nextRank)
             && nextHealth >= 80
         ) {
             applyReserveGuard(RETIREMENT_TYPES.HONOR);
@@ -433,6 +446,19 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
         honorHistory.push(HONOR_TYPES.THOUSAND_SERVICE);
         awards.push({ type: HONOR_TYPES.THOUSAND_SERVICE, reason: '累计服役实战达到千次' });
     }
+    if (nextBattleSuccess >= Number(selected.honors.l2Mastery || 999999) && !hasHonor(HONOR_TYPES.L2_MASTERY)) {
+        honorHistory.push(HONOR_TYPES.L2_MASTERY);
+        awards.push({ type: HONOR_TYPES.L2_MASTERY, reason: 'L2 攻坚成功次数达标' });
+    }
+    if (
+        nextDiscipline >= Number(selected.honors.disciplineGuardMinScore || 999999)
+        && nextInvalid <= Number(selected.honors.disciplineGuardMaxInvalid ?? -1)
+        && nextTotalSamples >= Number(selected.honors.disciplineGuardMinSamples || 999999)
+        && !hasHonor(HONOR_TYPES.DISCIPLINE_GUARD)
+    ) {
+        honorHistory.push(HONOR_TYPES.DISCIPLINE_GUARD);
+        awards.push({ type: HONOR_TYPES.DISCIPLINE_GUARD, reason: '纪律稳定且低误报，达到铁纪标兵标准' });
+    }
 
     for (const award of awards) {
         events.push({
@@ -461,6 +487,17 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     if (honorHistory.includes(HONOR_TYPES.THOUSAND_SERVICE)) {
         activeHonors.push(HONOR_TYPES.THOUSAND_SERVICE);
     }
+    if (honorHistory.includes(HONOR_TYPES.L2_MASTERY) && nextBattleSuccess >= Number(selected.honors.l2Mastery || 999999)) {
+        activeHonors.push(HONOR_TYPES.L2_MASTERY);
+    }
+    if (
+        honorHistory.includes(HONOR_TYPES.DISCIPLINE_GUARD)
+        && nextDiscipline >= Number(selected.honors.disciplineGuardMinScore || 999999)
+        && nextInvalid <= Number(selected.honors.disciplineGuardMaxInvalid ?? -1)
+        && nextTotalSamples >= Number(selected.honors.disciplineGuardMinSamples || 999999)
+    ) {
+        activeHonors.push(HONOR_TYPES.DISCIPLINE_GUARD);
+    }
 
     updates.service_hours = Number(nextServiceHours.toFixed(3));
     updates.rank_service_hours = updates.rank_service_hours ?? Number(nextRankServiceHours.toFixed(3));
@@ -476,6 +513,8 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     updates.consecutive_success = nextConsecutiveSuccess;
     updates.consecutive_fail = nextConsecutiveFail;
     updates.risky_success_count = nextRiskySuccess;
+    updates.battle_success_count = nextBattleSuccess;
+    updates.battle_fail_count = nextBattleFail;
     updates.lifecycle = nextLifecycle;
     updates.rank = nextRank;
     updates.retired_type = retiredType;

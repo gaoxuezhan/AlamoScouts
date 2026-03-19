@@ -395,6 +395,29 @@ test('honor retirement should trigger when contribution is high', () => {
     assert.equal(result.updates.retired_type, '荣誉退伍');
 });
 
+test('honor retirement should also allow school-rank officers', () => {
+    const cfg = baseConfig();
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'active',
+        rank: '校官',
+        service_hours: 760,
+        success_count: 830,
+        health_score: 90,
+        total_samples: 860,
+    };
+
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'success',
+        latencyMs: 900,
+        nowIso: new Date().toISOString(),
+        config: cfg,
+    });
+
+    assert.equal(result.updates.retired_type, '荣誉退伍');
+});
+
 test('steel streak honor should be awarded', () => {
     const cfg = baseConfig();
     const proxy = {
@@ -451,6 +474,45 @@ test('risky warrior and thousand service honors should be awarded and active', (
     assert.equal(awardTypes.includes('逆风勇士'), true);
     assert.equal(awardTypes.includes('千次服役'), true);
     assert.equal(JSON.parse(result.updates.honor_active_json).includes('逆风勇士'), true);
+});
+
+test('l2 mastery and discipline guard honors should be awarded and active', () => {
+    const cfg = baseConfig();
+    cfg.policy.honors.l2Mastery = 2;
+    cfg.policy.honors.disciplineGuardMinScore = 95;
+    cfg.policy.honors.disciplineGuardMaxInvalid = 0;
+    cfg.policy.honors.disciplineGuardMinSamples = 6;
+
+    const now = new Date().toISOString();
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'active',
+        rank: '校官',
+        total_samples: 5,
+        success_count: 5,
+        discipline_score: 100,
+        invalid_feedback_count: 0,
+        battle_success_count: 1,
+        battle_fail_count: 0,
+        honor_history_json: JSON.stringify([]),
+    };
+
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'success',
+        latencyMs: 1100,
+        nowIso: now,
+        stage: 'l2',
+        config: cfg,
+    });
+
+    const awardTypes = result.awards.map((a) => a.type);
+    const activeHonors = JSON.parse(result.updates.honor_active_json);
+    assert.equal(result.updates.battle_success_count, 2);
+    assert.equal(awardTypes.includes('攻坚大师'), true);
+    assert.equal(awardTypes.includes('铁纪标兵'), true);
+    assert.equal(activeHonors.includes('攻坚大师'), true);
+    assert.equal(activeHonors.includes('铁纪标兵'), true);
 });
 
 test('combat events should include v1.1 details version', () => {
