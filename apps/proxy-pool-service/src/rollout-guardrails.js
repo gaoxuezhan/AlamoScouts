@@ -117,13 +117,13 @@ function evaluateRolloutGuardrails({ db, config, nowIso = new Date().toISOString
 
     const activeNow = Number(db.getActiveCount?.() || 0);
     const l2 = db.getBattleSuccessRateSince?.('l2', sinceIso) || { total: 0, success: 0, successRate: 0 };
-    const activeRollingMedian = Number(db.getLifecycleSnapshotMedian?.('active', 7, nowIso) || 0);
+    const activeRollingMedian = db.getLifecycleSnapshotMedian?.('active', 7, nowIso);
     const l2Daily = db.getBattleDailySuccessRates?.('l2', 7, nowIso) || [];
     const l2RollingMedian = median(l2Daily.map((item) => Number(item.successRate) || 0));
-    const baselineActiveCount = activeRollingMedian > 0
-        ? activeRollingMedian
+    const baselineActiveCount = Number.isFinite(activeRollingMedian)
+        ? Number(activeRollingMedian)
         : Number(guardrails.baseline.activeCount || 0);
-    const baselineL2SuccessRate = l2RollingMedian > 0
+    const baselineL2SuccessRate = l2Daily.length > 0
         ? l2RollingMedian
         : Number(guardrails.baseline.l2SuccessRate || 0);
     const retired24h = Number(db.getRetirementsCountSince?.(sinceIso) || 0);
@@ -197,7 +197,7 @@ function evaluateRolloutGuardrails({ db, config, nowIso = new Date().toISOString
             retireMedian7d,
             retirementDaily: retirementDailySeries,
             rollingBaselines: {
-                activeMedian7d: activeRollingMedian,
+                activeMedian7d: Number.isFinite(activeRollingMedian) ? Number(activeRollingMedian) : 0,
                 l2SuccessMedian7d: l2RollingMedian,
             },
         },

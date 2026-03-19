@@ -125,6 +125,36 @@ test('guardrail evaluation should prefer rolling median baseline when available'
     assert.equal(report.thresholds.baselineL2SuccessRate, 0.7);
 });
 
+test('guardrail evaluation should keep rolling baseline even when median is zero', () => {
+    const report = evaluateRolloutGuardrails({
+        db: {
+            getActiveCount: () => 5,
+            getLifecycleSnapshotMedian: () => 0,
+            getBattleSuccessRateSince: () => ({ total: 10, success: 0, successRate: 0 }),
+            getBattleDailySuccessRates: () => [
+                { day: '2026-03-10', total: 10, success: 0, successRate: 0 },
+                { day: '2026-03-11', total: 10, success: 0, successRate: 0 },
+            ],
+            getRetirementsCountSince: () => 0,
+            getRetirementDailyCounts: () => [],
+        },
+        config: {
+            rollout: {
+                guardrails: {
+                    baseline: {
+                        activeCount: 200,
+                        l2SuccessRate: 0.95,
+                    },
+                },
+            },
+        },
+        nowIso: '2026-03-16T12:00:00.000Z',
+    });
+
+    assert.equal(report.thresholds.baselineActiveCount, 0);
+    assert.equal(report.thresholds.baselineL2SuccessRate, 0);
+});
+
 test('computeRecommendedRollbackFeatures should map breach codes', () => {
     const features = computeRecommendedRollbackFeatures([
         { code: 'active_drop' },

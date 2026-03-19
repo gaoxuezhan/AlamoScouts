@@ -146,6 +146,13 @@ test('config should keep production profile when profile env is explicitly produ
     assert.equal(config.rollout.activeProfile, 'production');
 });
 
+test('config should fallback to production profile when env profile is unsupported', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'staging',
+    });
+    assert.equal(config.rollout.activeProfile, 'production');
+});
+
 test('config should keep candidateQuota compatibility when lifecycle quota is not explicitly set', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_BATTLE_CANDIDATE_QUOTA: '0.33',

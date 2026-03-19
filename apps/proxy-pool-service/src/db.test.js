@@ -1042,6 +1042,49 @@ test('battle daily success and snapshot median APIs should work', () => {
     const activeMedian = h.db.getLifecycleSnapshotMedian('active', 7, now);
     assert.equal(activeMedian, 40);
 
+    h.db.insertPoolSnapshot({
+        timestamp: '2026-03-16T11:00:00.000Z',
+        workers_total: 2,
+        workers_busy: 0,
+        queue_size: 0,
+        completed_tasks: 1,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        lifecycle_distribution: [{ lifecycle: 'active', count: 70 }],
+    });
+    const activeMedianOdd = h.db.getLifecycleSnapshotMedian('active', 7, now);
+    assert.equal(activeMedianOdd, 50);
+
+    cleanup(h);
+});
+
+test('battle daily and snapshot median helpers should cover fallback branches', () => {
+    const h = createDb();
+
+    const originalPrepare = h.db.db.prepare.bind(h.db.db);
+    h.db.db.prepare = (sql) => {
+        if (String(sql).includes('substr(timestamp, 1, 10) AS day')) {
+            return {
+                all() {
+                    return [{ day: '2026-03-16', total: 0, success: null }];
+                },
+            };
+        }
+        return originalPrepare(sql);
+    };
+
+    try {
+        const daily = h.db.getBattleDailySuccessRates(undefined, 'bad', '2026-03-16T12:00:00.000Z');
+        assert.equal(daily.length, 1);
+        assert.equal(daily[0].total, 0);
+        assert.equal(daily[0].success, 0);
+        assert.equal(daily[0].successRate, 0);
+    } finally {
+        h.db.db.prepare = originalPrepare;
+    }
+
+    assert.equal(h.db.getLifecycleSnapshotMedian(undefined, 'bad', '2026-03-16T12:00:00.000Z'), null);
+    assert.equal(h.db.getLifecycleCount(), 0);
     cleanup(h);
 });
 
@@ -1076,14 +1119,52 @@ test('candidate sweeper query should return stale candidate reasons', () => {
 
     const sweepList = h.db.listCandidatesForSweep({
         nowIso,
-        staleHours: 24,
-        staleMinSamples: 3,
-        timeoutHours: 72,
-        limit: 10,
+        staleHours: 'bad',
+        staleMinSamples: 'bad',
+        timeoutHours: 'bad',
+        limit: 'bad',
     });
     assert.equal(sweepList.length, 2);
     assert.equal(sweepList.some((item) => item.sweep_reason === 'stale_candidate'), true);
     assert.equal(sweepList.some((item) => item.sweep_reason === 'stale_timeout'), true);
+
+    cleanup(h);
+});
+
+test('candidate sweeper should handle invalid created_at age fallback', () => {
+    const h = createDb();
+    const originalPrepare = h.db.db.prepare.bind(h.db.db);
+    h.db.db.prepare = (sql) => {
+        if (String(sql).includes("WHERE lifecycle = 'candidate'")) {
+            return {
+                all() {
+                    return [{
+                        id: 1,
+                        display_name: '清库存-异常时间',
+                        lifecycle: 'candidate',
+                        created_at: 'invalid-date',
+                        total_samples: 0,
+                    }];
+                },
+            };
+        }
+        return originalPrepare(sql);
+    };
+
+    try {
+        const rows = h.db.listCandidatesForSweep({
+            nowIso: '2026-03-16T12:00:00.000Z',
+            staleHours: 24,
+            staleMinSamples: 3,
+            timeoutHours: 72,
+            limit: 10,
+        });
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].sweep_reason, 'stale_candidate');
+        assert.equal(rows[0].sweep_age_hours, null);
+    } finally {
+        h.db.db.prepare = originalPrepare;
+    }
 
     cleanup(h);
 });

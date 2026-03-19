@@ -516,6 +516,66 @@ test('runCandidateSweepCycle should retire stale candidates with audit events', 
     cleanupDb(h);
 });
 
+test('runCandidateSweepCycle should return early when not started or already running', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger });
+
+    await engine.runCandidateSweepCycle();
+    engine.started = true;
+    engine.isCandidateSweepRunning = true;
+    await engine.runCandidateSweepCycle();
+    assert.equal(logger.entries.length, 0);
+    cleanupDb(h);
+});
+
+test('runCandidateSweepCycle should log error and fallback reason when sweep fails', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-sweeper-err.db'));
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    let mode = 'msg';
+    const db = {
+        listCandidatesForSweep() {
+            if (mode === 'msg') throw new Error('sweep-boom');
+            throw null;
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger, now: () => new Date('2026-03-16T12:00:00.000Z') });
+    engine.started = true;
+    await engine.runCandidateSweepCycle();
+    mode = 'null';
+    await engine.runCandidateSweepCycle();
+
+    assert.equal(logger.entries.some((entry) => entry.stage === 'candidate-sweeper' && entry.reason === 'sweep-boom'), true);
+    assert.equal(logger.entries.some((entry) => entry.stage === 'candidate-sweeper' && entry.reason === 'candidate-sweeper-error'), true);
+});
+
 test('engine start should schedule battle timers when enabled', async () => {
     const h = createDbHandle();
     const logger = createLogger();

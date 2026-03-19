@@ -340,6 +340,22 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     });
     assert.equal(candidateControlInvalid.status, 400);
 
+    const candidateControlInvalidPayload = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify([]),
+    });
+    assert.equal(candidateControlInvalidPayload.status, 400);
+
+    const candidateControlInvalidMax = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            max: -1,
+        }),
+    });
+    assert.equal(candidateControlInvalidMax.status, 400);
+
     const sseLogs = await fetch(baseUrl + '/api/runtime/logs/stream', {
         headers: { Accept: 'text/event-stream' },
         signal: AbortSignal.timeout(5000),
@@ -387,6 +403,31 @@ test('rollout rollback endpoint should skip apply when guardrails are healthy', 
     assert.equal(rollbackPayload.guardrails.shouldRollback, false);
 
     await runtime.shutdown('TEST-ROLLBACK-SKIP');
+});
+
+test('candidate control endpoint should initialize control object when missing', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    delete config.candidateControl;
+    const runtime = createRuntime({ config, ...stubs });
+    const server = await runtime.start();
+    const addr = server.address();
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                gateOverride: true,
+            }),
+        });
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.candidateControl.gateOverride, true);
+    } finally {
+        await runtime.shutdown('TEST-CANDIDATE-CONTROL-MISSING');
+    }
 });
 
 test('shutdown should wait for in-flight engine start before closing db', async () => {

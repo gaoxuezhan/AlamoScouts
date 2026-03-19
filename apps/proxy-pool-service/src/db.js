@@ -965,7 +965,7 @@ class ProxyHubDb {
             .filter((num) => Number.isFinite(num))
             .sort((a, b) => a - b);
 
-        if (values.length === 0) return 0;
+        if (values.length === 0) return null;
         const mid = Math.floor(values.length / 2);
         if (values.length % 2 === 1) return values[mid];
         return (values[mid - 1] + values[mid]) / 2;
@@ -1008,7 +1008,7 @@ class ProxyHubDb {
             const createdAtMs = Date.parse(row.created_at);
             const ageHours = Number.isFinite(createdAtMs)
                 ? (Date.parse(nowIso) - createdAtMs) / 3_600_000
-                : 0;
+                : Number.NaN;
             const isTimeout = Number.isFinite(ageHours) && ageHours >= safeTimeoutHours;
             return {
                 ...row,

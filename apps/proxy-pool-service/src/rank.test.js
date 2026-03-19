@@ -289,6 +289,35 @@ test('invalid feedback should lower discipline and retire by discipline', () => 
     assert.equal(result.updates.retired_type, '纪律退伍');
 });
 
+test('combat should prefer active to reserve when retired_spike guard is enabled', () => {
+    const cfg = baseConfig();
+    cfg.rollout = {
+        runtime: {
+            preferReserveBeforeRetire: true,
+        },
+    };
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'active',
+        health_score: 90,
+        discipline_score: 35,
+        invalid_feedback_count: 1,
+        total_samples: 5,
+    };
+
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'invalid_payload',
+        latencyMs: 0,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.updates.lifecycle, 'reserve');
+    assert.equal(result.updates.retired_type, null);
+    assert.equal(result.events.some((item) => item.event_type === 'state_transition' && item.details.trigger === 'retired_spike_guard'), true);
+});
+
 test('battle damage retirement should trigger', () => {
     const cfg = baseConfig();
     const now = new Date().toISOString();
@@ -528,6 +557,30 @@ test('state transition should retire by discipline', () => {
 
     assert.equal(result.updates.lifecycle, 'retired');
     assert.equal(result.change, 'retire_discipline');
+});
+
+test('state transition should prefer active to reserve guard when retired_spike guard is enabled', () => {
+    const cfg = baseConfig();
+    cfg.rollout = {
+        runtime: {
+            preferReserveBeforeRetire: true,
+        },
+    };
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'active',
+        discipline_score: 10,
+    };
+
+    const result = evaluateStateTransition({
+        proxy,
+        nowIso: '2026-03-16T12:00:00.000Z',
+        config: cfg,
+    });
+
+    assert.equal(result.updates.lifecycle, 'reserve');
+    assert.equal(result.change, 'active_to_reserve_guard');
+    assert.equal(result.eventDetails.trigger, 'retired_spike_guard');
 });
 
 test('evaluateCombat should handle unknown rank/lifecycle and null scores', () => {
