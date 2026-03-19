@@ -13,6 +13,19 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_ROLLOUT_COOLDOWN_HOURS',
         'PROXY_HUB_ROLLOUT_MIN_L2_SAMPLES',
         'PROXY_HUB_ROLLOUT_LEASE_TTL_MS',
+        'PROXY_HUB_CANDIDATE_MAX',
+        'PROXY_HUB_CANDIDATE_GATE_OVERRIDE',
+        'PROXY_HUB_CANDIDATE_SWEEP_MS',
+        'PROXY_HUB_CANDIDATE_STALE_HOURS',
+        'PROXY_HUB_CANDIDATE_STALE_MIN_SAMPLES',
+        'PROXY_HUB_CANDIDATE_TIMEOUT_HOURS',
+        'PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE',
+        'PROXY_HUB_FAILURE_BACKOFF_ENABLED',
+        'PROXY_HUB_FAILURE_BACKOFF_L0_MS',
+        'PROXY_HUB_FAILURE_BACKOFF_L1_MS',
+        'PROXY_HUB_FAILURE_BACKOFF_L2_MS',
+        'PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER',
+        'PROXY_HUB_FAILURE_BACKOFF_MAX_MS',
         ...Object.keys(overrides),
     ]);
     const originals = {};
@@ -54,7 +67,9 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.battle.l2SyncMs, 1800000);
     assert.equal(config.battle.maxBattleL1PerCycle, 60);
     assert.equal(config.battle.maxBattleL2PerCycle, 20);
-    assert.equal(config.battle.candidateQuota, 0.15);
+    assert.equal(config.battle.candidateQuota, 0.30);
+    assert.equal(config.failureBackoff.enabled, true);
+    assert.equal(config.failureBackoff.maxMs, 21600000);
     assert.equal(Array.isArray(config.battle.targets.l1), true);
     assert.equal(config.battle.targets.l2Primary[0].name, 'ly-flight-main');
     assert.equal(config.battle.targets.l2Primary[0].url, 'https://www.ly.com/flights/home');
@@ -105,17 +120,60 @@ test('config should parse rollout orchestrator env values', { concurrency: false
     assert.equal(config.rollout.orchestrator.leaseTtlMs, 90000);
 });
 
+test('config should parse candidate control env values', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_CANDIDATE_MAX: '4321',
+        PROXY_HUB_CANDIDATE_GATE_OVERRIDE: 'true',
+        PROXY_HUB_CANDIDATE_SWEEP_MS: '600000',
+        PROXY_HUB_CANDIDATE_STALE_HOURS: '18',
+        PROXY_HUB_CANDIDATE_STALE_MIN_SAMPLES: '2',
+        PROXY_HUB_CANDIDATE_TIMEOUT_HOURS: '60',
+        PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE: '333',
+    });
+    assert.equal(config.candidateControl.max, 4321);
+    assert.equal(config.candidateControl.gateOverride, true);
+    assert.equal(config.candidateControl.sweepMs, 600000);
+    assert.equal(config.candidateControl.staleHours, 18);
+    assert.equal(config.candidateControl.staleMinSamples, 2);
+    assert.equal(config.candidateControl.timeoutHours, 60);
+    assert.equal(config.candidateControl.maxRetirePerCycle, 333);
+});
+
+test('config should parse failure backoff env values', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_FAILURE_BACKOFF_ENABLED: 'false',
+        PROXY_HUB_FAILURE_BACKOFF_L0_MS: '111000',
+        PROXY_HUB_FAILURE_BACKOFF_L1_MS: '222000',
+        PROXY_HUB_FAILURE_BACKOFF_L2_MS: '333000',
+        PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER: '2.5',
+        PROXY_HUB_FAILURE_BACKOFF_MAX_MS: '444000',
+    });
+    assert.equal(config.failureBackoff.enabled, false);
+    assert.equal(config.failureBackoff.l0BaseMs, 111000);
+    assert.equal(config.failureBackoff.l1BaseMs, 222000);
+    assert.equal(config.failureBackoff.l2BaseMs, 333000);
+    assert.equal(config.failureBackoff.multiplier, 2.5);
+    assert.equal(config.failureBackoff.maxMs, 444000);
+});
+
 test('config should accept soak policy profile from env', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_POLICY_PROFILE: 'SOAK',
     });
     assert.equal(config.rollout.activeProfile, 'soak');
-    assert.equal(config.battle.l1LifecycleQuota.candidate, 0.20);
+    assert.equal(config.battle.l1LifecycleQuota.candidate, 0.30);
 });
 
 test('config should keep production profile when profile env is explicitly production', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_POLICY_PROFILE: 'production',
+    });
+    assert.equal(config.rollout.activeProfile, 'production');
+});
+
+test('config should fallback to production profile when env profile is unsupported', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'staging',
     });
     assert.equal(config.rollout.activeProfile, 'production');
 });
@@ -140,19 +198,19 @@ test('config should fallback lifecycle quota when env json is invalid', { concur
     const config = loadConfigWithEnv({
         PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA: '{bad-json',
     });
-    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.55, reserve: 0.30, candidate: 0.15 });
+    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.50, reserve: 0.20, candidate: 0.30 });
 });
 
 test('config should fallback lifecycle quota when env json shape is invalid', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA: '[]',
     });
-    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.55, reserve: 0.30, candidate: 0.15 });
+    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.50, reserve: 0.20, candidate: 0.30 });
 });
 
 test('config should fallback lifecycle quota when env json values are non-finite', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_BATTLE_L1_LIFECYCLE_QUOTA: '{"active":"x","reserve":0.3,"candidate":0.2}',
     });
-    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.55, reserve: 0.30, candidate: 0.15 });
+    assert.deepEqual(config.battle.l1LifecycleQuota, { active: 0.50, reserve: 0.20, candidate: 0.30 });
 });

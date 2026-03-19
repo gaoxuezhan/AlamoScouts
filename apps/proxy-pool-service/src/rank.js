@@ -162,6 +162,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     const retirement = policy.retirement || {};
     const lifecyclePolicy = policy.lifecycle || {};
     const features = getFeatureFlags(config);
+    const preferReserveBeforeRetire = config?.rollout?.runtime?.preferReserveBeforeRetire === true;
     const selected = selectThresholds(policy, features);
 
     const updates = {};
@@ -343,37 +344,52 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
         ? retirement.technicalEligibleLifecycles
         : ['active', 'reserve'];
     const overallSuccessRatio = nextTotalSamples > 0 ? nextSuccess / nextTotalSamples : 0;
+    const applyReserveGuard = (retireType) => {
+        if (preferReserveBeforeRetire && nextLifecycle === 'active') {
+            nextLifecycle = 'reserve';
+            retiredType = null;
+            lifecycleChanged = true;
+            events.push({
+                event_type: 'state_transition',
+                message: `状态迁移：${proxy.display_name} active -> reserve（retired_spike_guard）`,
+                details: buildEventDetails('retired_spike_guard', {
+                    from: 'active',
+                    to: 'reserve',
+                    intendedRetireType: retireType,
+                }, {
+                    guard: 'prefer_reserve_before_retire',
+                }),
+            });
+            return false;
+        }
+        nextLifecycle = 'retired';
+        retiredType = retireType;
+        lifecycleChanged = true;
+        return true;
+    };
 
     if (nextLifecycle !== 'retired') {
         if (nextDiscipline < Number(retirement.disciplineThreshold || 40) || nextInvalid >= Number(retirement.disciplineInvalidCount || 5)) {
-            nextLifecycle = 'retired';
-            retiredType = RETIREMENT_TYPES.DISCIPLINE;
-            lifecycleChanged = true;
+            applyReserveGuard(RETIREMENT_TYPES.DISCIPLINE);
         } else if (
             ratios.regular.samples >= Number(retirement.battleDamageMinSamples || 20)
             && nextHealth < Number(demotion.lowHealthRetireThreshold ?? 20)
             && ratios.regular.failRatio >= Number(retirement.battleDamageFailRatio ?? retirement.battleDamageBlockedRatio ?? 0.85)
         ) {
-            nextLifecycle = 'retired';
-            retiredType = RETIREMENT_TYPES.BATTLE_DAMAGE;
-            lifecycleChanged = true;
+            applyReserveGuard(RETIREMENT_TYPES.BATTLE_DAMAGE);
         } else if (
             technicalEligible.includes(proxy.lifecycle || 'candidate')
             && nextTotalSamples >= Number(retirement.technicalMinSamples || 80)
             && overallSuccessRatio < Number(retirement.technicalSuccessRatio || 0.08)
         ) {
-            nextLifecycle = 'retired';
-            retiredType = RETIREMENT_TYPES.TECHNICAL;
-            lifecycleChanged = true;
+            applyReserveGuard(RETIREMENT_TYPES.TECHNICAL);
         } else if (
             nextServiceHours >= Number(retirement.honorMinServiceHours || 720)
             && nextSuccess >= Number(retirement.honorMinSuccess || 800)
             && ['尉官', '王牌'].includes(nextRank)
             && nextHealth >= 80
         ) {
-            nextLifecycle = 'retired';
-            retiredType = RETIREMENT_TYPES.HONOR;
-            lifecycleChanged = true;
+            applyReserveGuard(RETIREMENT_TYPES.HONOR);
         }
     }
 
@@ -494,6 +510,7 @@ function evaluateStateTransition({ proxy, nowIso, config }) {
     const retirement = policy.retirement || {};
     const lifecyclePolicy = policy.lifecycle || {};
     const features = getFeatureFlags(config);
+    const preferReserveBeforeRetire = config?.rollout?.runtime?.preferReserveBeforeRetire === true;
 
     const windowRecords = safeParseJson(proxy.recent_window_json, []);
     const ratios = computeWindowStats(windowRecords, nowMs, {
@@ -557,10 +574,17 @@ function evaluateStateTransition({ proxy, nowIso, config }) {
     if (lifecycle !== 'retired') {
         if ((proxy.discipline_score || 0) < Number(retirement.disciplineThreshold || 40)
             || (proxy.invalid_feedback_count || 0) >= Number(retirement.disciplineInvalidCount || 5)) {
-            lifecycle = 'retired';
-            retiredType = RETIREMENT_TYPES.DISCIPLINE;
-            change = 'retire_discipline';
-            trigger = 'discipline_threshold';
+            if (preferReserveBeforeRetire && lifecycle === 'active') {
+                lifecycle = 'reserve';
+                retiredType = null;
+                change = 'active_to_reserve_guard';
+                trigger = 'retired_spike_guard';
+            } else {
+                lifecycle = 'retired';
+                retiredType = RETIREMENT_TYPES.DISCIPLINE;
+                change = 'retire_discipline';
+                trigger = 'discipline_threshold';
+            }
         }
     }
 

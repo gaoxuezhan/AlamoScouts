@@ -150,6 +150,12 @@ class RolloutOrchestrator {
                 config: this.config,
                 nowIso,
             });
+            const retiredSpikeObserved = Array.isArray(guardrails?.breaches)
+                && guardrails.breaches.some((item) => item.code === 'retired_spike');
+            if (!rollout.runtime || typeof rollout.runtime !== 'object') {
+                rollout.runtime = {};
+            }
+            rollout.runtime.preferReserveBeforeRetire = retiredSpikeObserved;
 
             let modeAfter = modeBefore;
             let stableSince = state.stable_since || nowIso;
@@ -157,18 +163,13 @@ class RolloutOrchestrator {
             let action = 'steady';
             let patch = {};
 
-            if (guardrails.shouldRollback) {
-                for (const key of guardrails.recommendedRollbackFeatures) {
-                    patch[key] = false;
-                }
-                patch.honorPromotionTuning = false;
-                modeAfter = 'COOLDOWN';
-                stableSince = null;
-                cooldownUntil = new Date(Date.parse(nowIso) + orchestrator.cooldownHours * 3_600_000).toISOString();
-                action = 'rollback';
-            } else if (modeBefore === 'COOLDOWN') {
+            if (modeBefore === 'COOLDOWN') {
                 const cooldownMs = Date.parse(cooldownUntil || '');
-                if (!Number.isFinite(cooldownMs) || cooldownMs <= Date.parse(nowIso)) {
+                if (guardrails.shouldRollback) {
+                    modeAfter = 'COOLDOWN';
+                    stableSince = null;
+                    action = 'cooldown_hold';
+                } else if (!Number.isFinite(cooldownMs) || cooldownMs <= Date.parse(nowIso)) {
                     patch = resolveFeaturePatch(rollout.features, SAFE_FEATURES);
                     modeAfter = 'SAFE';
                     stableSince = nowIso;
@@ -177,6 +178,15 @@ class RolloutOrchestrator {
                 } else {
                     action = 'cooldown_hold';
                 }
+            } else if (guardrails.shouldRollback) {
+                for (const key of guardrails.recommendedRollbackFeatures) {
+                    patch[key] = false;
+                }
+                patch.honorPromotionTuning = false;
+                modeAfter = 'COOLDOWN';
+                stableSince = null;
+                cooldownUntil = new Date(Date.parse(nowIso) + orchestrator.cooldownHours * 3_600_000).toISOString();
+                action = 'rollback';
             } else if (modeBefore === 'FULL') {
                 patch = resolveFeaturePatch(rollout.features, FULL_FEATURES);
                 modeAfter = 'FULL';
@@ -224,6 +234,8 @@ class RolloutOrchestrator {
                     guardrails: {
                         shouldRollback: guardrails.shouldRollback,
                         breaches: guardrails.breaches,
+                        breachObserved: guardrails.shouldRollback,
+                        retiredSpikeObserved,
                     },
                     features: {
                         before: currentFeatures,

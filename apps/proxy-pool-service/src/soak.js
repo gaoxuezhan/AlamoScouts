@@ -159,6 +159,15 @@ function createSoakRuntime(options = {}) {
             .sort((a, b) => a.atMinute - b.atMinute);
     }
 
+    // 0136_stripUtf8Bom_清理UTF8 BOM逻辑
+    function stripUtf8Bom(raw) {
+        const text = String(raw || '');
+        if (text.charCodeAt(0) === 0xFEFF) {
+            return text.slice(1);
+        }
+        return text;
+    }
+
     // 0134_loadPolicyActions_加载策略动作逻辑
     function loadPolicyActions() {
         let actions = [];
@@ -166,7 +175,7 @@ function createSoakRuntime(options = {}) {
         if (policyActionsFile) {
             try {
                 const raw = fsImpl.readFileSync(policyActionsFile, 'utf8');
-                actions = normalizePolicyActions(JSON.parse(raw));
+                actions = normalizePolicyActions(JSON.parse(stripUtf8Bom(raw)));
                 appendTimeline('policy_actions_loaded', {
                     source: policyActionsFile,
                     count: actions.length,
@@ -432,6 +441,7 @@ function createSoakRuntime(options = {}) {
         httpGetJson,
         httpPostJson,
         normalizePolicyActions,
+        stripUtf8Bom,
         loadPolicyActions,
         applyPendingPolicyActions,
         ensureService,

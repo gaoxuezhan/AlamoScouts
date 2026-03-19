@@ -117,6 +117,15 @@ function evaluateRolloutGuardrails({ db, config, nowIso = new Date().toISOString
 
     const activeNow = Number(db.getActiveCount?.() || 0);
     const l2 = db.getBattleSuccessRateSince?.('l2', sinceIso) || { total: 0, success: 0, successRate: 0 };
+    const activeRollingMedian = db.getLifecycleSnapshotMedian?.('active', 7, nowIso);
+    const l2Daily = db.getBattleDailySuccessRates?.('l2', 7, nowIso) || [];
+    const l2RollingMedian = median(l2Daily.map((item) => Number(item.successRate) || 0));
+    const baselineActiveCount = Number.isFinite(activeRollingMedian)
+        ? Number(activeRollingMedian)
+        : Number(guardrails.baseline.activeCount || 0);
+    const baselineL2SuccessRate = l2Daily.length > 0
+        ? l2RollingMedian
+        : Number(guardrails.baseline.l2SuccessRate || 0);
     const retired24h = Number(db.getRetirementsCountSince?.(sinceIso) || 0);
     const retirementDaily = db.getRetirementDailyCounts?.(7, nowIso) || [];
     const retirementDailyMap = new Map(retirementDaily.map((item) => [item.day, Number(item.count) || 0]));
@@ -132,8 +141,8 @@ function evaluateRolloutGuardrails({ db, config, nowIso = new Date().toISOString
     const retiredThreshold = Math.max(retireMedian7d * guardrails.retiredDailyMultiplier, guardrails.retiredDailyMinAbs);
 
     const breaches = [];
-    if (guardrails.baseline.activeCount > 0) {
-        const activeFloor = guardrails.baseline.activeCount * (1 - guardrails.activeDropThreshold);
+    if (baselineActiveCount > 0) {
+        const activeFloor = baselineActiveCount * (1 - guardrails.activeDropThreshold);
         if (activeNow < activeFloor) {
             breaches.push({
                 code: 'active_drop',
@@ -144,8 +153,8 @@ function evaluateRolloutGuardrails({ db, config, nowIso = new Date().toISOString
         }
     }
 
-    if (guardrails.baseline.l2SuccessRate > 0 && l2.total > 0) {
-        const l2Floor = guardrails.baseline.l2SuccessRate - guardrails.l2DropPpThreshold;
+    if (baselineL2SuccessRate > 0 && l2.total > 0) {
+        const l2Floor = baselineL2SuccessRate - guardrails.l2DropPpThreshold;
         if (l2.successRate < l2Floor) {
             breaches.push({
                 code: 'l2_drop',
@@ -177,15 +186,20 @@ function evaluateRolloutGuardrails({ db, config, nowIso = new Date().toISOString
             retiredDailyMultiplier: guardrails.retiredDailyMultiplier,
             retiredDailyMinAbs: guardrails.retiredDailyMinAbs,
             retiredThreshold,
-            baselineActiveCount: guardrails.baseline.activeCount,
-            baselineL2SuccessRate: guardrails.baseline.l2SuccessRate,
+            baselineActiveCount,
+            baselineL2SuccessRate,
         },
         metrics: {
             activeNow,
             l2,
+            l2Daily,
             retired24h,
             retireMedian7d,
             retirementDaily: retirementDailySeries,
+            rollingBaselines: {
+                activeMedian7d: Number.isFinite(activeRollingMedian) ? Number(activeRollingMedian) : 0,
+                l2SuccessMedian7d: l2RollingMedian,
+            },
         },
         breaches,
         shouldRollback: breaches.length > 0,

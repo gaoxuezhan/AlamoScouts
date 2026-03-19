@@ -247,6 +247,46 @@ test('normalize/load policy actions should cover file and invalid branches', asy
     });
 });
 
+test('loadPolicyActions should support UTF-8 BOM json', async () => {
+    await withTempCwd(async (cwd) => {
+        const actionsFile = path.join(cwd, 'actions-bom.json');
+        fs.writeFileSync(actionsFile, `\uFEFF${JSON.stringify([
+            { atMinute: 0, note: 'bom', patch: { promotionProtectHours: 5 } },
+        ])}`, 'utf8');
+
+        const oldPath = process.env.SOAK_POLICY_ACTIONS_FILE;
+        process.env.SOAK_POLICY_ACTIONS_FILE = actionsFile;
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async () => ({ ok: true, status: 200, async json() { return {}; } }),
+        });
+
+        assert.equal(runtime.stripUtf8Bom('\uFEFFabc'), 'abc');
+        assert.equal(runtime.stripUtf8Bom(), '');
+        const loaded = runtime.loadPolicyActions();
+        assert.equal(loaded.length, 1);
+        assert.equal(loaded[0].note, 'bom');
+        process.env.SOAK_POLICY_ACTIONS_FILE = oldPath;
+    });
+});
+
+test('loadPolicyActions should fallback to empty policy object when config.policy is missing', async () => {
+    await withTempCwd(async () => {
+        const oldPath = process.env.SOAK_POLICY_ACTIONS_FILE;
+        process.env.SOAK_POLICY_ACTIONS_FILE = '';
+        const runtime = createSoakRuntime({
+            config: {
+                service: { port: 5070 },
+                soak: { durationHours: 10, summaryIntervalMs: 3600000 },
+            },
+            fetchImpl: async () => ({ ok: true, status: 200, async json() { return {}; } }),
+        });
+        const loaded = runtime.loadPolicyActions();
+        assert.equal(loaded.length, 5);
+        process.env.SOAK_POLICY_ACTIONS_FILE = oldPath;
+    });
+});
+
 test('loadPolicyActions should return default 10h action plan without env file', async () => {
     await withTempCwd(async () => {
         const oldPath = process.env.SOAK_POLICY_ACTIONS_FILE;
@@ -445,6 +485,55 @@ test('runSoak should record value-board fetch failure branch', async () => {
         await runtime.runSoak();
         const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
         assert.equal(timeline.includes('value_board_fetch_failed'), true);
+
+        Date.now = oldNow;
+        process.env.SOAK_HOURS = oldEnv.SOAK_HOURS;
+        process.env.SOAK_POLL_MS = oldEnv.SOAK_POLL_MS;
+        process.env.SOAK_SUMMARY_MS = oldEnv.SOAK_SUMMARY_MS;
+        process.env.SOAK_POLICY_ACTIONS_FILE = oldEnv.SOAK_POLICY_ACTIONS_FILE;
+    });
+});
+
+test('runSoak should fallback value-board failure reason when thrown value has no message', async () => {
+    await withTempCwd(async () => {
+        const child = makeChild();
+        const oldEnv = {
+            SOAK_HOURS: process.env.SOAK_HOURS,
+            SOAK_POLL_MS: process.env.SOAK_POLL_MS,
+            SOAK_SUMMARY_MS: process.env.SOAK_SUMMARY_MS,
+            SOAK_POLICY_ACTIONS_FILE: process.env.SOAK_POLICY_ACTIONS_FILE,
+        };
+        const oldNow = Date.now;
+        let nowMs = 1700000000000;
+        process.env.SOAK_HOURS = '0.0002';
+        process.env.SOAK_POLL_MS = '1';
+        process.env.SOAK_SUMMARY_MS = '1';
+        process.env.SOAK_POLICY_ACTIONS_FILE = '';
+        Date.now = () => {
+            nowMs += 100;
+            return nowMs;
+        };
+
+        let healthChecks = 0;
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async (url) => {
+                if (url.endsWith('/health')) {
+                    healthChecks += 1;
+                    if (healthChecks === 1) throw new Error('down');
+                    return { ok: true, status: 200, async json() { return { ok: true }; } };
+                }
+                if (url.includes('/v1/proxies/value-board')) {
+                    throw {};
+                }
+                return { ok: true, status: 200, async json() { return { poolStatus: { queueSize: 0, workersBusy: 0, workersTotal: 1, failedTasks: 0, restartedWorkers: 0, completedTasks: 0 } }; } };
+            },
+            spawnImpl: () => child,
+        });
+
+        await runtime.runSoak();
+        const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
+        assert.equal(timeline.includes('value-board-fetch-failed'), true);
 
         Date.now = oldNow;
         process.env.SOAK_HOURS = oldEnv.SOAK_HOURS;

@@ -31,6 +31,15 @@ function createConfig(port = 0) {
             },
         },
         source: { monosans: { name: 'monosans', url: 'https://x', enabled: true } },
+        candidateControl: {
+            max: 3000,
+            gateOverride: false,
+            sweepMs: 900000,
+            staleHours: 24,
+            staleMinSamples: 3,
+            timeoutHours: 72,
+            maxRetirePerCycle: 2000,
+        },
         validation: { allowedProtocols: ['http'], maxTimeoutMs: 1000 },
         rollout: {
             version: 'v1.1',
@@ -232,6 +241,7 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/rollout/guardrails',
         '/v1/proxies/rollout/orchestrator/state',
         '/v1/proxies/rollout/orchestrator/events',
+        '/v1/proxies/candidate-control',
         '/v1/proxies/ranks/board',
         '/v1/proxies/honors?limit=1000',
         '/v1/proxies/retirements?limit=-1',
@@ -307,6 +317,45 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     const manualTick = await manualTickRes.json();
     assert.equal(typeof manualTick.ok, 'boolean');
 
+    const candidateControlPatch = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            max: 1234,
+            gateOverride: true,
+        }),
+    });
+    assert.equal(candidateControlPatch.status, 200);
+    const candidateControlBody = await candidateControlPatch.json();
+    assert.equal(candidateControlBody.ok, true);
+    assert.equal(candidateControlBody.candidateControl.max, 1234);
+    assert.equal(candidateControlBody.candidateControl.gateOverride, true);
+
+    const candidateControlInvalid = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            gateOverride: 'yes',
+        }),
+    });
+    assert.equal(candidateControlInvalid.status, 400);
+
+    const candidateControlInvalidPayload = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify([]),
+    });
+    assert.equal(candidateControlInvalidPayload.status, 400);
+
+    const candidateControlInvalidMax = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            max: -1,
+        }),
+    });
+    assert.equal(candidateControlInvalidMax.status, 400);
+
     const sseLogs = await fetch(baseUrl + '/api/runtime/logs/stream', {
         headers: { Accept: 'text/event-stream' },
         signal: AbortSignal.timeout(5000),
@@ -354,6 +403,53 @@ test('rollout rollback endpoint should skip apply when guardrails are healthy', 
     assert.equal(rollbackPayload.guardrails.shouldRollback, false);
 
     await runtime.shutdown('TEST-ROLLBACK-SKIP');
+});
+
+test('candidate control endpoint should initialize control object when missing', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    delete config.candidateControl;
+    const runtime = createRuntime({ config, ...stubs });
+    const server = await runtime.start();
+    const addr = server.address();
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                gateOverride: true,
+            }),
+        });
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.candidateControl.gateOverride, true);
+    } finally {
+        await runtime.shutdown('TEST-CANDIDATE-CONTROL-MISSING');
+    }
+});
+
+test('candidate control GET should fallback when db method or config is missing', async () => {
+    const stubs = createStubs();
+    stubs.db.getLifecycleDistribution = undefined;
+    stubs.db.getLifecycleCount = undefined;
+    const config = createConfig(0);
+    delete config.candidateControl;
+    const runtime = createRuntime({ config, ...stubs });
+    const server = await runtime.start();
+    const addr = server.address();
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/candidate-control');
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.candidateCount, 0);
+        assert.deepEqual(body.candidateControl, {});
+    } finally {
+        await runtime.shutdown('TEST-CANDIDATE-CONTROL-GET-FALLBACK');
+    }
 });
 
 test('shutdown should wait for in-flight engine start before closing db', async () => {
