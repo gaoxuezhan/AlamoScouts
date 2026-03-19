@@ -11,6 +11,8 @@ const {
     mapEventTypeToChinese,
     pickValidationFailureOutcome,
     buildBattleCounterUpdates,
+    readCandidateControl,
+    buildCandidateGateState,
     ProxyHubEngine,
 } = require('./engine');
 
@@ -39,6 +41,15 @@ function createConfig(dbPath) {
             },
         },
         source: { monosans: { name: 'monosans/proxy-list', url: 'https://example.com', enabled: true } },
+        candidateControl: {
+            max: 3000,
+            gateOverride: false,
+            sweepMs: 900000,
+            staleHours: 24,
+            staleMinSamples: 3,
+            timeoutHours: 72,
+            maxRetirePerCycle: 2000,
+        },
         validation: { allowedProtocols: ['http', 'https', 'socks5'], maxTimeoutMs: 1000 },
         policy: {
             serviceHourScale: 3,
@@ -146,6 +157,24 @@ test('engine utility functions should cover helper branches', async () => {
         battle_success_count: 1,
         battle_fail_count: 3,
     });
+
+    assert.deepEqual(readCandidateControl({}), {
+        max: 0,
+        gateOverride: false,
+        sweepMs: 900000,
+        staleHours: 24,
+        staleMinSamples: 3,
+        timeoutHours: 72,
+        maxRetirePerCycle: 2000,
+    });
+    const gate = buildCandidateGateState({
+        candidateControl: { max: 10, gateOverride: false },
+    }, 12);
+    assert.equal(gate.gateActive, true);
+    const gateOverride = buildCandidateGateState({
+        candidateControl: { max: 10, gateOverride: true },
+    }, 12);
+    assert.equal(gateOverride.gateActive, false);
 
     const order = [];
     await runWithConcurrency([1, 2, 3], 2, async (n) => {
@@ -278,7 +307,7 @@ test('engine start should execute scheduled callback bodies', async () => {
     global.setInterval = oldSetInterval;
     global.clearInterval = oldClearInterval;
 
-    assert.equal(timers.length, 3);
+    assert.equal(timers.length, 4);
     cleanupDb(h);
 });
 
@@ -357,6 +386,196 @@ test('runSourceCycle and processProxy should handle success path', async () => {
     cleanupDb(h);
 });
 
+test('runSourceCycle should gate candidate inflow and support override switch', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const nowIso = '2026-03-14T01:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.10', port: 8080, protocol: 'http' }],
+        () => '闸门-存量-10',
+        'seed',
+        'seed-batch',
+        nowIso,
+    );
+
+    h.config.candidateControl.max = 1;
+    h.config.candidateControl.gateOverride = false;
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'fetch-source') {
+                return {
+                    normalized: 2,
+                    proxies: [
+                        { ip: '10.0.0.10', port: 8080, protocol: 'http' },
+                        { ip: '10.0.0.11', port: 8081, protocol: 'http' },
+                    ],
+                };
+            }
+            if (type === 'validate-proxy') {
+                return { ok: true, reason: 'connect_ok', latencyMs: 10 };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date('2026-03-14T01:30:00.000Z'),
+    });
+    engine.started = true;
+    await engine.runSourceCycle();
+
+    const gatedList = h.db.getProxyList({ limit: 10 });
+    assert.equal(gatedList.length, 1);
+    assert.equal(h.db.getEvents(20).some((item) => item.event_type === 'candidate_gate'), true);
+
+    h.config.candidateControl.gateOverride = true;
+    await engine.runSourceCycle();
+    const overrideList = h.db.getProxyList({ limit: 10 });
+    assert.equal(overrideList.length, 2);
+    cleanupDb(h);
+});
+
+test('runCandidateSweepCycle should retire stale candidates with audit events', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const nowIso = '2026-03-16T12:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [
+            { ip: '10.0.1.1', port: 8080, protocol: 'http' },
+            { ip: '10.0.1.2', port: 8081, protocol: 'http' },
+        ],
+        (() => {
+            let idx = 0;
+            return () => `清库存-${++idx}`;
+        })(),
+        'src',
+        'batch',
+        nowIso,
+    );
+    const all = h.db.getProxyList({ limit: 10 });
+    h.db.updateProxyById(all[0].id, {
+        created_at: '2026-03-15T10:00:00.000Z',
+        total_samples: 1,
+        updated_at: nowIso,
+    });
+    h.db.updateProxyById(all[1].id, {
+        created_at: '2026-03-12T10:00:00.000Z',
+        total_samples: 10,
+        updated_at: nowIso,
+    });
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date(nowIso),
+    });
+    engine.started = true;
+
+    await engine.runCandidateSweepCycle();
+    const retirements = h.db.getRetirements(10);
+    assert.equal(retirements.length >= 2, true);
+    assert.equal(retirements.some((item) => item.retired_type === 'stale_candidate'), true);
+    assert.equal(retirements.some((item) => item.retired_type === 'stale_timeout'), true);
+    assert.equal(logger.entries.some((entry) => entry.stage === 'candidate-sweeper'), true);
+    cleanupDb(h);
+});
+
+test('runCandidateSweepCycle should return early when not started or already running', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger });
+
+    await engine.runCandidateSweepCycle();
+    engine.started = true;
+    engine.isCandidateSweepRunning = true;
+    await engine.runCandidateSweepCycle();
+    assert.equal(logger.entries.length, 0);
+    cleanupDb(h);
+});
+
+test('runCandidateSweepCycle should log error and fallback reason when sweep fails', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-sweeper-err.db'));
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    let mode = 'msg';
+    const db = {
+        listCandidatesForSweep() {
+            if (mode === 'msg') throw new Error('sweep-boom');
+            throw null;
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger, now: () => new Date('2026-03-16T12:00:00.000Z') });
+    engine.started = true;
+    await engine.runCandidateSweepCycle();
+    mode = 'null';
+    await engine.runCandidateSweepCycle();
+
+    assert.equal(logger.entries.some((entry) => entry.stage === 'candidate-sweeper' && entry.reason === 'sweep-boom'), true);
+    assert.equal(logger.entries.some((entry) => entry.stage === 'candidate-sweeper' && entry.reason === 'candidate-sweeper-error'), true);
+});
+
 test('engine start should schedule battle timers when enabled', async () => {
     const h = createDbHandle();
     const logger = createLogger();
@@ -408,7 +627,7 @@ test('engine start should schedule battle timers when enabled', async () => {
     global.setInterval = oldSetInterval;
     global.clearInterval = oldClearInterval;
 
-    assert.equal(timers.length, 5);
+    assert.equal(timers.length, 6);
     assert.equal(l1Calls >= 2, true);
     assert.equal(l2Calls >= 2, true);
     cleanupDb(h);

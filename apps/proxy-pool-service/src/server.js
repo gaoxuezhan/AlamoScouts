@@ -181,6 +181,19 @@ function createRuntime(options = {}) {
         });
     });
 
+    app.get('/v1/proxies/candidate-control', (_req, res) => {
+        const distribution = db.getLifecycleDistribution?.() || [];
+        const candidateCountFromDistribution = distribution
+            .find((item) => String(item.lifecycle) === 'candidate')?.count || 0;
+        const candidateCount = Number(
+            db.getLifecycleCount?.('candidate') ?? candidateCountFromDistribution,
+        ) || 0;
+        res.json({
+            candidateControl: config.candidateControl || {},
+            candidateCount,
+        });
+    });
+
     app.post('/v1/proxies/policy', (req, res) => {
         const normalized = normalizePolicyPatch(req.body);
         if (!normalized.ok) {
@@ -290,6 +303,60 @@ function createRuntime(options = {}) {
     app.post('/v1/proxies/rollout/orchestrator/tick', async (_req, res) => {
         const report = await orchestrator.tick({ trigger: 'api' });
         res.json(report);
+    });
+
+    app.post('/v1/proxies/candidate-control', (req, res) => {
+        const payload = req.body;
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            res.status(400).json({
+                ok: false,
+                error: 'invalid-candidate-control-patch',
+            });
+            return;
+        }
+
+        if (!config.candidateControl || typeof config.candidateControl !== 'object') {
+            config.candidateControl = {};
+        }
+
+        if (Object.prototype.hasOwnProperty.call(payload, 'max')) {
+            const max = Number(payload.max);
+            if (!Number.isFinite(max) || max < 0) {
+                res.status(400).json({
+                    ok: false,
+                    error: 'invalid-candidate-max',
+                });
+                return;
+            }
+            config.candidateControl.max = max;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(payload, 'gateOverride')) {
+            if (typeof payload.gateOverride !== 'boolean') {
+                res.status(400).json({
+                    ok: false,
+                    error: 'invalid-candidate-gate-override',
+                });
+                return;
+            }
+            config.candidateControl.gateOverride = payload.gateOverride;
+        }
+
+        logger.write({
+            event: '策略调整',
+            stage: 'candidate-control',
+            result: '新兵治理开关已更新',
+            action: '即时生效',
+            details: {
+                patch: payload,
+                candidateControl: config.candidateControl,
+            },
+        });
+
+        res.json({
+            ok: true,
+            candidateControl: config.candidateControl,
+        });
     });
 
     app.get('/v1/proxies/ranks/board', (_req, res) => {

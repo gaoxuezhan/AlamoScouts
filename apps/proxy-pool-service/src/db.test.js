@@ -43,7 +43,7 @@ test('upsertSourceBatch should insert and touch existing records', () => {
         'batchA',
         now,
     );
-    assert.deepEqual(first, { inserted: 1, touched: 0 });
+    assert.deepEqual(first, { inserted: 1, touched: 0, skipped: 0 });
 
     const second = h.db.upsertSourceBatch(
         [{ ip: '1.1.1.1', port: 80, protocol: 'http' }],
@@ -52,7 +52,7 @@ test('upsertSourceBatch should insert and touch existing records', () => {
         'batchB',
         now,
     );
-    assert.deepEqual(second, { inserted: 0, touched: 1 });
+    assert.deepEqual(second, { inserted: 0, touched: 1, skipped: 0 });
 
     const proxy = h.db.getProxyByKey('1.1.1.1:80:http');
     assert.equal(proxy.source, 'srcB');
@@ -469,6 +469,7 @@ test('battle stats APIs should return active count and stage success rate', () =
     });
 
     assert.equal(h.db.getActiveCount(), 1);
+    assert.equal(h.db.getLifecycleCount('active'), 1);
     const l2 = h.db.getBattleSuccessRateSince('l2', '2026-03-16T09:00:00.000Z');
     assert.equal(l2.total, 2);
     assert.equal(l2.success, 1);
@@ -963,6 +964,237 @@ test('renameAllDisplayNames should throw when old-style names remain in runtime 
     const after = h.db.getProxyList({ limit: 10 })[0].display_name;
     assert.equal(after, before);
 
+    cleanup(h);
+});
+
+test('battle daily success and snapshot median APIs should work', () => {
+    const h = createDb();
+    const now = '2026-03-16T12:00:00.000Z';
+
+    h.db.upsertSourceBatch(
+        [{ ip: '11.11.11.11', port: 80, protocol: 'http' }],
+        () => '统计-滚动-01',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyByKey('11.11.11.11:80:http');
+
+    h.db.insertBattleTestRun({
+        timestamp: '2026-03-15T10:00:00.000Z',
+        proxy_id: proxy.id,
+        stage: 'l2',
+        target: 'ly',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 100,
+        reason: 'ok',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: '2026-03-15T11:00:00.000Z',
+        proxy_id: proxy.id,
+        stage: 'l2',
+        target: 'ly',
+        outcome: 'blocked',
+        status_code: 403,
+        latency_ms: 100,
+        reason: 'blocked',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: '2026-03-16T10:00:00.000Z',
+        proxy_id: proxy.id,
+        stage: 'l2',
+        target: 'ly',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 100,
+        reason: 'ok',
+        details: {},
+    });
+
+    h.db.insertPoolSnapshot({
+        timestamp: '2026-03-15T10:00:00.000Z',
+        workers_total: 2,
+        workers_busy: 0,
+        queue_size: 0,
+        completed_tasks: 1,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        lifecycle_distribution: [{ lifecycle: 'active', count: 30 }],
+    });
+    h.db.insertPoolSnapshot({
+        timestamp: '2026-03-16T10:00:00.000Z',
+        workers_total: 2,
+        workers_busy: 0,
+        queue_size: 0,
+        completed_tasks: 1,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        lifecycle_distribution: [{ lifecycle: 'active', count: 50 }],
+    });
+
+    const l2Daily = h.db.getBattleDailySuccessRates('l2', 7, now);
+    assert.equal(l2Daily.length >= 2, true);
+    assert.equal(l2Daily.some((item) => item.day === '2026-03-15' && item.successRate === 0.5), true);
+
+    const activeMedian = h.db.getLifecycleSnapshotMedian('active', 7, now);
+    assert.equal(activeMedian, 40);
+
+    h.db.insertPoolSnapshot({
+        timestamp: '2026-03-16T11:00:00.000Z',
+        workers_total: 2,
+        workers_busy: 0,
+        queue_size: 0,
+        completed_tasks: 1,
+        failed_tasks: 0,
+        restarted_workers: 0,
+        lifecycle_distribution: [{ lifecycle: 'active', count: 70 }],
+    });
+    const activeMedianOdd = h.db.getLifecycleSnapshotMedian('active', 7, now);
+    assert.equal(activeMedianOdd, 50);
+
+    cleanup(h);
+});
+
+test('battle daily and snapshot median helpers should cover fallback branches', () => {
+    const h = createDb();
+
+    const originalPrepare = h.db.db.prepare.bind(h.db.db);
+    h.db.db.prepare = (sql) => {
+        if (String(sql).includes('substr(timestamp, 1, 10) AS day')) {
+            return {
+                all() {
+                    return [{ day: '2026-03-16', total: 0, success: null }];
+                },
+            };
+        }
+        return originalPrepare(sql);
+    };
+
+    try {
+        const daily = h.db.getBattleDailySuccessRates(undefined, 'bad', '2026-03-16T12:00:00.000Z');
+        assert.equal(daily.length, 1);
+        assert.equal(daily[0].total, 0);
+        assert.equal(daily[0].success, 0);
+        assert.equal(daily[0].successRate, 0);
+    } finally {
+        h.db.db.prepare = originalPrepare;
+    }
+
+    assert.equal(h.db.getLifecycleSnapshotMedian(undefined, 'bad', '2026-03-16T12:00:00.000Z'), null);
+    assert.equal(h.db.getLifecycleCount(), 0);
+    cleanup(h);
+});
+
+test('candidate sweeper query should return stale candidate reasons', () => {
+    const h = createDb();
+    const nowIso = '2026-03-16T12:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [
+            { ip: '12.12.12.1', port: 80, protocol: 'http' },
+            { ip: '12.12.12.2', port: 81, protocol: 'http' },
+        ],
+        (() => {
+            let i = 0;
+            return () => `清库存-${++i}`;
+        })(),
+        'src',
+        'batch',
+        nowIso,
+    );
+
+    const all = h.db.getProxyList({ limit: 10 });
+    h.db.updateProxyById(all[0].id, {
+        created_at: '2026-03-15T10:00:00.000Z',
+        total_samples: 1,
+        updated_at: nowIso,
+    });
+    h.db.updateProxyById(all[1].id, {
+        created_at: '2026-03-12T10:00:00.000Z',
+        total_samples: 10,
+        updated_at: nowIso,
+    });
+
+    const sweepList = h.db.listCandidatesForSweep({
+        nowIso,
+        staleHours: 'bad',
+        staleMinSamples: 'bad',
+        timeoutHours: 'bad',
+        limit: 'bad',
+    });
+    assert.equal(sweepList.length, 2);
+    assert.equal(sweepList.some((item) => item.sweep_reason === 'stale_candidate'), true);
+    assert.equal(sweepList.some((item) => item.sweep_reason === 'stale_timeout'), true);
+
+    cleanup(h);
+});
+
+test('candidate sweeper should handle invalid created_at age fallback', () => {
+    const h = createDb();
+    const originalPrepare = h.db.db.prepare.bind(h.db.db);
+    h.db.db.prepare = (sql) => {
+        if (String(sql).includes("WHERE lifecycle = 'candidate'")) {
+            return {
+                all() {
+                    return [{
+                        id: 1,
+                        display_name: '清库存-异常时间',
+                        lifecycle: 'candidate',
+                        created_at: 'invalid-date',
+                        total_samples: 0,
+                    }];
+                },
+            };
+        }
+        return originalPrepare(sql);
+    };
+
+    try {
+        const rows = h.db.listCandidatesForSweep({
+            nowIso: '2026-03-16T12:00:00.000Z',
+            staleHours: 24,
+            staleMinSamples: 3,
+            timeoutHours: 72,
+            limit: 10,
+        });
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].sweep_reason, 'stale_candidate');
+        assert.equal(rows[0].sweep_age_hours, null);
+    } finally {
+        h.db.db.prepare = originalPrepare;
+    }
+
+    cleanup(h);
+});
+
+test('upsertSourceBatch should support gate mode that only touches existing rows', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [{ ip: '1.1.1.1', port: 80, protocol: 'http' }],
+        () => '苍隼-北辰-01',
+        'srcA',
+        'batchA',
+        now,
+    );
+
+    const gated = h.db.upsertSourceBatch(
+        [
+            { ip: '1.1.1.1', port: 80, protocol: 'http' },
+            { ip: '2.2.2.2', port: 81, protocol: 'http' },
+        ],
+        () => '不会新增',
+        'srcB',
+        'batchB',
+        now,
+        { allowInsert: false },
+    );
+
+    assert.deepEqual(gated, { inserted: 0, touched: 1, skipped: 1 });
+    assert.equal(h.db.getProxyByKey('2.2.2.2:81:http'), undefined);
     cleanup(h);
 });
 

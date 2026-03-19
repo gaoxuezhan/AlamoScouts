@@ -169,8 +169,8 @@ const activeProfile = ['production', 'soak'].includes(String(process.env.PROXY_H
     : 'production';
 
 const battleL1LifecycleQuotaByProfile = {
-    production: { active: 0.55, reserve: 0.30, candidate: 0.15 },
-    soak: { active: 0.45, reserve: 0.35, candidate: 0.20 },
+    production: { active: 0.50, reserve: 0.20, candidate: 0.30 },
+    soak: { active: 0.50, reserve: 0.20, candidate: 0.30 },
 };
 
 const l2LookbackByProfile = {
@@ -231,6 +231,15 @@ module.exports = {
         stateReviewMs: Number(process.env.PROXY_HUB_STATE_REVIEW_MS || 30_000),
         snapshotPersistMs: Number(process.env.PROXY_HUB_SNAPSHOT_MS || 60_000),
         maxValidationPerCycle: Number(process.env.PROXY_HUB_MAX_VALIDATE || 180),
+    },
+    candidateControl: {
+        max: Number(process.env.PROXY_HUB_CANDIDATE_MAX || 3000),
+        gateOverride: toBool(process.env.PROXY_HUB_CANDIDATE_GATE_OVERRIDE, false),
+        sweepMs: Number(process.env.PROXY_HUB_CANDIDATE_SWEEP_MS || 900_000),
+        staleHours: Number(process.env.PROXY_HUB_CANDIDATE_STALE_HOURS || 24),
+        staleMinSamples: Number(process.env.PROXY_HUB_CANDIDATE_STALE_MIN_SAMPLES || 3),
+        timeoutHours: Number(process.env.PROXY_HUB_CANDIDATE_TIMEOUT_HOURS || 72),
+        maxRetirePerCycle: Number(process.env.PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE || 2000),
     },
     rollout: {
         version: 'v1.1',
