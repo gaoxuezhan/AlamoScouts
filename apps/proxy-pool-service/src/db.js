@@ -194,6 +194,32 @@ class ProxyHubDb {
 
             CREATE INDEX IF NOT EXISTS idx_battle_test_runs_proxy_stage
             ON battle_test_runs(proxy_id, stage, timestamp DESC);
+
+            CREATE TABLE IF NOT EXISTS rollout_switch_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                mode TEXT NOT NULL DEFAULT 'SAFE',
+                stable_since TEXT,
+                cooldown_until TEXT,
+                last_tick_at TEXT,
+                last_error TEXT,
+                lease_owner TEXT,
+                lease_until TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS rollout_switch_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                action TEXT NOT NULL,
+                mode_before TEXT,
+                mode_after TEXT,
+                patch_json TEXT NOT NULL DEFAULT '{}',
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rollout_switch_events_time
+            ON rollout_switch_events(timestamp DESC);
         `);
 
         this.ensureProxyColumns();
@@ -242,6 +268,14 @@ class ProxyHubDb {
                 timestamp, proxy_id, stage, target, outcome, status_code, latency_ms, reason, details_json
             ) VALUES (
                 @timestamp, @proxy_id, @stage, @target, @outcome, @status_code, @latency_ms, @reason, @details_json
+            )
+        `);
+
+        this.insertRolloutSwitchEventStmt = this.db.prepare(`
+            INSERT INTO rollout_switch_events (
+                timestamp, trigger, action, mode_before, mode_after, patch_json, details_json
+            ) VALUES (
+                @timestamp, @trigger, @action, @mode_before, @mode_after, @patch_json, @details_json
             )
         `);
     }
@@ -990,6 +1024,120 @@ class ProxyHubDb {
             ORDER BY retired_at DESC
             LIMIT ?
         `).all(limit);
+    }
+
+    // 0248_getRolloutSwitchState_读取编排状态逻辑
+    getRolloutSwitchState(nowIso = new Date().toISOString()) {
+        this.db.prepare(`
+            INSERT INTO rollout_switch_state (
+                id, mode, stable_since, cooldown_until, last_tick_at, last_error, lease_owner, lease_until, updated_at
+            ) VALUES (
+                1, 'SAFE', @now, NULL, NULL, NULL, NULL, NULL, @now
+            )
+            ON CONFLICT(id) DO NOTHING
+        `).run({ now: nowIso });
+
+        return this.db.prepare(`
+            SELECT id, mode, stable_since, cooldown_until, last_tick_at, last_error, lease_owner, lease_until, updated_at
+            FROM rollout_switch_state
+            WHERE id = 1
+        `).get();
+    }
+
+    // 0249_acquireRolloutSwitchLease_获取编排租约逻辑
+    acquireRolloutSwitchLease({ owner, nowIso = new Date().toISOString(), ttlMs = 120_000 } = {}) {
+        const leaseOwner = String(owner || `pid-${process.pid}`);
+        const safeTtlMs = Math.max(1_000, Number(ttlMs) || 120_000);
+        const leaseUntil = new Date(Date.parse(nowIso) + safeTtlMs).toISOString();
+
+        const tx = this.db.transaction((params) => {
+            this.getRolloutSwitchState(params.nowIso);
+            const outcome = this.db.prepare(`
+                UPDATE rollout_switch_state
+                SET lease_owner = @owner,
+                    lease_until = @lease_until,
+                    updated_at = @nowIso
+                WHERE id = 1
+                  AND (
+                    lease_until IS NULL
+                    OR lease_until < @nowIso
+                    OR lease_owner = @owner
+                  )
+            `).run(params);
+            return outcome.changes === 1;
+        });
+
+        return tx({
+            owner: leaseOwner,
+            nowIso,
+            lease_until: leaseUntil,
+        });
+    }
+
+    // 0250_updateRolloutSwitchState_更新编排状态逻辑
+    updateRolloutSwitchState(payload = {}) {
+        const {
+            mode,
+            stable_since,
+            cooldown_until,
+            last_tick_at,
+            last_error,
+            nowIso = new Date().toISOString(),
+        } = payload;
+        this.getRolloutSwitchState(nowIso);
+        this.db.prepare(`
+            UPDATE rollout_switch_state
+            SET mode = COALESCE(@mode, mode),
+                stable_since = CASE WHEN @stable_since_set = 1 THEN @stable_since ELSE stable_since END,
+                cooldown_until = CASE WHEN @cooldown_until_set = 1 THEN @cooldown_until ELSE cooldown_until END,
+                last_tick_at = CASE WHEN @last_tick_at_set = 1 THEN @last_tick_at ELSE last_tick_at END,
+                last_error = CASE WHEN @last_error_set = 1 THEN @last_error ELSE last_error END,
+                updated_at = @nowIso
+            WHERE id = 1
+        `).run({
+            mode: mode == null ? null : String(mode),
+            stable_since_set: Object.prototype.hasOwnProperty.call(payload, 'stable_since') ? 1 : 0,
+            stable_since: stable_since == null ? null : String(stable_since),
+            cooldown_until_set: Object.prototype.hasOwnProperty.call(payload, 'cooldown_until') ? 1 : 0,
+            cooldown_until: cooldown_until == null ? null : String(cooldown_until),
+            last_tick_at_set: Object.prototype.hasOwnProperty.call(payload, 'last_tick_at') ? 1 : 0,
+            last_tick_at: last_tick_at == null ? null : String(last_tick_at),
+            last_error_set: Object.prototype.hasOwnProperty.call(payload, 'last_error') ? 1 : 0,
+            last_error: last_error == null ? null : String(last_error),
+            nowIso,
+        });
+
+        return this.getRolloutSwitchState(nowIso);
+    }
+
+    // 0251_insertRolloutSwitchEvent_写入编排事件逻辑
+    insertRolloutSwitchEvent(event) {
+        this.insertRolloutSwitchEventStmt.run({
+            timestamp: event.timestamp,
+            trigger: String(event.trigger || 'manual'),
+            action: String(event.action || 'steady'),
+            mode_before: event.mode_before == null ? null : String(event.mode_before),
+            mode_after: event.mode_after == null ? null : String(event.mode_after),
+            patch_json: JSON.stringify(event.patch || {}),
+            details_json: JSON.stringify(event.details || {}),
+        });
+    }
+
+    // 0252_getRolloutSwitchEvents_获取编排事件逻辑
+    getRolloutSwitchEvents(limit = 200) {
+        const safeLimit = Math.max(1, Math.min(500, Number(limit) || 200));
+        const rows = this.db.prepare(`
+            SELECT id, timestamp, trigger, action, mode_before, mode_after, patch_json, details_json
+            FROM rollout_switch_events
+            ORDER BY id DESC
+            LIMIT ?
+        `).all(safeLimit);
+
+        return rows.map((row) => ({
+            ...row,
+            patch: parseJsonObject(row.patch_json),
+            details: parseJsonObject(row.details_json),
+        }));
     }
 
     // 0018_getSourceDistribution_获取来源分布逻辑

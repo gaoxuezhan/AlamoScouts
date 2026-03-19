@@ -5,6 +5,7 @@ const { ProxyHubDb } = require('./db');
 const { RuntimeLogger } = require('./logger');
 const { WorkerPool } = require('./worker-pool');
 const { ProxyHubEngine } = require('./engine');
+const { RolloutOrchestrator } = require('./rollout-orchestrator');
 const { renderProxyAdminPage } = require('./views/proxy-admin');
 const { renderRuntimeLogsPage } = require('./views/runtime-logs');
 const { normalizePolicyPatch, applyPolicyPatch, validatePolicy } = require('./policy');
@@ -44,6 +45,11 @@ function createRuntime(options = {}) {
         workerFile: path.join(__dirname, 'worker.js'),
     });
     const engine = options.engine || new ProxyHubEngine({ config, db, workerPool, logger });
+    const orchestrator = options.orchestrator || new RolloutOrchestrator({
+        config,
+        db,
+        logger,
+    });
 
     const logClients = new Set();
     const poolClients = new Set();
@@ -160,6 +166,21 @@ function createRuntime(options = {}) {
         });
     });
 
+    app.get('/v1/proxies/rollout/orchestrator/state', (_req, res) => {
+        res.json({
+            state: db.getRolloutSwitchState?.(new Date().toISOString()) || null,
+            config: config.rollout.orchestrator,
+            instanceId: orchestrator.instanceId,
+        });
+    });
+
+    app.get('/v1/proxies/rollout/orchestrator/events', (req, res) => {
+        const limit = normalizeLimit(req.query.limit, 200, 1, 500);
+        res.json({
+            items: db.getRolloutSwitchEvents?.(limit) || [],
+        });
+    });
+
     app.post('/v1/proxies/policy', (req, res) => {
         const normalized = normalizePolicyPatch(req.body);
         if (!normalized.ok) {
@@ -266,6 +287,11 @@ function createRuntime(options = {}) {
         });
     });
 
+    app.post('/v1/proxies/rollout/orchestrator/tick', async (_req, res) => {
+        const report = await orchestrator.tick({ trigger: 'api' });
+        res.json(report);
+    });
+
     app.get('/v1/proxies/ranks/board', (_req, res) => {
         res.json({
             items: db.getRankBoard(),
@@ -332,6 +358,7 @@ function createRuntime(options = {}) {
 
     let server;
     let engineStartPromise = null;
+    let orchestratorStartPromise = null;
 
     // 0094_start_启动逻辑
     async function start() {
@@ -366,6 +393,21 @@ function createRuntime(options = {}) {
                             engineStartPromise = null;
                         });
 
+                    orchestratorStartPromise = Promise.resolve()
+                        .then(() => orchestrator.start())
+                        .catch((error) => {
+                            logger.write({
+                                event: '线程池告警',
+                                stage: 'rollout',
+                                result: '自动编排启动失败',
+                                reason: error?.message || 'unknown',
+                                action: '保持服务在线并等待手动触发',
+                            });
+                        })
+                        .finally(() => {
+                            orchestratorStartPromise = null;
+                        });
+
                     resolve(server);
                 });
 
@@ -395,6 +437,10 @@ function createRuntime(options = {}) {
             await engineStartPromise;
         }
         await engine.stop();
+        if (orchestratorStartPromise) {
+            await orchestratorStartPromise;
+        }
+        await orchestrator.stop();
         await workerPool.close();
         db.close();
     }
@@ -406,6 +452,7 @@ function createRuntime(options = {}) {
         logger,
         workerPool,
         engine,
+        orchestrator,
         start,
         shutdown,
         _clients: {
