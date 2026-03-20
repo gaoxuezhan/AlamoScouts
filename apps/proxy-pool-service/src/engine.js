@@ -165,6 +165,36 @@ function resolveFailureBackoff({
     };
 }
 
+// 0266_resolveSourceFeeds_解析抓源配置逻辑
+function resolveSourceFeeds(config = {}) {
+    const source = config.source || {};
+
+    if (Array.isArray(source.activeFeeds) && source.activeFeeds.length > 0) {
+        return source.activeFeeds
+            .filter((feed) => feed && typeof feed === 'object' && feed.enabled !== false)
+            .map((feed) => ({
+                name: String(feed.name || 'unknown-source'),
+                url: String(feed.url || ''),
+                enabled: feed.enabled !== false,
+                sourceFormat: String(feed.sourceFormat || 'auto').toLowerCase(),
+                defaultProtocol: String(feed.defaultProtocol || 'http').toLowerCase(),
+            }))
+            .filter((feed) => feed.url.length > 0);
+    }
+
+    if (source.monosans && source.monosans.enabled !== false && source.monosans.url) {
+        return [{
+            name: String(source.monosans.name || 'monosans/proxy-list'),
+            url: String(source.monosans.url),
+            enabled: true,
+            sourceFormat: String(source.monosans.sourceFormat || 'auto').toLowerCase(),
+            defaultProtocol: String(source.monosans.defaultProtocol || 'http').toLowerCase(),
+        }];
+    }
+
+    return [];
+}
+
 class ProxyHubEngine extends EventEmitter {
     // 0027_constructor_初始化实例逻辑
     constructor({ config, db, workerPool, logger, now }) {
@@ -291,94 +321,121 @@ class ProxyHubEngine extends EventEmitter {
             return;
         }
 
-        const sourceConfig = this.config.source.monosans;
-        if (!sourceConfig?.enabled) {
+        const sourceFeeds = resolveSourceFeeds(this.config);
+        if (sourceFeeds.length === 0) {
             return;
         }
 
         this.isSourceCycleRunning = true;
         const startedAt = Date.now();
-        const sourceName = sourceConfig.name;
-
-        this.logger.write({
-            event: '开始抓源',
-            stage: '抓源',
-            ipSource: sourceName,
-            result: '开始',
-            action: '拉取代理来源',
-        });
+        const summary = {
+            feeds: sourceFeeds.length,
+            fetched: 0,
+            normalized: 0,
+            inserted: 0,
+            touched: 0,
+            skipped: 0,
+            failed: 0,
+        };
 
         try {
-            const fetchResult = await this.workerPool.runTask('fetch-source', {
-                url: sourceConfig.url,
-                timeoutMs: 20_000,
-                allowedProtocols: this.config.validation.allowedProtocols,
-            });
-
-            const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            const nowIso = this.now().toISOString();
-            const candidateCount = Number(this.db.getLifecycleCount?.('candidate') || 0);
-            const gateState = buildCandidateGateState(this.config, candidateCount);
-            const upsertStats = this.db.upsertSourceBatch(
-                fetchResult.proxies,
-                () => this.createRecruitName(),
-                sourceName,
-                batchId,
-                nowIso,
-                {
-                    allowInsert: !gateState.gateActive,
-                },
-            );
-
-            this.logger.write({
-                event: '抓源成功',
-                stage: '抓源',
-                ipSource: sourceName,
-                result: `总 ${fetchResult.normalized}，新增 ${upsertStats.inserted}，更新 ${upsertStats.touched}，跳过 ${upsertStats.skipped || 0}`,
-                durationMs: Date.now() - startedAt,
-                action: gateState.gateActive ? 'candidate闸门生效，仅更新存量代理' : '进入校验队列',
-            });
-
-            if (gateState.gateActive || (gateState.gatedByThreshold && gateState.gateOverride)) {
-                const gateMessage = gateState.gateActive
-                    ? `candidate 闸门生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
-                    : `candidate 闸门已手工 override：当前 ${gateState.candidateCount}，上限 ${gateState.max}`;
-                this.db.insertProxyEvent({
-                    timestamp: nowIso,
-                    proxy_id: null,
-                    display_name: null,
-                    event_type: 'candidate_gate',
-                    level: EVENT_LEVEL.INFO,
-                    message: gateMessage,
-                    details: {
-                        candidateCount: gateState.candidateCount,
-                        candidateMax: gateState.max,
-                        gateActive: gateState.gateActive,
-                        gateOverride: gateState.gateOverride,
-                        inserted: upsertStats.inserted,
-                        touched: upsertStats.touched,
-                        skipped: upsertStats.skipped || 0,
-                    },
+            for (const sourceConfig of sourceFeeds) {
+                const sourceName = sourceConfig.name;
+                this.logger.write({
+                    event: '开始抓源',
+                    stage: '抓源',
+                    ipSource: sourceName,
+                    result: '开始',
+                    action: '拉取代理来源',
                 });
+
+                try {
+                    const fetchResult = await this.workerPool.runTask('fetch-source', {
+                        url: sourceConfig.url,
+                        timeoutMs: 20_000,
+                        allowedProtocols: this.config.validation.allowedProtocols,
+                        defaultProtocol: sourceConfig.defaultProtocol,
+                        sourceFormat: sourceConfig.sourceFormat,
+                    });
+
+                    const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                    const nowIso = this.now().toISOString();
+                    const candidateCount = Number(this.db.getLifecycleCount?.('candidate') || 0);
+                    const gateState = buildCandidateGateState(this.config, candidateCount);
+                    const upsertStats = this.db.upsertSourceBatch(
+                        fetchResult.proxies,
+                        () => this.createRecruitName(),
+                        sourceName,
+                        batchId,
+                        nowIso,
+                        {
+                            allowInsert: !gateState.gateActive,
+                        },
+                    );
+
+                    summary.fetched += Number(fetchResult.fetched || 0);
+                    summary.normalized += Number(fetchResult.normalized || 0);
+                    summary.inserted += Number(upsertStats.inserted || 0);
+                    summary.touched += Number(upsertStats.touched || 0);
+                    summary.skipped += Number(upsertStats.skipped || 0);
+
+                    this.logger.write({
+                        event: '抓源成功',
+                        stage: '抓源',
+                        ipSource: sourceName,
+                        result: `总 ${fetchResult.normalized}，新增 ${upsertStats.inserted}，更新 ${upsertStats.touched}，跳过 ${upsertStats.skipped || 0}`,
+                        durationMs: Date.now() - startedAt,
+                        action: gateState.gateActive ? 'candidate闸门生效，仅更新存量代理' : '进入校验队列',
+                    });
+
+                    if (gateState.gateActive || (gateState.gatedByThreshold && gateState.gateOverride)) {
+                        const gateMessage = gateState.gateActive
+                            ? `candidate 闸门生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
+                            : `candidate 闸门已手工 override：当前 ${gateState.candidateCount}，上限 ${gateState.max}`;
+                        this.db.insertProxyEvent({
+                            timestamp: nowIso,
+                            proxy_id: null,
+                            display_name: null,
+                            event_type: 'candidate_gate',
+                            level: EVENT_LEVEL.INFO,
+                            message: gateMessage,
+                            details: {
+                                sourceName,
+                                candidateCount: gateState.candidateCount,
+                                candidateMax: gateState.max,
+                                gateActive: gateState.gateActive,
+                                gateOverride: gateState.gateOverride,
+                                inserted: upsertStats.inserted,
+                                touched: upsertStats.touched,
+                                skipped: upsertStats.skipped || 0,
+                            },
+                        });
+                    }
+                } catch (error) {
+                    summary.failed += 1;
+                    this.logger.write({
+                        event: '抓源失败',
+                        stage: '抓源',
+                        ipSource: sourceName,
+                        result: '失败',
+                        reason: error?.message || 'unknown',
+                        durationMs: Date.now() - startedAt,
+                        action: '等待自动重试',
+                    });
+                }
             }
 
-            await this.runValidationCycle(sourceName);
+            if (summary.failed >= sourceFeeds.length) {
+                return;
+            }
+
+            await this.runValidationCycle(this.config.source?.activeProfile || 'source-bundle');
             this.logger.write({
                 event: '等待下一轮',
                 stage: '抓源',
-                ipSource: sourceName,
-                result: '本轮完成',
+                ipSource: this.config.source?.activeProfile || 'source-bundle',
+                result: `本轮完成：源 ${summary.feeds}，抓取 ${summary.fetched}，标准化 ${summary.normalized}，新增 ${summary.inserted}，更新 ${summary.touched}`,
                 action: '等待调度器下次触发',
-            });
-        } catch (error) {
-            this.logger.write({
-                event: '抓源失败',
-                stage: '抓源',
-                ipSource: sourceName,
-                result: '失败',
-                reason: error?.message || 'unknown',
-                durationMs: Date.now() - startedAt,
-                action: '等待自动重试',
             });
         } finally {
             this.isSourceCycleRunning = false;
@@ -1077,6 +1134,7 @@ module.exports = {
     buildCandidateGateState,
     readFailureBackoff,
     resolveFailureBackoff,
+    resolveSourceFeeds,
     ProxyHubEngine,
 };
 

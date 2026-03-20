@@ -13,6 +13,7 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_ROLLOUT_COOLDOWN_HOURS',
         'PROXY_HUB_ROLLOUT_MIN_L2_SAMPLES',
         'PROXY_HUB_ROLLOUT_LEASE_TTL_MS',
+        'PROXY_HUB_POLICY_PROFILE',
         'PROXY_HUB_CANDIDATE_MAX',
         'PROXY_HUB_CANDIDATE_GATE_OVERRIDE',
         'PROXY_HUB_CANDIDATE_SWEEP_MS',
@@ -26,6 +27,13 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_FAILURE_BACKOFF_L2_MS',
         'PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER',
         'PROXY_HUB_FAILURE_BACKOFF_MAX_MS',
+        'PROXY_HUB_SOURCE_NAME',
+        'PROXY_HUB_SOURCE_URL',
+        'PROXY_HUB_SOURCE_ENABLED',
+        'PROXY_HUB_SOURCE_DEFAULT_PROTOCOL',
+        'PROXY_HUB_SOURCE_FORMAT',
+        'PROXY_HUB_SOURCE_PROFILE',
+        'PROXY_HUB_DB_PATH',
         ...Object.keys(overrides),
     ]);
     const originals = {};
@@ -60,8 +68,14 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.service.timezone, 'Asia/Shanghai');
     assert.equal(config.threadPool.workers > 0, true);
     assert.equal(Array.isArray(config.validation.allowedProtocols), true);
-    assert.equal(config.source.monosans.enabled, true);
-    assert.equal(config.source.monosans.url.includes('proxies.json'), true);
+    assert.equal(config.source.activeProfile, 'speedx_bundle');
+    assert.equal(config.source.legacySingleOverride, false);
+    assert.equal(Array.isArray(config.source.activeFeeds), true);
+    assert.equal(config.source.activeFeeds.length, 3);
+    assert.equal(config.source.activeFeeds[0].url.includes('/http.txt'), true);
+    assert.equal(config.source.profiles.monosans_archive.enabled, false);
+    assert.equal(config.storage.dbPath.includes('proxyhub-speedx-bundle.db'), true);
+    assert.equal(config.validation.allowedProtocols.includes('socks4'), true);
     assert.equal(config.battle.enabled, true);
     assert.equal(config.battle.l1SyncMs, 300000);
     assert.equal(config.battle.l2SyncMs, 1800000);
@@ -90,6 +104,44 @@ test('config should support env override for L2 primary target', { concurrency: 
         PROXY_HUB_BATTLE_L2_PRIMARY_URL: 'https://example.com/l2-primary',
     });
     assert.equal(config.battle.targets.l2Primary[0].url, 'https://example.com/l2-primary');
+});
+
+test('config should support source override for line-based lists', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_SOURCE_NAME: 'TheSpeedX/PROXY-List',
+        PROXY_HUB_SOURCE_URL: 'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt',
+        PROXY_HUB_SOURCE_ENABLED: 'true',
+        PROXY_HUB_SOURCE_DEFAULT_PROTOCOL: 'socks5',
+        PROXY_HUB_SOURCE_FORMAT: 'line',
+    });
+
+    assert.equal(config.source.legacySingleOverride, true);
+    assert.equal(config.source.activeFeeds.length, 1);
+    assert.equal(config.source.activeFeeds[0].name, 'TheSpeedX/PROXY-List');
+    assert.equal(config.source.activeFeeds[0].url.includes('/socks5.txt'), true);
+    assert.equal(config.source.activeFeeds[0].enabled, true);
+    assert.equal(config.source.activeFeeds[0].defaultProtocol, 'socks5');
+    assert.equal(config.source.activeFeeds[0].sourceFormat, 'line');
+});
+
+test('config should switch db and feeds by source profile when env profile changes', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_SOURCE_PROFILE: 'monosans_archive',
+    });
+
+    assert.equal(config.source.activeProfile, 'monosans_archive');
+    assert.equal(config.source.activeFeeds.length, 1);
+    assert.equal(config.source.activeFeeds[0].url.includes('proxies.json'), true);
+    assert.equal(config.storage.dbPath.includes('proxyhub-v1.db'), true);
+});
+
+test('config should prioritize explicit PROXY_HUB_DB_PATH over profile db mapping', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_SOURCE_PROFILE: 'speedx_bundle',
+        PROXY_HUB_DB_PATH: 'apps/proxy-pool-service/data/manual-override.db',
+    });
+
+    assert.equal(config.storage.dbPath, 'apps/proxy-pool-service/data/manual-override.db');
 });
 
 test('config should parse rollout feature bool env values', { concurrency: false }, () => {

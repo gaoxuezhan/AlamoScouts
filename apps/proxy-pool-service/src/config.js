@@ -228,6 +228,79 @@ const resolvedLifecycleQuota = hasLifecycleQuotaEnv
     ? lifecycleQuotaFromEnv
     : (hasCandidateQuotaEnv ? undefined : defaultLifecycleQuota);
 
+const sourceProfiles = {
+    speedx_bundle: {
+        name: 'TheSpeedX/PROXY-List',
+        enabled: true,
+        dbPath: 'apps/proxy-pool-service/data/proxyhub-speedx-bundle.db',
+        feeds: [
+            {
+                name: 'TheSpeedX/http',
+                url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+                enabled: true,
+                defaultProtocol: 'http',
+                sourceFormat: 'line',
+            },
+            {
+                name: 'TheSpeedX/socks4',
+                url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt',
+                enabled: true,
+                defaultProtocol: 'socks4',
+                sourceFormat: 'line',
+            },
+            {
+                name: 'TheSpeedX/socks5',
+                url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
+                enabled: true,
+                defaultProtocol: 'socks5',
+                sourceFormat: 'line',
+            },
+        ],
+    },
+    monosans_archive: {
+        name: 'monosans/proxy-list',
+        enabled: false,
+        dbPath: 'apps/proxy-pool-service/data/proxyhub-v1.db',
+        feeds: [
+            {
+                name: 'monosans/proxy-list',
+                url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json',
+                enabled: true,
+                defaultProtocol: 'http',
+                sourceFormat: 'json',
+            },
+        ],
+    },
+};
+
+const sourceProfileRaw = String(process.env.PROXY_HUB_SOURCE_PROFILE || '').trim().toLowerCase();
+const activeSourceProfile = Object.prototype.hasOwnProperty.call(sourceProfiles, sourceProfileRaw)
+    ? sourceProfileRaw
+    : 'speedx_bundle';
+const selectedSourceProfile = deepClone(sourceProfiles[activeSourceProfile]);
+
+const hasLegacySourceOverride = hasOwnEnv('PROXY_HUB_SOURCE_NAME')
+    || hasOwnEnv('PROXY_HUB_SOURCE_URL')
+    || hasOwnEnv('PROXY_HUB_SOURCE_ENABLED')
+    || hasOwnEnv('PROXY_HUB_SOURCE_DEFAULT_PROTOCOL')
+    || hasOwnEnv('PROXY_HUB_SOURCE_FORMAT');
+
+const legacySingleSourceFeed = {
+    name: process.env.PROXY_HUB_SOURCE_NAME || 'monosans/proxy-list',
+    url: process.env.PROXY_HUB_SOURCE_URL || 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json',
+    enabled: toBool(process.env.PROXY_HUB_SOURCE_ENABLED, true),
+    defaultProtocol: String(process.env.PROXY_HUB_SOURCE_DEFAULT_PROTOCOL || 'http').toLowerCase(),
+    sourceFormat: String(process.env.PROXY_HUB_SOURCE_FORMAT || 'json').toLowerCase(),
+};
+
+let activeSourceFeeds = deepClone(selectedSourceProfile.feeds);
+if (hasLegacySourceOverride) {
+    activeSourceFeeds = [legacySingleSourceFeed];
+}
+
+const defaultStorageDbPath = selectedSourceProfile.dbPath;
+const resolvedStorageDbPath = process.env.PROXY_HUB_DB_PATH || defaultStorageDbPath;
+
 module.exports = {
     service: {
         name: 'ProxyHub',
@@ -237,7 +310,7 @@ module.exports = {
         logRetention: 2000,
     },
     storage: {
-        dbPath: process.env.PROXY_HUB_DB_PATH || 'apps/proxy-pool-service/data/proxyhub-v1.db',
+        dbPath: resolvedStorageDbPath,
         snapshotRetentionDays: 7,
     },
     threadPool: {
@@ -338,14 +411,14 @@ module.exports = {
         },
     },
     source: {
-        monosans: {
-            name: 'monosans/proxy-list',
-            url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json',
-            enabled: true,
-        },
+        activeProfile: activeSourceProfile,
+        profiles: deepClone(sourceProfiles),
+        activeFeeds: deepClone(activeSourceFeeds),
+        legacySingleOverride: hasLegacySourceOverride,
+        monosans: deepClone(sourceProfiles.monosans_archive.feeds[0]),
     },
     validation: {
-        allowedProtocols: ['http', 'https', 'socks5'],
+        allowedProtocols: ['http', 'https', 'socks4', 'socks5'],
         maxTimeoutMs: 2_500,
     },
     policyProfiles: deepClone(policyProfiles),

@@ -54,6 +54,57 @@ function normalizeProxyPayload(payload, allowedProtocols) {
     return out;
 }
 
+// 0265_parseLineProxyPayload_解析文本代理列表逻辑
+function parseLineProxyPayload(rawText, defaultProtocol = 'http') {
+    const text = String(rawText || '');
+    const lines = text.split(/\r?\n/);
+    const items = [];
+    let fetched = 0;
+
+    for (const rawLine of lines) {
+        const line = String(rawLine || '').trim();
+        if (!line || line.startsWith('#') || line.startsWith('//')) {
+            continue;
+        }
+
+        fetched += 1;
+        let protocol = String(defaultProtocol || 'http').toLowerCase();
+        let hostPort = line;
+
+        if (line.includes('://')) {
+            try {
+                const parsed = new URL(line);
+                protocol = String(parsed.protocol || '').replace(/:$/, '').toLowerCase();
+                hostPort = parsed.host;
+            } catch {
+                continue;
+            }
+        }
+
+        const sep = hostPort.lastIndexOf(':');
+        if (sep <= 0 || sep >= hostPort.length - 1) {
+            continue;
+        }
+
+        const host = hostPort.slice(0, sep).trim();
+        const port = Number(hostPort.slice(sep + 1));
+        if (!host || !Number.isInteger(port) || port <= 0) {
+            continue;
+        }
+
+        items.push({
+            ip: host,
+            port,
+            protocol,
+        });
+    }
+
+    return {
+        fetched,
+        items,
+    };
+}
+
 // 0151_fetchSourceTask_抓取来源任务逻辑
 async function fetchSourceTask(payload, deps = {}) {
     const start = Date.now();
@@ -72,11 +123,42 @@ async function fetchSourceTask(payload, deps = {}) {
         throw new Error(`source-http-${res.status}`);
     }
 
-    const body = await res.json();
-    const proxies = normalizeProxyPayload(body, payload.allowedProtocols || ['http', 'https', 'socks5']);
+    const sourceFormat = String(payload.sourceFormat || 'auto').toLowerCase();
+    const defaultProtocol = String(payload.defaultProtocol || 'http').toLowerCase();
+    const allowedProtocols = payload.allowedProtocols || ['http', 'https', 'socks4', 'socks5'];
+
+    let rawText = '';
+    if (typeof res.text === 'function') {
+        rawText = await res.text();
+    }
+    if (!rawText && typeof res.json === 'function') {
+        rawText = JSON.stringify(await res.json());
+    }
+
+    let fetched = 0;
+    let proxies = [];
+    if (sourceFormat === 'line') {
+        const parsed = parseLineProxyPayload(rawText, defaultProtocol);
+        fetched = parsed.fetched;
+        proxies = normalizeProxyPayload(parsed.items, allowedProtocols);
+    } else {
+        const parsedJson = safeParseJson(rawText);
+        if (sourceFormat === 'json' && parsedJson == null) {
+            throw new Error('source-json-invalid');
+        }
+
+        if (parsedJson != null) {
+            fetched = Array.isArray(parsedJson) ? parsedJson.length : 0;
+            proxies = normalizeProxyPayload(parsedJson, allowedProtocols);
+        } else {
+            const parsed = parseLineProxyPayload(rawText, defaultProtocol);
+            fetched = parsed.fetched;
+            proxies = normalizeProxyPayload(parsed.items, allowedProtocols);
+        }
+    }
 
     return {
-        fetched: Array.isArray(body) ? body.length : 0,
+        fetched,
         normalized: proxies.length,
         proxies,
         durationMs: Date.now() - start,
