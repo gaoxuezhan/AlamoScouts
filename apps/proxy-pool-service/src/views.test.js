@@ -7,6 +7,12 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     const html = renderProxyAdminPage({ ui: { refreshMs: 4321 } });
     assert.equal(html.includes('4321ms'), true);
     assert.equal(html.includes('__REFRESH_MS__'), false);
+    assert.equal(html.includes('IP价值榜（前100）'), true);
+    assert.equal(html.includes('IP价值榜（前30）'), false);
+    assert.equal(html.includes('/v1/proxies/value-board?limit=100'), true);
+    assert.equal(html.includes('/v1/proxies/policy'), true);
+    assert.equal(html.includes('按价值分从高到低排的名次，1就是当前最有价值的IP。'), true);
+    assert.equal(html.includes('系统一共'), true);
 });
 
 test('renderRuntimeLogsPage should return static html', () => {
