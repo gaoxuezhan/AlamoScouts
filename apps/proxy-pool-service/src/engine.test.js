@@ -15,6 +15,7 @@ const {
     buildCandidateGateState,
     readFailureBackoff,
     resolveFailureBackoff,
+    resolveSourceFeeds,
     ProxyHubEngine,
 } = require('./engine');
 
@@ -60,7 +61,7 @@ function createConfig(dbPath) {
             multiplier: 2,
             maxMs: 3600000,
         },
-        validation: { allowedProtocols: ['http', 'https', 'socks5'], maxTimeoutMs: 1000 },
+        validation: { allowedProtocols: ['http', 'https', 'socks4', 'socks5'], maxTimeoutMs: 1000 },
         policy: {
             serviceHourScale: 3,
             promotionProtectHours: 6,
@@ -193,6 +194,37 @@ test('engine utility functions should cover helper branches', async () => {
         multiplier: 1.8,
         maxMs: 21600000,
     });
+    assert.deepEqual(resolveSourceFeeds(), []);
+    assert.deepEqual(resolveSourceFeeds({ source: {} }), []);
+    assert.equal(resolveSourceFeeds({
+        source: {
+            activeFeeds: [
+                { name: 'feed1', url: 'https://example.com/1', enabled: true, sourceFormat: 'line', defaultProtocol: 'socks5' },
+                { name: 'feed2', url: 'https://example.com/2', enabled: false },
+            ],
+        },
+    }).length, 1);
+    assert.equal(resolveSourceFeeds({
+        source: {
+            monosans: { name: 'legacy', url: 'https://example.com/legacy', enabled: true },
+        },
+    }).length, 1);
+    assert.equal(resolveSourceFeeds({
+        source: {
+            monosans: { url: 'https://example.com/legacy-default-name', enabled: true },
+        },
+    })[0].name, 'monosans/proxy-list');
+    const fallbackFeed = resolveSourceFeeds({
+        source: {
+            activeFeeds: [
+                { url: 'https://example.com/fallback-feed' },
+            ],
+        },
+    })[0];
+    assert.equal(fallbackFeed.name, 'unknown-source');
+    assert.equal(fallbackFeed.url, 'https://example.com/fallback-feed');
+    assert.equal(fallbackFeed.sourceFormat, 'auto');
+    assert.equal(fallbackFeed.defaultProtocol, 'http');
     const backoff = resolveFailureBackoff({
         config: {
             failureBackoff: {
@@ -438,6 +470,98 @@ test('runSourceCycle and processProxy should handle success path', async () => {
     assert.equal(logger.entries.some((e) => e.event === '抓源成功'), true);
     assert.equal(logger.entries.some((e) => e.event === '校验通过'), true);
     assert.equal(logger.entries.some((e) => e.stage === '评分(L0回退)' && e.result === '成功'), true);
+
+    cleanupDb(h);
+});
+
+test('runSourceCycle should fetch multiple active feeds and validate once', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.source = {
+        activeProfile: 'speedx_bundle',
+        activeFeeds: [
+            {
+                name: 'TheSpeedX/http',
+                url: 'https://example.com/http.txt',
+                enabled: true,
+                sourceFormat: 'line',
+                defaultProtocol: 'http',
+            },
+            {
+                name: 'TheSpeedX/socks4',
+                url: 'https://example.com/socks4.txt',
+                enabled: true,
+                sourceFormat: 'line',
+                defaultProtocol: 'socks4',
+            },
+            {
+                name: 'TheSpeedX/socks5',
+                url: 'https://example.com/socks5.txt',
+                enabled: true,
+                sourceFormat: 'line',
+                defaultProtocol: 'socks5',
+            },
+        ],
+    };
+
+    let fetchCalls = 0;
+    let validateCalls = 0;
+    const workerPool = {
+        async runTask(type, payload) {
+            if (type === 'fetch-source') {
+                fetchCalls += 1;
+                if (payload.defaultProtocol === 'http') {
+                    return {
+                        fetched: 1,
+                        normalized: 1,
+                        proxies: [{ ip: '10.9.0.1', port: 8080, protocol: 'http' }],
+                    };
+                }
+                if (payload.defaultProtocol === 'socks4') {
+                    return {
+                        fetched: 1,
+                        normalized: 1,
+                        proxies: [{ ip: '10.9.0.2', port: 1080, protocol: 'socks4' }],
+                    };
+                }
+                return {
+                    fetched: 1,
+                    normalized: 1,
+                    proxies: [{ ip: '10.9.0.3', port: 1080, protocol: 'socks5' }],
+                };
+            }
+            if (type === 'validate-proxy') {
+                validateCalls += 1;
+                return { ok: true, reason: 'connect_ok', latencyMs: 12 };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T01:10:00.000Z') });
+    engine.started = true;
+
+    await engine.runSourceCycle();
+
+    const proxies = h.db.getProxyList({ limit: 20 });
+    assert.equal(fetchCalls, 3);
+    assert.equal(proxies.length, 3);
+    assert.equal(validateCalls, 3);
+    assert.equal(proxies.some((item) => item.protocol === 'socks4'), true);
+    assert.equal(logger.entries.some((entry) => entry.event === '抓源成功' && entry.ipSource === 'TheSpeedX/socks4'), true);
+    assert.equal(logger.entries.some((entry) => entry.event === '等待下一轮' && entry.ipSource === 'speedx_bundle'), true);
 
     cleanupDb(h);
 });
@@ -1286,12 +1410,19 @@ test('runBattle cycles should log outer-catch fallback reason when candidate lis
     const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-battle-outer.db'));
     config.battle.enabled = true;
 
+    let throwMode = 'null';
     const db = {
         listProxiesForBattleL1() {
-            throw null;
+            if (throwMode === 'null') {
+                throw null;
+            }
+            throw new Error('battle-l1-list-fail');
         },
         listProxiesForBattleL2() {
-            throw null;
+            if (throwMode === 'null') {
+                throw null;
+            }
+            throw new Error('battle-l2-list-fail');
         },
     };
     const workerPool = {
@@ -1310,6 +1441,12 @@ test('runBattle cycles should log outer-catch fallback reason when candidate lis
 
     assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L1' && e.reason === 'battle-l1-error'), true);
     assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L2' && e.reason === 'battle-l2-error'), true);
+
+    throwMode = 'message';
+    await engine.runBattleL1Cycle();
+    await engine.runBattleL2Cycle();
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L1' && e.reason === 'battle-l1-list-fail'), true);
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L2' && e.reason === 'battle-l2-list-fail'), true);
 });
 
 test('runSourceCycle should audit manual override gate branch', async () => {
@@ -1361,9 +1498,14 @@ test('runSourceCycle should audit manual override gate branch', async () => {
 test('runCandidateSweepCycle should use fallback reason and counters when candidate fields are missing', async () => {
     const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-sweep-fallback.db'));
     const logger = createLogger();
+    let pass = 0;
     const db = {
         listCandidatesForSweep() {
-            return [{ id: 1, display_name: '清库存-缺省-01' }];
+            pass += 1;
+            if (pass === 1) {
+                return [{ id: 1, display_name: '清库存-缺省-01' }];
+            }
+            return [{ id: 2, display_name: '清库存-超时-02', sweep_reason: 'stale_timeout' }];
         },
         updateProxyById() {},
         insertRetirement() {},
@@ -1386,7 +1528,9 @@ test('runCandidateSweepCycle should use fallback reason and counters when candid
     });
     engine.started = true;
     await engine.runCandidateSweepCycle();
+    await engine.runCandidateSweepCycle();
     assert.equal(logger.entries.some((entry) => entry.stage === 'candidate-sweeper' && String(entry.action).includes('stale_timeout=0')), true);
+    assert.equal(logger.entries.some((entry) => entry.stage === 'candidate-sweeper' && String(entry.action).includes('stale_candidate=0')), true);
 });
 
 test('runStateReviewCycle should cover change/no-change and error branches', async () => {

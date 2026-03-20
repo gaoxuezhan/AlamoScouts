@@ -105,3 +105,40 @@ test('integration: soak CLI should finish with tiny duration', async () => {
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
 });
+
+test('integration: server CLI should create speedx profile default db when DB_PATH is not set', async () => {
+    const port = 5094;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxyhub-default-db-'));
+    const serverScript = path.resolve(process.cwd(), 'apps/proxy-pool-service/src/server.js');
+
+    const child = spawn(process.execPath, [serverScript], {
+        cwd: tmpDir,
+        env: {
+            ...process.env,
+            PROXY_HUB_PORT: String(port),
+            PROXY_HUB_SOURCE_ENABLED: 'false',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+        stderr += String(d);
+    });
+
+    await waitFor(async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5000) });
+        return res.ok;
+    }, 20000, 300);
+
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+        child.on('exit', () => resolve());
+    });
+
+    const expectedDb = path.join(tmpDir, 'apps/proxy-pool-service/data/proxyhub-speedx-bundle.db');
+    assert.equal(fs.existsSync(expectedDb), true);
+    assert.equal(stderr.includes('Error'), false);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+});

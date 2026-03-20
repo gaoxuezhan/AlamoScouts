@@ -125,7 +125,7 @@ async function fetchSourceTask(payload, deps = {}) {
 
     const sourceFormat = String(payload.sourceFormat || 'auto').toLowerCase();
     const defaultProtocol = String(payload.defaultProtocol || 'http').toLowerCase();
-    const allowedProtocols = payload.allowedProtocols || ['http', 'https', 'socks5'];
+    const allowedProtocols = payload.allowedProtocols || ['http', 'https', 'socks4', 'socks5'];
 
     let rawText = '';
     if (typeof res.text === 'function') {

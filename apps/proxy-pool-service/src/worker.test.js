@@ -47,12 +47,14 @@ test('normalizeProxyPayload should deduplicate and filter invalid protocols', ()
         { ip: '1.1.1.2', port: 81 },
         { ip: '2.2.2.2', port: 0, protocol: 'http' },
         { ip: '', port: 8080, protocol: 'http' },
+        { ip: '3.3.3.3', port: 1080, protocol: 'socks4' },
         { ip: '3.3.3.3', port: 1080, protocol: 'socks5' },
-    ], ['http', 'https', 'socks5']);
+    ], ['http', 'https', 'socks4', 'socks5']);
 
-    assert.equal(normalized.length, 3);
+    assert.equal(normalized.length, 4);
     assert.equal(normalized.some((x) => x.protocol === 'http'), true);
     assert.equal(normalized.some((x) => x.protocol === 'https'), true);
+    assert.equal(normalized.some((x) => x.protocol === 'socks4'), true);
     assert.equal(normalized.some((x) => x.protocol === 'socks5'), true);
 });
 
@@ -111,6 +113,26 @@ test('fetchSourceTask should support line-based source format and protocol fallb
     assert.equal(result.normalized, 2);
     assert.equal(result.proxies.some((x) => x.ip === '66.42.59.155' && x.protocol === 'socks5'), true);
     assert.equal(result.proxies.some((x) => x.ip === '1.1.1.1' && x.protocol === 'socks5'), true);
+});
+
+test('fetchSourceTask should accept socks4 protocol when allowed', async () => {
+    const result = await fetchSourceTask({
+        url: 'https://example.com/socks4.txt',
+        allowedProtocols: ['socks4'],
+        sourceFormat: 'line',
+        defaultProtocol: 'socks4',
+    }, {
+        fetchImpl: async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return '4.4.4.4:4145\n5.5.5.5:1080';
+            },
+        }),
+    });
+
+    assert.equal(result.normalized, 2);
+    assert.equal(result.proxies.every((item) => item.protocol === 'socks4'), true);
 });
 
 test('fetchSourceTask should fallback to line parsing in auto mode and reject invalid json mode', async () => {
