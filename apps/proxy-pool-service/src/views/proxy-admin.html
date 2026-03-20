@@ -30,6 +30,9 @@
     .card { background: linear-gradient(180deg, var(--panel), var(--panel2)); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-height: 180px; }
     .card h2 { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 15px; color: #c9d9f8; }
     .card .content { padding: 12px 14px; max-height: 360px; overflow: auto; }
+    .wide-section { padding: 0 14px 14px; }
+    .wide-card { min-height: 0; }
+    .wide-card .content { max-height: 520px; }
     .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
     .stat .k { font-size: 12px; color: var(--muted); }
@@ -37,6 +40,7 @@
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { border-bottom: 1px solid var(--line); padding: 6px 4px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
+    th[title] { cursor: help; text-decoration: underline dotted rgba(158, 177, 216, 0.7); text-underline-offset: 2px; }
     .ok { color: var(--ok); }
     .warn { color: var(--warn); }
     .bad { color: var(--bad); }
@@ -67,10 +71,16 @@
 
     <section class="card"><h2>荣誉墙</h2><div class="content"><table id="honorTable"></table></div></section>
     <section class="card"><h2>退伍台账</h2><div class="content"><table id="retireTable"></table></div></section>
-    <section class="card"><h2>IP价值榜（前30）</h2><div class="content"><table id="valueTable"></table></div></section>
     <section class="card"><h2>事件流</h2><div class="content"><table id="eventTable"></table></div></section>
     <section class="card"><h2>代理明细（前50）</h2><div class="content"><table id="proxyTable"></table></div></section>
   </main>
+
+  <section class="wide-section">
+    <section class="card wide-card">
+      <h2>IP价值榜（前100）</h2>
+      <div class="content"><table id="valueBoardTable"></table></div>
+    </section>
+  </section>
 
   <footer><div>状态颜色：<span class="ok">正常</span> / <span class="warn">告警</span> / <span class="bad">异常</span></div></footer>
 
@@ -80,12 +90,47 @@ const poolStats = document.getElementById('poolStats');
 const distributions = document.getElementById('distributions');
 const honorTable = document.getElementById('honorTable');
 const retireTable = document.getElementById('retireTable');
-const valueTable = document.getElementById('valueTable');
+const valueBoardTable = document.getElementById('valueBoardTable');
 const eventTable = document.getElementById('eventTable');
 const proxyTable = document.getElementById('proxyTable');
 
+const FALLBACK_RANK_ORDER = ['新兵', '列兵', '士官', '尉官', '校官', '将官', '王牌'];
+
 function fmt(n) { return n == null ? '-' : n; }
 function esc(v) { return String(v == null ? '-' : v).replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]; }); }
+function fmtPercent(ratio) { return fmt(Number((Number(ratio || 0) * 100).toFixed(1))) + '%'; }
+function fmtScore(value) { return fmt(Number(value || 0).toFixed(2)); }
+function fmtLocalTime(iso) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '-';
+  return new Date(ms).toLocaleString('zh-CN', { hour12: false });
+}
+function buildRankHelp(ranks) {
+  const order = Array.isArray(ranks)
+    ? ranks.map(function(item){ return item && item.rank; }).filter(Boolean)
+    : [];
+  const finalOrder = order.length > 0 ? order : FALLBACK_RANK_ORDER;
+  return '这是当前军衔等级。系统一共' + finalOrder.length + '个军衔，顺序是：' + finalOrder.join(' -> ') + '。越靠后通常代表综合表现越强。';
+}
+function getValueBoardHeaders(rankHelp) {
+  return [
+    { label: '排名', help: '按价值分从高到低排的名次，1就是当前最有价值的IP。' },
+    { label: '姓名', help: '这个IP的显示名称，方便在日志和榜单里快速识别。' },
+    { label: '军衔', help: rankHelp },
+    { label: '价值分', help: '这是0到100的综合分，分数越高说明这个IP越值得优先使用。' },
+    { label: '生命周期', help: '这个IP现在处于哪个阶段（候选/在役/预备/退役），决定它会不会被优先调度。' },
+    { label: '成功率', help: '历史成功次数除以总样本数，反映总体能不能跑通。' },
+    { label: '战场胜率', help: '战场测试里成功次数除以战场总次数，反映真实战场好不好用。' },
+    { label: '激活荣誉', help: '当前生效中的荣誉标签，代表这个IP最近在某些维度表现突出。' },
+    { label: '地址', help: 'IP、端口和协议组合地址，排障和复现问题时最直接。' },
+    { label: '来源', help: '这个IP来自哪个抓取源，可用来判断源质量。' },
+    { label: '更新时间', help: '这条记录最近一次被系统更新的时间，页面按本地时间显示。' },
+    { label: '战功', help: '累计战斗积分，成功会加分，失败会扣分。' },
+    { label: '健康', help: '稳定性评分，越高越稳，频繁超时或失败会下降。' },
+    { label: '纪律', help: '合规与可控评分，异常反馈或违规信号会拉低。' },
+    { label: '样本', help: '参与统计的总次数，样本越多，评分越可信。' },
+  ];
+}
 
 function renderPool(status) {
   const high = Math.max(20, status.workersTotal * 8);
@@ -126,7 +171,15 @@ function renderDistributions(snapshot) {
 }
 
 function renderSimpleTable(el, headers, rows) {
-  el.innerHTML = '<thead><tr>' + headers.map(function(h){return '<th>' + h + '</th>';}).join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody>';
+  const headerHtml = headers.map(function(h){
+    if (typeof h === 'string') {
+      return '<th>' + esc(h) + '</th>';
+    }
+    const label = esc(h && h.label ? h.label : '-');
+    const tip = h && h.help ? ' title="' + esc(h.help) + '"' : '';
+    return '<th' + tip + '>' + label + '</th>';
+  }).join('');
+  el.innerHTML = '<thead><tr>' + headerHtml + '</tr></thead><tbody>' + rows.join('') + '</tbody>';
 }
 
 async function loadAll() {
@@ -135,12 +188,20 @@ async function loadAll() {
     fetch('/v1/proxies/ranks/board').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/honors?limit=30').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/retirements?limit=30').then(function(r){ return r.json(); }),
-    fetch('/v1/proxies/value-board?limit=30').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/value-board?limit=100').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/policy').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/events?limit=50').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/list?limit=50').then(function(r){ return r.json(); }),
   ]);
 
-  const pool = data[0], ranks = data[1], honors = data[2], retires = data[3], values = data[4], events = data[5], proxies = data[6];
+  const pool = data[0];
+  const ranks = data[1];
+  const honors = data[2];
+  const retires = data[3];
+  const values = data[4];
+  const policyPayload = data[5];
+  const events = data[6];
+  const proxies = data[7];
   renderPool(pool.poolStatus);
   renderDistributions({ sourceDistribution: pool.sourceDistribution, lifecycleDistribution: pool.lifecycleDistribution, rankBoard: ranks.items });
 
@@ -152,8 +213,29 @@ async function loadAll() {
     return '<tr><td class="mono">' + esc(x.retired_at) + '</td><td>' + esc(x.display_name) + '</td><td class="warn">' + esc(x.retired_type) + '</td><td>' + esc(x.reason || '-') + '</td></tr>';
   }));
 
-  renderSimpleTable(valueTable, ['代理', '价值分', '军衔', '生命周期', '成功率', '战场胜率', '激活荣誉'], (values.items || []).map(function(x){
-    return '<tr><td>' + esc(x.display_name) + '</td><td class="ok">' + fmt(Number(x.ip_value_score || 0).toFixed(2)) + '</td><td>' + esc(x.rank) + '</td><td>' + esc(x.lifecycle) + '</td><td>' + fmt(Number((x.success_ratio || 0) * 100).toFixed(1)) + '%</td><td>' + fmt(Number((x.battle_ratio || 0) * 100).toFixed(1)) + '%</td><td>' + esc((x.honor_active || []).join(', ') || '-') + '</td></tr>';
+  const rankHelp = buildRankHelp(policyPayload && policyPayload.policy && policyPayload.policy.ranks);
+  renderSimpleTable(valueBoardTable, getValueBoardHeaders(rankHelp), (values.items || []).map(function(x, index){
+    const honorText = (x.honor_active || []).join('，') || '-';
+    const address = x.ip ? (x.ip + ':' + x.port + '/' + x.protocol) : '-';
+    const updatedUtc = x.updated_at || '-';
+    return ''
+      + '<tr>'
+      + '<td>' + (index + 1) + '</td>'
+      + '<td>' + esc(x.display_name) + '</td>'
+      + '<td>' + esc(x.rank) + '</td>'
+      + '<td class="ok">' + fmtScore(x.ip_value_score) + '</td>'
+      + '<td>' + esc(x.lifecycle) + '</td>'
+      + '<td>' + fmtPercent(x.success_ratio) + '</td>'
+      + '<td>' + fmtPercent(x.battle_ratio) + '</td>'
+      + '<td>' + esc(honorText) + '</td>'
+      + '<td class="mono">' + esc(address) + '</td>'
+      + '<td>' + esc(x.source) + '</td>'
+      + '<td class="mono" title="UTC: ' + esc(updatedUtc) + '">' + esc(fmtLocalTime(x.updated_at)) + '</td>'
+      + '<td>' + fmt(x.combat_points) + '</td>'
+      + '<td>' + fmt(x.health_score) + '</td>'
+      + '<td>' + fmt(x.discipline_score) + '</td>'
+      + '<td>' + fmt(x.total_samples) + '</td>'
+      + '</tr>';
   }));
 
   renderSimpleTable(eventTable, ['时间', '类型', '代理', '消息'], (events.items || []).map(function(x){
