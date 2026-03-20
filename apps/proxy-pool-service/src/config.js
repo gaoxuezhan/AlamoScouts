@@ -339,9 +339,11 @@ module.exports = {
     },
     source: {
         monosans: {
-            name: 'monosans/proxy-list',
-            url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json',
-            enabled: true,
+            name: process.env.PROXY_HUB_SOURCE_NAME || 'monosans/proxy-list',
+            url: process.env.PROXY_HUB_SOURCE_URL || 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json',
+            enabled: toBool(process.env.PROXY_HUB_SOURCE_ENABLED, true),
+            defaultProtocol: String(process.env.PROXY_HUB_SOURCE_DEFAULT_PROTOCOL || 'http').toLowerCase(),
+            sourceFormat: String(process.env.PROXY_HUB_SOURCE_FORMAT || 'json').toLowerCase(),
         },
     },
     validation: {

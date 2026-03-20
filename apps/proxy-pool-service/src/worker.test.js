@@ -82,6 +82,71 @@ test('fetchSourceTask should parse proxies and throw on non-ok response', async 
     );
 });
 
+test('fetchSourceTask should support line-based source format and protocol fallback', async () => {
+    const payload = {
+        url: 'https://example.com/socks5.txt',
+        allowedProtocols: ['http', 'socks5'],
+        sourceFormat: 'line',
+        defaultProtocol: 'socks5',
+    };
+
+    const result = await fetchSourceTask(payload, {
+        fetchImpl: async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return [
+                    '66.42.59.155:443',
+                    'socks5://1.1.1.1:1080',
+                    'http://%%:8080',
+                    '10.0.0.1:abc',
+                    'bad-line',
+                    '# comment',
+                ].join('\n');
+            },
+        }),
+    });
+
+    assert.equal(result.fetched, 5);
+    assert.equal(result.normalized, 2);
+    assert.equal(result.proxies.some((x) => x.ip === '66.42.59.155' && x.protocol === 'socks5'), true);
+    assert.equal(result.proxies.some((x) => x.ip === '1.1.1.1' && x.protocol === 'socks5'), true);
+});
+
+test('fetchSourceTask should fallback to line parsing in auto mode and reject invalid json mode', async () => {
+    const autoResult = await fetchSourceTask({
+        url: 'https://example.com/http.txt',
+        allowedProtocols: ['http'],
+        sourceFormat: 'auto',
+        defaultProtocol: 'http',
+    }, {
+        fetchImpl: async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return '8.8.8.8:8080\n9.9.9.9:9090';
+            },
+        }),
+    });
+    assert.equal(autoResult.normalized, 2);
+
+    await assert.rejects(
+        () => fetchSourceTask({
+            url: 'https://example.com/not-json',
+            sourceFormat: 'json',
+        }, {
+            fetchImpl: async () => ({
+                ok: true,
+                status: 200,
+                async text() {
+                    return 'not-json';
+                },
+            }),
+        }),
+        /source-json-invalid/,
+    );
+});
+
 function createFakeSocket() {
     const socket = new EventEmitter();
     socket.destroyed = false;

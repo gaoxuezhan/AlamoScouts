@@ -313,6 +313,8 @@ class ProxyHubEngine extends EventEmitter {
                 url: sourceConfig.url,
                 timeoutMs: 20_000,
                 allowedProtocols: this.config.validation.allowedProtocols,
+                defaultProtocol: sourceConfig.defaultProtocol,
+                sourceFormat: sourceConfig.sourceFormat,
             });
 
             const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

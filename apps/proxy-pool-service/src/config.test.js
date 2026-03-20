@@ -26,6 +26,11 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_FAILURE_BACKOFF_L2_MS',
         'PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER',
         'PROXY_HUB_FAILURE_BACKOFF_MAX_MS',
+        'PROXY_HUB_SOURCE_NAME',
+        'PROXY_HUB_SOURCE_URL',
+        'PROXY_HUB_SOURCE_ENABLED',
+        'PROXY_HUB_SOURCE_DEFAULT_PROTOCOL',
+        'PROXY_HUB_SOURCE_FORMAT',
         ...Object.keys(overrides),
     ]);
     const originals = {};
@@ -90,6 +95,22 @@ test('config should support env override for L2 primary target', { concurrency: 
         PROXY_HUB_BATTLE_L2_PRIMARY_URL: 'https://example.com/l2-primary',
     });
     assert.equal(config.battle.targets.l2Primary[0].url, 'https://example.com/l2-primary');
+});
+
+test('config should support source override for line-based lists', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_SOURCE_NAME: 'TheSpeedX/PROXY-List',
+        PROXY_HUB_SOURCE_URL: 'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt',
+        PROXY_HUB_SOURCE_ENABLED: 'true',
+        PROXY_HUB_SOURCE_DEFAULT_PROTOCOL: 'socks5',
+        PROXY_HUB_SOURCE_FORMAT: 'line',
+    });
+
+    assert.equal(config.source.monosans.name, 'TheSpeedX/PROXY-List');
+    assert.equal(config.source.monosans.url.includes('/socks5.txt'), true);
+    assert.equal(config.source.monosans.enabled, true);
+    assert.equal(config.source.monosans.defaultProtocol, 'socks5');
+    assert.equal(config.source.monosans.sourceFormat, 'line');
 });
 
 test('config should parse rollout feature bool env values', { concurrency: false }, () => {
