@@ -1108,8 +1108,10 @@ class ProxyHubDb {
                 WHEN '列兵' THEN 2
                 WHEN '士官' THEN 3
                 WHEN '尉官' THEN 4
-                WHEN '王牌' THEN 5
-                ELSE 6 END
+                WHEN '校官' THEN 5
+                WHEN '将官' THEN 6
+                WHEN '王牌' THEN 7
+                ELSE 8 END
         `).all();
     }
 
