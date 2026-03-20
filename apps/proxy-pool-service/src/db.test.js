@@ -273,6 +273,43 @@ test('query list APIs should support filters and distributions', () => {
     cleanup(h);
 });
 
+test('getRankBoard should keep 校官 and 将官 in canonical order', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+    const rankOrder = ['新兵', '列兵', '士官', '尉官', '校官', '将官', '王牌'];
+
+    h.db.upsertSourceBatch(
+        rankOrder.map((_, index) => ({
+            ip: `15.15.15.${index + 1}`,
+            port: 80,
+            protocol: 'http',
+        })),
+        (() => {
+            let i = 0;
+            return () => `军衔序-${++i}`;
+        })(),
+        'src-rank-board',
+        'batch-rank-board',
+        now,
+    );
+
+    const proxies = h.db.getProxyList({ limit: 20 });
+    for (let i = 0; i < rankOrder.length; i += 1) {
+        h.db.updateProxyById(proxies[i].id, {
+            rank: rankOrder[i],
+            updated_at: new Date(Date.parse(now) + i * 1000).toISOString(),
+        });
+    }
+
+    const board = h.db.getRankBoard();
+    const filtered = board
+        .map((item) => item.rank)
+        .filter((rank) => rankOrder.includes(rank));
+    assert.deepEqual(filtered, rankOrder);
+
+    cleanup(h);
+});
+
 test('value board API should sort by value and parse breakdown and honor fields', () => {
     const h = createDb();
     const now = new Date().toISOString();
