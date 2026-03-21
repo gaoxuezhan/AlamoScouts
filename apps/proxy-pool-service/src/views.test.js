@@ -26,14 +26,20 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes("esc(serviceBranch) + '</td>'"), true);
     assert.equal(html.includes("const nativeTip = nativePlace === '未知'"), true);
     assert.equal(html.includes("'<td title=\"' + esc(nativeTip) + '\">' + esc(nativePlace) + '</td>'"), true);
-    assert.equal(html.includes("label: 'L0(成功/失败)'"), true);
-    assert.equal(html.includes("label: 'L1(成功/失败)'"), true);
-    assert.equal(html.includes("label: 'L2(成功/失败)'"), true);
-    assert.equal(html.includes("label: 'L3(成功/失败)'"), true);
-    assert.equal(html.includes("fmt(x.l0_success_count) + '/' + fmt(x.l0_fail_count)"), true);
-    assert.equal(html.includes("fmt(x.l1_success_count) + '/' + fmt(x.l1_fail_count)"), true);
-    assert.equal(html.includes("fmt(x.l2_success_count) + '/' + fmt(x.l2_fail_count)"), true);
-    assert.equal(html.includes("fmt(x.l3_success_count) + '/' + fmt(x.l3_fail_count)"), true);
+    assert.equal(html.includes("label: 'L0'"), true);
+    assert.equal(html.includes("label: 'L1'"), true);
+    assert.equal(html.includes("label: 'L2'"), true);
+    assert.equal(html.includes("label: 'L3'"), true);
+    assert.equal(html.includes("help: 'L0'"), true);
+    assert.equal(html.includes("help: 'L1'"), true);
+    assert.equal(html.includes("help: 'L2'"), true);
+    assert.equal(html.includes("help: 'L3'"), true);
+    assert.equal(html.includes('function fmtSuccessTotalPercent(success, total)'), true);
+    assert.equal(html.includes("toFixed(1)"), true);
+    assert.equal(html.includes("fmtSuccessTotalPercent(x.l0_success_count, l0Total)"), true);
+    assert.equal(html.includes("fmtSuccessTotalPercent(x.l1_success_count, l1Total)"), true);
+    assert.equal(html.includes("fmtSuccessTotalPercent(x.l2_success_count, l2Total)"), true);
+    assert.equal(html.includes("fmtSuccessTotalPercent(x.l3_success_count, l3Total)"), true);
 });
 
 test('renderRuntimeLogsPage should return static html', () => {
