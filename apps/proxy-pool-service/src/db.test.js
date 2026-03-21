@@ -362,6 +362,7 @@ test('excludeRetired filters should apply to boards, lists and distributions; re
     assert.equal(camp.find((x) => x.lifecycle === 'active')?.count, 1);
     assert.equal(camp.find((x) => x.lifecycle === 'reserve')?.count, 1);
     assert.equal(camp.find((x) => x.lifecycle === 'candidate')?.count, 1);
+    assert.equal(camp.find((x) => x.lifecycle === 'retired')?.count, 1);
 
     cleanup(h);
 });
@@ -702,6 +703,49 @@ test('snapshot retention should cleanup by timestamp when retentionDays is posit
     const latest = h.db.getLatestSnapshot();
     assert.equal(count, 1);
     assert.equal(latest.workers_busy, 1);
+
+    cleanup(h);
+});
+
+test('snapshot retention should fallback to Date.now when snapshot timestamp is invalid', () => {
+    const h = createDb({ snapshotRetentionDays: 1 });
+    const now = Date.parse('2026-03-20T12:00:00.000Z');
+    const oldNow = Date.now;
+    Date.now = () => now;
+
+    try {
+        h.db.insertPoolSnapshot({
+            timestamp: new Date(now - 2 * 24 * 3600 * 1000).toISOString(),
+            workers_total: 6,
+            workers_busy: 0,
+            queue_size: 0,
+            completed_tasks: 1,
+            failed_tasks: 0,
+            restarted_workers: 0,
+            source_distribution: [{ source: 'old', count: 1 }],
+            rank_distribution: [{ rank: '新兵', count: 1 }],
+            lifecycle_distribution: [{ lifecycle: 'candidate', count: 1 }],
+        });
+        h.db.insertPoolSnapshot({
+            timestamp: 'invalid-timestamp',
+            workers_total: 6,
+            workers_busy: 1,
+            queue_size: 0,
+            completed_tasks: 2,
+            failed_tasks: 0,
+            restarted_workers: 0,
+            source_distribution: [{ source: 'new', count: 1 }],
+            rank_distribution: [{ rank: '列兵', count: 1 }],
+            lifecycle_distribution: [{ lifecycle: 'active', count: 1 }],
+        });
+    } finally {
+        Date.now = oldNow;
+    }
+
+    const count = h.db.db.prepare('SELECT COUNT(*) AS c FROM pool_snapshots').get().c;
+    const latest = h.db.getLatestSnapshot();
+    assert.equal(count, 1);
+    assert.equal(latest.timestamp, 'invalid-timestamp');
 
     cleanup(h);
 });

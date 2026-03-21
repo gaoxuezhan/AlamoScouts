@@ -11,6 +11,10 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes('IP价值榜（前30）'), false);
     assert.equal(html.includes('/v1/proxies/value-board?limit=100'), true);
     assert.equal(html.includes('/v1/proxies/policy'), true);
+    assert.equal(html.includes('/v1/proxies/recruit-camp'), true);
+    assert.equal(html.includes('retired(已退役)'), true);
+    assert.equal(html.includes('退伍台账'), false);
+    assert.equal(html.includes('代理明细（前50）'), false);
     assert.equal(html.includes('按价值分从高到低排的名次，1就是当前最有价值的IP。'), true);
     assert.equal(html.includes('系统一共'), true);
 });
