@@ -1064,7 +1064,7 @@ class ProxyHubDb {
     }
 
     // 0187_getProxyList_获取代理列表逻辑
-    getProxyList({ limit = 200, rank, lifecycle } = {}) {
+    getProxyList({ limit = 200, rank, lifecycle, excludeRetired = false } = {}) {
         const clauses = [];
         const params = {};
 
@@ -1075,6 +1075,9 @@ class ProxyHubDb {
         if (lifecycle) {
             clauses.push('lifecycle = @lifecycle');
             params.lifecycle = lifecycle;
+        }
+        if (excludeRetired) {
+            clauses.push("lifecycle != 'retired'");
         }
 
         const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -1095,13 +1098,16 @@ class ProxyHubDb {
     }
 
     // 0017_getRankBoard_获取军衔看板逻辑
-    getRankBoard() {
+    getRankBoard(options = {}) {
+        const excludeRetired = options.excludeRetired === true;
+        const where = excludeRetired ? "WHERE lifecycle != 'retired'" : '';
         return this.db.prepare(`
             SELECT rank, COUNT(*) AS count,
                 ROUND(AVG(health_score), 2) AS avgHealth,
                 ROUND(AVG(combat_points), 2) AS avgCombat,
                 ROUND(AVG(ip_value_score), 2) AS avgValue
             FROM proxies
+            ${where}
             GROUP BY rank
             ORDER BY CASE rank
                 WHEN '新兵' THEN 1
@@ -1116,13 +1122,17 @@ class ProxyHubDb {
     }
 
     // 0197_getValueBoard_获取价值榜逻辑
-    getValueBoard(limit = 100, lifecycle) {
+    getValueBoard(limit = 100, lifecycle, options = {}) {
         const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
         const clauses = [];
         const params = { limit: safeLimit };
+        const excludeRetired = options.excludeRetired === true;
         if (lifecycle) {
             clauses.push('lifecycle = @lifecycle');
             params.lifecycle = String(lifecycle);
+        }
+        if (excludeRetired) {
+            clauses.push("lifecycle != 'retired'");
         }
 
         const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -1152,6 +1162,32 @@ class ProxyHubDb {
                     : 0,
             };
         });
+    }
+
+    // 0268_getRecruitCampBoard_获取新兵训练营分布逻辑
+    getRecruitCampBoard() {
+        const rows = this.db.prepare(`
+            SELECT lifecycle, COUNT(*) AS count
+            FROM proxies
+            WHERE rank = '新兵'
+              AND lifecycle IN ('active', 'reserve', 'candidate')
+            GROUP BY lifecycle
+        `).all();
+
+        const counters = {
+            active: 0,
+            reserve: 0,
+            candidate: 0,
+        };
+        for (const row of rows) {
+            counters[row.lifecycle] = Number(row.count) || 0;
+        }
+
+        return [
+            { lifecycle: 'active', label: '新兵连', count: counters.active },
+            { lifecycle: 'reserve', label: '医务室', count: counters.reserve },
+            { lifecycle: 'candidate', label: '预备队', count: counters.candidate },
+        ];
     }
 
     // 0188_getHonors_获取荣誉逻辑
@@ -1289,20 +1325,26 @@ class ProxyHubDb {
     }
 
     // 0018_getSourceDistribution_获取来源分布逻辑
-    getSourceDistribution() {
+    getSourceDistribution(options = {}) {
+        const excludeRetired = options.excludeRetired === true;
+        const where = excludeRetired ? "WHERE lifecycle != 'retired'" : '';
         return this.db.prepare(`
             SELECT source, COUNT(*) AS count
             FROM proxies
+            ${where}
             GROUP BY source
             ORDER BY count DESC
         `).all();
     }
 
     // 0019_getLifecycleDistribution_获取分布逻辑
-    getLifecycleDistribution() {
+    getLifecycleDistribution(options = {}) {
+        const excludeRetired = options.excludeRetired === true;
+        const where = excludeRetired ? "WHERE lifecycle != 'retired'" : '';
         return this.db.prepare(`
             SELECT lifecycle, COUNT(*) AS count
             FROM proxies
+            ${where}
             GROUP BY lifecycle
         `).all();
     }

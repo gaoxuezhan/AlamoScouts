@@ -124,6 +124,11 @@ function createStubs() {
         getBattleTestRuns: () => [{ id: 6, stage: 'l1' }],
         getValueBoard: () => [{ id: 7, ip_value_score: 88.8 }],
         getRankBoard: () => [{ rank: '新兵', count: 1 }],
+        getRecruitCampBoard: () => [
+            { lifecycle: 'active', label: '新兵连', count: 1 },
+            { lifecycle: 'reserve', label: '医务室', count: 0 },
+            { lifecycle: 'candidate', label: '预备队', count: 2 },
+        ],
         getHonors: () => [{ id: 3 }],
         getRetirements: () => [{ id: 4 }],
         getActiveCount: () => 60,
@@ -243,6 +248,7 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/rollout/orchestrator/events',
         '/v1/proxies/candidate-control',
         '/v1/proxies/ranks/board',
+        '/v1/proxies/recruit-camp',
         '/v1/proxies/honors?limit=1000',
         '/v1/proxies/retirements?limit=-1',
         '/v1/runtime/logs?limit=abc',
@@ -374,6 +380,80 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(stubs.state.dbClosed, true);
     assert.equal(stubs.state.poolClosed, true);
     assert.equal(stubs.state.engineStopped, true);
+});
+
+test('excludeRetired flag should be forwarded to admin stats endpoints', async () => {
+    const stubs = createStubs();
+    const calls = {
+        source: [],
+        lifecycle: [],
+        rank: [],
+        list: [],
+        value: [],
+    };
+
+    stubs.db.getSourceDistribution = (options) => {
+        calls.source.push(options);
+        return [{ source: 'filtered-source', count: 1 }];
+    };
+    stubs.db.getLifecycleDistribution = (options) => {
+        calls.lifecycle.push(options);
+        return [{ lifecycle: 'active', count: 1 }];
+    };
+    stubs.db.getLatestSnapshot = () => ({
+        workers_total: 2,
+        source_distribution: [{ source: 'legacy-source', count: 9 }],
+        rank_distribution: [{ rank: '新兵', count: 9 }],
+        lifecycle_distribution: [{ lifecycle: 'retired', count: 9 }],
+    });
+    stubs.db.getRankBoard = (options) => {
+        calls.rank.push(options);
+        return [{ rank: '新兵', count: 1 }];
+    };
+    stubs.db.getProxyList = (options) => {
+        calls.list.push(options);
+        return [];
+    };
+    stubs.db.getValueBoard = (limit, lifecycle, options) => {
+        calls.value.push({ limit, lifecycle, options });
+        return [];
+    };
+    stubs.db.getRecruitCampBoard = () => [
+        { lifecycle: 'active', label: '新兵连', count: 1 },
+        { lifecycle: 'reserve', label: '医务室', count: 2 },
+        { lifecycle: 'candidate', label: '预备队', count: 3 },
+    ];
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+    try {
+        const poolStatusRes = await fetch(baseUrl + '/v1/proxies/pool-status?excludeRetired=true');
+        const poolStatus = await poolStatusRes.json();
+        await fetch(baseUrl + '/v1/proxies/ranks/board?excludeRetired=true');
+        await fetch(baseUrl + '/v1/proxies/list?limit=20&excludeRetired=true');
+        await fetch(baseUrl + '/v1/proxies/value-board?limit=20&excludeRetired=true');
+        await fetch(baseUrl + '/v1/proxies/list?limit=20&excludeRetired=off');
+        await fetch(baseUrl + '/v1/proxies/list?limit=20&excludeRetired=not-bool');
+        const campRes = await fetch(baseUrl + '/v1/proxies/recruit-camp');
+        const camp = await campRes.json();
+
+        assert.equal(calls.source.at(-1).excludeRetired, true);
+        assert.equal(calls.lifecycle.at(-1).excludeRetired, true);
+        assert.equal(calls.rank.at(-2).excludeRetired, true);
+        assert.equal(calls.list.at(-3).excludeRetired, true);
+        assert.equal(calls.list.at(-2).excludeRetired, false);
+        assert.equal(calls.list.at(-1).excludeRetired, false);
+        assert.equal(calls.value.at(-1).options.excludeRetired, true);
+        assert.deepEqual(poolStatus.latestSnapshot.source_distribution, [{ source: 'filtered-source', count: 1 }]);
+        assert.deepEqual(poolStatus.latestSnapshot.rank_distribution, [{ rank: '新兵', count: 1 }]);
+        assert.deepEqual(poolStatus.latestSnapshot.lifecycle_distribution, [{ lifecycle: 'active', count: 1 }]);
+        assert.equal(camp.items.length, 3);
+        assert.equal(camp.items[0].lifecycle, 'active');
+
+        await fetch(baseUrl + '/v1/proxies/ranks/board');
+        assert.equal(calls.rank.at(-1).excludeRetired, false);
+    } finally {
+        await runtime.shutdown('TEST-EXCLUDE-RETIRED');
+    }
 });
 
 test('rollout rollback endpoint should skip apply when guardrails are healthy', async () => {

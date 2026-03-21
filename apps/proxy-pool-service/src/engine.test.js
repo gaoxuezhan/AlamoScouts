@@ -282,6 +282,7 @@ test('engine utility functions should cover helper branches', async () => {
 
 test('engine start/stop should be idempotent and persist snapshot', async () => {
     const h = createDbHandle();
+    h.config.storage.snapshotRetentionDays = 0;
     const logger = createLogger();
 
     const workerPool = {

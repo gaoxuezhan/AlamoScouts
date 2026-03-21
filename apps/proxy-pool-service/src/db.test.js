@@ -310,6 +310,62 @@ test('getRankBoard should keep 校官 and 将官 in canonical order', () => {
     cleanup(h);
 });
 
+test('excludeRetired filters should apply to boards, lists and distributions; recruit camp should split new recruits', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [
+            { ip: '31.0.0.1', port: 80, protocol: 'http' },
+            { ip: '31.0.0.2', port: 80, protocol: 'http' },
+            { ip: '31.0.0.3', port: 80, protocol: 'http' },
+            { ip: '31.0.0.4', port: 80, protocol: 'http' },
+            { ip: '31.0.0.5', port: 80, protocol: 'http' },
+        ],
+        (() => {
+            let i = 0;
+            return () => `训练营-${++i}`;
+        })(),
+        'src-camp',
+        'batch-camp',
+        now,
+    );
+
+    const proxies = h.db.getProxyList({ limit: 20 });
+    h.db.updateProxyById(proxies[0].id, { rank: '新兵', lifecycle: 'active', updated_at: now });
+    h.db.updateProxyById(proxies[1].id, { rank: '新兵', lifecycle: 'reserve', updated_at: now });
+    h.db.updateProxyById(proxies[2].id, { rank: '新兵', lifecycle: 'candidate', updated_at: now });
+    h.db.updateProxyById(proxies[3].id, { rank: '新兵', lifecycle: 'retired', updated_at: now });
+    h.db.updateProxyById(proxies[4].id, { rank: '士官', lifecycle: 'retired', updated_at: now });
+
+    const rankBoardAll = h.db.getRankBoard();
+    const rankBoardFiltered = h.db.getRankBoard({ excludeRetired: true });
+    const rankAllNewbie = rankBoardAll.find((x) => x.rank === '新兵')?.count || 0;
+    const rankFilteredNewbie = rankBoardFiltered.find((x) => x.rank === '新兵')?.count || 0;
+    assert.equal(rankAllNewbie, 4);
+    assert.equal(rankFilteredNewbie, 3);
+    assert.equal(rankBoardFiltered.some((x) => x.rank === '士官'), false);
+
+    const lifecycleFiltered = h.db.getLifecycleDistribution({ excludeRetired: true });
+    assert.equal(lifecycleFiltered.some((x) => x.lifecycle === 'retired'), false);
+
+    const sourceFiltered = h.db.getSourceDistribution({ excludeRetired: true });
+    assert.equal(sourceFiltered.length >= 1, true);
+
+    const listFiltered = h.db.getProxyList({ limit: 20, excludeRetired: true });
+    assert.equal(listFiltered.some((x) => x.lifecycle === 'retired'), false);
+
+    const valueFiltered = h.db.getValueBoard(20, undefined, { excludeRetired: true });
+    assert.equal(valueFiltered.some((x) => x.lifecycle === 'retired'), false);
+
+    const camp = h.db.getRecruitCampBoard();
+    assert.equal(camp.find((x) => x.lifecycle === 'active')?.count, 1);
+    assert.equal(camp.find((x) => x.lifecycle === 'reserve')?.count, 1);
+    assert.equal(camp.find((x) => x.lifecycle === 'candidate')?.count, 1);
+
+    cleanup(h);
+});
+
 test('value board API should sort by value and parse breakdown and honor fields', () => {
     const h = createDb();
     const now = new Date().toISOString();
