@@ -561,6 +561,10 @@ test('runSourceCycle should fetch multiple active feeds and validate once', asyn
     assert.equal(proxies.length, 3);
     assert.equal(validateCalls, 3);
     assert.equal(proxies.some((item) => item.protocol === 'socks4'), true);
+    assert.equal(proxies.some((item) => item.source === 'TheSpeedX/http'), true);
+    assert.equal(proxies.some((item) => item.source === 'TheSpeedX/socks4'), true);
+    assert.equal(proxies.some((item) => item.source === 'TheSpeedX/socks5'), true);
+    assert.equal(proxies.some((item) => item.source === 'speedx_bundle'), false);
     assert.equal(logger.entries.some((entry) => entry.event === '抓源成功' && entry.ipSource === 'TheSpeedX/socks4'), true);
     assert.equal(logger.entries.some((entry) => entry.event === '等待下一轮' && entry.ipSource === 'speedx_bundle'), true);
 

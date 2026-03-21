@@ -530,7 +530,7 @@ class ProxyHubEngine extends EventEmitter {
 
         const concurrency = Math.max(2, Math.min(this.config.threadPool.workers * 2, 20));
         await runWithConcurrency(candidates, concurrency, async (proxy) => {
-            await this.processProxy(proxy, sourceName);
+            await this.processProxy(proxy, proxy.source || sourceName);
         });
     }
 
