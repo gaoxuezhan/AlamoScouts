@@ -65,7 +65,7 @@
     </section>
 
     <section class="card">
-      <h2>来源分布 / 生命周期 / 现役军衔分布 / 新兵训练营</h2>
+      <h2>来源分布 / 生命周期 / 现役军衔分布 / 新兵训练营 / 已退役</h2>
       <div class="content"><div id="distributions"></div></div>
     </section>
 
@@ -160,22 +160,29 @@ function renderDistributions(snapshot) {
   const src = (snapshot.sourceDistribution || []).map(function(x){ return '<span class="pill">' + esc(x.source) + ': ' + x.count + '</span>'; }).join('');
   const life = (snapshot.lifecycleDistribution || []).map(function(x){ return '<span class="pill">' + esc(x.lifecycle) + ': ' + x.count + '</span>'; }).join('');
   const rank = (snapshot.rankBoard || []).map(function(x){ return '<span class="pill">' + esc(x.rank) + ': ' + x.count + '</span>'; }).join('');
-  const recruitMap = { active: 0, reserve: 0, candidate: 0, retired: 0 };
+  const recruitMap = { active: 0, reserve: 0, candidate: 0 };
+  let retiredCount = 0;
   (snapshot.recruitCamp || []).forEach(function(x){
-    if (x && Object.prototype.hasOwnProperty.call(recruitMap, x.lifecycle)) {
+    if (!x) return;
+    if (x.lifecycle === 'retired') {
+      retiredCount = Number(x.count || 0);
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(recruitMap, x.lifecycle)) {
       recruitMap[x.lifecycle] = Number(x.count || 0);
     }
   });
   const recruit = ''
-    + '<span class="pill">active(新兵连): ' + recruitMap.active + '</span>'
-    + '<span class="pill">reserve(医务室): ' + recruitMap.reserve + '</span>'
-    + '<span class="pill">candidate(预备队): ' + recruitMap.candidate + '</span>'
-    + '<span class="pill">retired(已退役): ' + recruitMap.retired + '</span>';
+    + '<span class="pill">新兵连：' + recruitMap.active + '</span>'
+    + '<span class="pill">医务室：' + recruitMap.reserve + '</span>'
+    + '<span class="pill">预备队：' + recruitMap.candidate + '</span>';
+  const retired = '<span class="pill">已退役：' + retiredCount + '</span>';
   distributions.innerHTML = ''
     + '<div><strong>来源分布</strong><div>' + (src || '-') + '</div></div>'
     + '<div style="margin-top:8px"><strong>生命周期</strong><div>' + (life || '-') + '</div></div>'
     + '<div style="margin-top:8px"><strong>现役军衔分布</strong><div>' + (rank || '-') + '</div></div>'
-    + '<div style="margin-top:8px"><strong>新兵训练营</strong><div>' + recruit + '</div></div>';
+    + '<div style="margin-top:8px"><strong>新兵训练营</strong><div>' + recruit + '</div></div>'
+    + '<div style="margin-top:8px"><strong>已退役</strong><div>' + retired + '</div></div>';
 }
 
 function renderSimpleTable(el, headers, rows) {
