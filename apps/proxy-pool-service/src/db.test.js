@@ -362,7 +362,7 @@ test('excludeRetired filters should apply to boards, lists and distributions; re
     assert.equal(camp.find((x) => x.lifecycle === 'active')?.count, 1);
     assert.equal(camp.find((x) => x.lifecycle === 'reserve')?.count, 1);
     assert.equal(camp.find((x) => x.lifecycle === 'candidate')?.count, 1);
-    assert.equal(camp.find((x) => x.lifecycle === 'retired')?.count, 1);
+    assert.equal(camp.find((x) => x.lifecycle === 'retired')?.count, 2);
 
     cleanup(h);
 });
