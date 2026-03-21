@@ -195,6 +195,217 @@ function resolveSourceFeeds(config = {}) {
     return [];
 }
 
+const DEFAULT_BRANCH_FAIL_OUTCOMES = ['blocked', 'timeout', 'network_error', 'invalid_feedback'];
+const DEFAULT_BRANCHING_RULES = [
+    {
+        id: 'l2_promote_navy',
+        priority: 10,
+        stage: 'l2',
+        outcomes: ['success'],
+        from: ['陆军'],
+        to: '海军',
+        failStreakOp: 'reset',
+        eventType: 'branch_transfer',
+    },
+    {
+        id: 'l2_reset_navy_streak',
+        priority: 20,
+        stage: 'l2',
+        outcomes: ['success'],
+        from: ['海军'],
+        failStreakOp: 'reset',
+        eventType: 'branch_streak_reset',
+    },
+    {
+        id: 'l2_fail_navy_fallback',
+        priority: 30,
+        stage: 'l2',
+        outcomes: DEFAULT_BRANCH_FAIL_OUTCOMES,
+        from: ['海军'],
+        failStreakOp: 'increment',
+        fallbackAt: 3,
+        fallbackTo: '陆军',
+        eventType: 'branch_fallback',
+    },
+    {
+        id: 'l3_promote_seal',
+        priority: 40,
+        stage: 'l3',
+        outcomes: ['success'],
+        from: ['陆军', '海军', '海豹突击队'],
+        to: '海豹突击队',
+        failStreakOp: 'reset',
+        eventType: 'branch_transfer',
+    },
+    {
+        id: 'l3_fail_seal_fallback',
+        priority: 50,
+        stage: 'l3',
+        outcomes: DEFAULT_BRANCH_FAIL_OUTCOMES,
+        from: ['海豹突击队'],
+        failStreakOp: 'increment',
+        fallbackAt: 3,
+        fallbackTo: '陆军',
+        eventType: 'branch_fallback',
+    },
+];
+
+// 0273_normalizeBranchRuleList_规范化编制规则列表逻辑
+function normalizeBranchRuleList(value, fallback = []) {
+    if (!Array.isArray(value)) {
+        return [...fallback];
+    }
+    const normalized = value
+        .map((item) => String(item || '').trim())
+        .filter((item) => item.length > 0);
+    return normalized.length > 0 ? normalized : [...fallback];
+}
+
+// 0274_readBranchingConfig_读取编制配置逻辑
+function readBranchingConfig(config = {}) {
+    const raw = config.branching || {};
+    const fieldName = String(raw.fieldName || 'service_branch').trim() || 'service_branch';
+    const failStreakField = String(raw.failStreakField || 'branch_fail_streak').trim() || 'branch_fail_streak';
+    const defaultBranch = String(raw.defaultBranch || '陆军').trim() || '陆军';
+    const rawRules = Array.isArray(raw.rules) && raw.rules.length > 0
+        ? raw.rules
+        : DEFAULT_BRANCHING_RULES;
+
+    const rules = rawRules.map((rule, index) => {
+        const normalized = rule && typeof rule === 'object' ? rule : {};
+        const stageList = normalizeBranchRuleList(
+            normalized.stages || [normalized.stage || '*'],
+            ['*'],
+        ).map((item) => item.toLowerCase());
+        const outcomeList = normalizeBranchRuleList(
+            normalized.outcomes || [normalized.outcome || '*'],
+            ['*'],
+        ).map((item) => item.toLowerCase());
+        const fromList = normalizeBranchRuleList(
+            normalized.from || normalized.fromBranches || ['*'],
+            ['*'],
+        );
+        const failStreakOp = ['none', 'reset', 'increment', 'set'].includes(String(normalized.failStreakOp || 'none'))
+            ? String(normalized.failStreakOp || 'none')
+            : 'none';
+        const fallbackAt = Number(normalized.fallbackAt);
+        const failStreakValue = Number(normalized.failStreakValue);
+        return {
+            id: String(normalized.id || `branch_rule_${index + 1}`),
+            priority: Number(normalized.priority) || (index + 1) * 10,
+            stages: stageList,
+            outcomes: outcomeList,
+            from: fromList,
+            to: normalized.to == null ? null : String(normalized.to),
+            failStreakOp,
+            failStreakValue: Number.isFinite(failStreakValue) ? Math.max(0, Math.round(failStreakValue)) : 0,
+            fallbackAt: Number.isFinite(fallbackAt) ? Math.max(1, Math.round(fallbackAt)) : null,
+            fallbackTo: normalized.fallbackTo == null ? null : String(normalized.fallbackTo),
+            eventType: String(normalized.eventType || 'branch_transition'),
+        };
+    }).sort((a, b) => a.priority - b.priority);
+
+    return {
+        enabled: raw.enabled !== false,
+        fieldName,
+        failStreakField,
+        defaultBranch,
+        rules,
+    };
+}
+
+// 0275_resolveBranchingTransition_解析编制流转逻辑
+function resolveBranchingTransition({
+    proxy = {},
+    stage = 'l2',
+    outcome = 'success',
+    config = {},
+} = {}) {
+    const policy = readBranchingConfig(config);
+    if (!policy.enabled) {
+        return { updates: {}, events: [] };
+    }
+
+    const stageText = String(stage || '').toLowerCase();
+    const outcomeText = String(outcome || '').toLowerCase();
+    const currentBranchRaw = proxy?.[policy.fieldName];
+    const currentBranch = String(currentBranchRaw == null ? policy.defaultBranch : currentBranchRaw) || policy.defaultBranch;
+    const currentStreak = Math.max(0, Number(proxy?.[policy.failStreakField]) || 0);
+
+    const matchedRule = policy.rules.find((rule) => {
+        const stageMatch = rule.stages.includes('*') || rule.stages.includes(stageText);
+        const outcomeMatch = rule.outcomes.includes('*') || rule.outcomes.includes(outcomeText);
+        const fromMatch = rule.from.includes('*') || rule.from.includes(currentBranch);
+        return stageMatch && outcomeMatch && fromMatch;
+    });
+    if (!matchedRule) {
+        return { updates: {}, events: [] };
+    }
+
+    let nextBranch = currentBranch;
+    let nextStreak = currentStreak;
+    if (matchedRule.to) {
+        nextBranch = matchedRule.to;
+    }
+
+    if (matchedRule.failStreakOp === 'reset') {
+        nextStreak = 0;
+    } else if (matchedRule.failStreakOp === 'increment') {
+        nextStreak = currentStreak + 1;
+    } else if (matchedRule.failStreakOp === 'set') {
+        nextStreak = matchedRule.failStreakValue;
+    }
+
+    let fallbackApplied = false;
+    if (matchedRule.fallbackAt != null && nextStreak >= matchedRule.fallbackAt) {
+        nextBranch = matchedRule.fallbackTo || policy.defaultBranch;
+        nextStreak = 0;
+        fallbackApplied = true;
+    }
+
+    const updates = {};
+    if (nextBranch !== currentBranch) {
+        updates[policy.fieldName] = nextBranch;
+    }
+    if (nextStreak !== currentStreak) {
+        updates[policy.failStreakField] = nextStreak;
+    }
+
+    if (Object.keys(updates).length === 0) {
+        return { updates, events: [] };
+    }
+
+    const details = {
+        ruleId: matchedRule.id,
+        stage: stageText,
+        outcome: outcomeText,
+        branchBefore: currentBranch,
+        branchAfter: nextBranch,
+        failStreakBefore: currentStreak,
+        failStreakAfter: nextStreak,
+        fallbackApplied,
+    };
+    const events = [];
+
+    if (nextBranch !== currentBranch) {
+        events.push({
+            event_type: fallbackApplied ? 'branch_fallback' : matchedRule.eventType,
+            message: `编制流转：${currentBranch} -> ${nextBranch}`,
+            details,
+        });
+    } else if (nextStreak !== currentStreak) {
+        events.push({
+            event_type: matchedRule.failStreakOp === 'reset' ? 'branch_streak_reset' : 'branch_streak',
+            message: matchedRule.failStreakOp === 'reset'
+                ? `编制计数清零：${nextBranch}`
+                : `编制连续失败：${nextBranch} (${nextStreak})`,
+            details,
+        });
+    }
+
+    return { updates, events };
+}
+
 class ProxyHubEngine extends EventEmitter {
     // 0027_constructor_初始化实例逻辑
     constructor({ config, db, workerPool, logger, now }) {
@@ -558,10 +769,17 @@ class ProxyHubEngine extends EventEmitter {
             config: this.config,
             stage: combatStage,
         });
+        const branchTransition = resolveBranchingTransition({
+            proxy: currentProxy,
+            stage: combatStage,
+            outcome,
+            config: this.config,
+        });
 
         this.db.updateProxyById(proxyId, {
             ...combat.updates,
             ...extraUpdates,
+            ...branchTransition.updates,
             updated_at: nowIso,
         });
 
@@ -613,6 +831,29 @@ class ProxyHubEngine extends EventEmitter {
                     stage: combatStage,
                     outcome,
                 },
+            });
+        }
+
+        for (const event of branchTransition.events) {
+            this.db.insertProxyEvent({
+                timestamp: nowIso,
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                event_type: event.event_type,
+                level: EVENT_LEVEL.INFO,
+                message: event.message,
+                details: event.details,
+            });
+
+            this.logger.write({
+                event: '编制流转',
+                proxyName: updatedProxy.display_name,
+                ipSource: sourceName,
+                stage: '编制',
+                result: event.message,
+                reason: `${event.details.branchBefore} -> ${event.details.branchAfter}`,
+                action: '按规则自动调整',
+                details: event.details,
             });
         }
 
@@ -1135,6 +1376,8 @@ module.exports = {
     readFailureBackoff,
     resolveFailureBackoff,
     resolveSourceFeeds,
+    readBranchingConfig,
+    resolveBranchingTransition,
     ProxyHubEngine,
 };
 

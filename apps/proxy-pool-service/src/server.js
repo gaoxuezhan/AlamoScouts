@@ -137,10 +137,11 @@ function createRuntime(options = {}) {
         const limit = normalizeLimit(req.query.limit, 200, 1, 500);
         const rank = req.query.rank ? String(req.query.rank) : undefined;
         const lifecycle = req.query.lifecycle ? String(req.query.lifecycle) : undefined;
+        const serviceBranch = req.query.serviceBranch ? String(req.query.serviceBranch) : undefined;
         const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
 
         res.json({
-            items: db.getProxyList({ limit, rank, lifecycle, excludeRetired }),
+            items: db.getProxyList({ limit, rank, lifecycle, serviceBranch, excludeRetired }),
         });
     });
 
@@ -161,9 +162,10 @@ function createRuntime(options = {}) {
     app.get('/v1/proxies/value-board', (req, res) => {
         const limit = normalizeLimit(req.query.limit, 100, 1, 500);
         const lifecycle = req.query.lifecycle ? String(req.query.lifecycle) : undefined;
+        const serviceBranch = req.query.serviceBranch ? String(req.query.serviceBranch) : undefined;
         const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
         res.json({
-            items: db.getValueBoard(limit, lifecycle, { excludeRetired }),
+            items: db.getValueBoard(limit, lifecycle, { excludeRetired, serviceBranch }),
         });
     });
 
@@ -386,6 +388,13 @@ function createRuntime(options = {}) {
         const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
         res.json({
             items: db.getRankBoard({ excludeRetired }),
+        });
+    });
+
+    app.get('/v1/proxies/branches/board', (req, res) => {
+        const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
+        res.json({
+            items: db.getServiceBranchDistribution?.({ excludeRetired }) || [],
         });
     });
 

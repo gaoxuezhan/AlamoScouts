@@ -232,10 +232,13 @@ async function loadAll() {
     const honorText = (x.honor_active || []).join('，') || '-';
     const address = x.ip ? (x.ip + ':' + x.port + '/' + x.protocol) : '-';
     const updatedUtc = x.updated_at || '-';
+    const displayName = x.display_name || '-';
+    const serviceBranch = x.service_branch || '陆军';
+    const displayNameWithBranch = displayName + ' [' + serviceBranch + ']';
     return ''
       + '<tr>'
       + '<td>' + (index + 1) + '</td>'
-      + '<td>' + esc(x.display_name) + '</td>'
+      + '<td>' + esc(displayNameWithBranch) + '</td>'
       + '<td>' + esc(x.rank) + '</td>'
       + '<td class="ok">' + fmtScore(x.ip_value_score) + '</td>'
       + '<td>' + esc(x.lifecycle) + '</td>'

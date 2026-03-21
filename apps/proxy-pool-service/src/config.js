@@ -12,6 +12,19 @@ function deepClone(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
+// 0271_parseJsonArrayEnv_解析JSON数组环境变量逻辑
+function parseJsonArrayEnv(value, fallback) {
+    if (value == null || String(value).trim() === '') {
+        return deepClone(fallback);
+    }
+    try {
+        const parsed = JSON.parse(String(value));
+        return Array.isArray(parsed) ? parsed : deepClone(fallback);
+    } catch {
+        return deepClone(fallback);
+    }
+}
+
 const legacyRanks = [
     { rank: '新兵', minHours: 0, minPoints: 0, minSamples: 0 },
     { rank: '列兵', minHours: 12, minPoints: 80, minSamples: 20 },
@@ -182,8 +195,9 @@ const policyProfiles = {
     },
 };
 
-const activeProfile = ['production', 'soak'].includes(String(process.env.PROXY_HUB_POLICY_PROFILE || '').toLowerCase())
-    ? String(process.env.PROXY_HUB_POLICY_PROFILE || '').toLowerCase()
+const policyProfileRaw = String(process.env.PROXY_HUB_POLICY_PROFILE || '').toLowerCase();
+const activeProfile = ['production', 'soak'].includes(policyProfileRaw)
+    ? policyProfileRaw
     : 'production';
 
 const battleL1LifecycleQuotaByProfile = {
@@ -227,6 +241,64 @@ const lifecycleQuotaFromEnv = parseLifecycleQuota(
 const resolvedLifecycleQuota = hasLifecycleQuotaEnv
     ? lifecycleQuotaFromEnv
     : (hasCandidateQuotaEnv ? undefined : defaultLifecycleQuota);
+
+const defaultBranchingRules = [
+    {
+        id: 'l2_promote_navy',
+        priority: 10,
+        stage: 'l2',
+        outcomes: ['success'],
+        from: ['陆军'],
+        to: '海军',
+        failStreakOp: 'reset',
+        eventType: 'branch_transfer',
+    },
+    {
+        id: 'l2_reset_navy_streak',
+        priority: 20,
+        stage: 'l2',
+        outcomes: ['success'],
+        from: ['海军'],
+        failStreakOp: 'reset',
+        eventType: 'branch_streak_reset',
+    },
+    {
+        id: 'l2_fail_navy_fallback',
+        priority: 30,
+        stage: 'l2',
+        outcomes: ['blocked', 'timeout', 'network_error', 'invalid_feedback'],
+        from: ['海军'],
+        failStreakOp: 'increment',
+        fallbackAt: 3,
+        fallbackTo: '陆军',
+        eventType: 'branch_fallback',
+    },
+    {
+        id: 'l3_promote_seal',
+        priority: 40,
+        stage: 'l3',
+        outcomes: ['success'],
+        from: ['陆军', '海军', '海豹突击队'],
+        to: '海豹突击队',
+        failStreakOp: 'reset',
+        eventType: 'branch_transfer',
+    },
+    {
+        id: 'l3_fail_seal_fallback',
+        priority: 50,
+        stage: 'l3',
+        outcomes: ['blocked', 'timeout', 'network_error', 'invalid_feedback'],
+        from: ['海豹突击队'],
+        failStreakOp: 'increment',
+        fallbackAt: 3,
+        fallbackTo: '陆军',
+        eventType: 'branch_fallback',
+    },
+];
+const resolvedBranchingRules = parseJsonArrayEnv(
+    process.env.PROXY_HUB_BRANCHING_RULES_JSON,
+    defaultBranchingRules,
+);
 
 const sourceProfiles = {
     speedx_bundle: {
@@ -425,6 +497,13 @@ module.exports = {
     validation: {
         allowedProtocols: ['http', 'https', 'socks4', 'socks5'],
         maxTimeoutMs: 2_500,
+    },
+    branching: {
+        enabled: toBool(process.env.PROXY_HUB_BRANCHING_ENABLED, true),
+        fieldName: 'service_branch',
+        failStreakField: 'branch_fail_streak',
+        defaultBranch: String(process.env.PROXY_HUB_BRANCHING_DEFAULT || '陆军'),
+        rules: deepClone(resolvedBranchingRules),
     },
     policyProfiles: deepClone(policyProfiles),
     policy: deepClone(policyProfiles[activeProfile]),

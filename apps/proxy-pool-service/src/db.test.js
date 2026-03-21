@@ -260,15 +260,34 @@ test('query list APIs should support filters and distributions', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'battle_success_count'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'last_validation_ok'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'ip_value_score'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'service_branch'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'branch_fail_streak'), true);
+    assert.equal(all[0].service_branch, '陆军');
+    assert.equal(all[0].branch_fail_streak, 0);
 
-    h.db.updateProxyById(all[0].id, { rank: '士官', lifecycle: 'active', updated_at: now });
+    h.db.updateProxyById(all[0].id, {
+        rank: '士官',
+        lifecycle: 'active',
+        service_branch: '海军',
+        branch_fail_streak: 2,
+        ip_value_score: 88,
+        updated_at: now,
+    });
 
     const filtered = h.db.getProxyList({ limit: 10, rank: '士官', lifecycle: 'active' });
     assert.equal(filtered.length, 1);
+    const branchFiltered = h.db.getProxyList({ limit: 10, serviceBranch: '海军' });
+    assert.equal(branchFiltered.length, 1);
+    assert.equal(branchFiltered[0].service_branch, '海军');
+    const valueBoardByBranch = h.db.getValueBoard(10, undefined, { serviceBranch: '海军' });
+    assert.equal(valueBoardByBranch.length, 1);
+    assert.equal(valueBoardByBranch[0].service_branch, '海军');
 
     assert.equal(h.db.getSourceDistribution().length, 1);
     assert.equal(h.db.getLifecycleDistribution().length >= 1, true);
     assert.equal(h.db.getRankBoard().length >= 1, true);
+    assert.equal(h.db.getServiceBranchDistribution().some((item) => item.service_branch === '海军'), true);
+    assert.equal(h.db.getServiceBranchDistribution({ excludeRetired: true }).some((item) => item.service_branch === '海军'), true);
 
     cleanup(h);
 });
