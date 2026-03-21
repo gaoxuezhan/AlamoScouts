@@ -128,6 +128,7 @@ function createStubs() {
             { lifecycle: 'active', label: '新兵连', count: 1 },
             { lifecycle: 'reserve', label: '医务室', count: 0 },
             { lifecycle: 'candidate', label: '预备队', count: 2 },
+            { lifecycle: 'retired', label: '已退役', count: 0 },
         ],
         getHonors: () => [{ id: 3 }],
         getRetirements: () => [{ id: 4 }],
@@ -422,6 +423,7 @@ test('excludeRetired flag should be forwarded to admin stats endpoints', async (
         { lifecycle: 'active', label: '新兵连', count: 1 },
         { lifecycle: 'reserve', label: '医务室', count: 2 },
         { lifecycle: 'candidate', label: '预备队', count: 3 },
+        { lifecycle: 'retired', label: '已退役', count: 4 },
     ];
 
     const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
@@ -446,8 +448,9 @@ test('excludeRetired flag should be forwarded to admin stats endpoints', async (
         assert.deepEqual(poolStatus.latestSnapshot.source_distribution, [{ source: 'filtered-source', count: 1 }]);
         assert.deepEqual(poolStatus.latestSnapshot.rank_distribution, [{ rank: '新兵', count: 1 }]);
         assert.deepEqual(poolStatus.latestSnapshot.lifecycle_distribution, [{ lifecycle: 'active', count: 1 }]);
-        assert.equal(camp.items.length, 3);
+        assert.equal(camp.items.length, 4);
         assert.equal(camp.items[0].lifecycle, 'active');
+        assert.equal(camp.items[3].lifecycle, 'retired');
 
         await fetch(baseUrl + '/v1/proxies/ranks/board');
         assert.equal(calls.rank.at(-1).excludeRetired, false);
