@@ -18,6 +18,9 @@ const {
     resolveSourceFeeds,
     readBranchingConfig,
     resolveBranchingTransition,
+    readNativeLookupConfig,
+    isNativeRetryDue,
+    normalizeNativeLookupStatus,
     ProxyHubEngine,
 } = require('./engine');
 
@@ -72,6 +75,12 @@ function createConfig(dbPath) {
             l2BaseMs: 900000,
             multiplier: 2,
             maxMs: 3600000,
+        },
+        native: {
+            enabled: false,
+            timeoutMs: 3000,
+            retryHours: 1,
+            targetBranches: ['海军', '海豹突击队'],
         },
         validation: { allowedProtocols: ['http', 'https', 'socks4', 'socks5'], maxTimeoutMs: 1000 },
         policy: {
@@ -145,6 +154,18 @@ function cleanupDb(h) {
     fs.rmSync(h.dir, { recursive: true, force: true });
 }
 
+// 0041_waitFor_等待条件成立逻辑
+async function waitFor(check, timeoutMs = 2000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+        if (check()) {
+            return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return false;
+}
+
 test('engine utility functions should cover helper branches', async () => {
     assert.deepEqual(parseArrayJson(null), []);
     assert.deepEqual(parseArrayJson('[]'), []);
@@ -211,6 +232,38 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(branchPolicy.defaultBranch, '陆军');
     assert.equal(Array.isArray(branchPolicy.rules), true);
     assert.equal(branchPolicy.rules.length >= 4, true);
+    assert.deepEqual(readNativeLookupConfig({}), {
+        enabled: false,
+        timeoutMs: 3000,
+        retryHours: 1,
+        targetBranches: ['海军', '海豹突击队'],
+    });
+    assert.deepEqual(readNativeLookupConfig({
+        native: {
+            enabled: true,
+            timeoutMs: 1200,
+            retryHours: 2,
+            targetBranches: ['海军', '空军', '海军'],
+        },
+    }), {
+        enabled: true,
+        timeoutMs: 1200,
+        retryHours: 2,
+        targetBranches: ['海军', '空军'],
+    });
+    assert.deepEqual(readNativeLookupConfig({
+        native: {
+            enabled: true,
+            targetBranches: [],
+        },
+    }).targetBranches, ['海军', '海豹突击队']);
+    assert.equal(isNativeRetryDue(null, '2026-03-14T00:00:00.000Z'), true);
+    assert.equal(isNativeRetryDue('2026-03-13T23:59:59.000Z', '2026-03-14T00:00:00.000Z'), true);
+    assert.equal(isNativeRetryDue('2026-03-14T00:10:00.000Z', '2026-03-14T00:00:00.000Z'), false);
+    assert.equal(isNativeRetryDue('bad-date', '2026-03-14T00:00:00.000Z'), true);
+    assert.equal(normalizeNativeLookupStatus('resolved'), 'resolved');
+    assert.equal(normalizeNativeLookupStatus('bad-value'), 'pending');
+    assert.equal(normalizeNativeLookupStatus(null), 'pending');
     const disabledPolicy = readBranchingConfig({ branching: { enabled: false } });
     assert.equal(disabledPolicy.enabled, false);
     const normalizedPolicy = readBranchingConfig({
@@ -1416,6 +1469,643 @@ test('applyCombatOutcome should return early when proxy does not exist', async (
         stage: '评分',
     });
     assert.equal(logger.entries.length, 0);
+});
+
+test('applyCombatOutcome should resolve native place asynchronously for target branches', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.native.enabled = true;
+    h.config.native.targetBranches = ['海军', '海豹突击队'];
+    const nowIso = '2026-03-14T09:30:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.131', port: 8080, protocol: 'http' }],
+        () => '籍贯-成功-131',
+        'src',
+        'batch',
+        nowIso,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date(nowIso),
+    });
+    h.db.db.pragma('foreign_keys = OFF');
+    engine.resolveNativePlaceByIp = async () => ({
+        provider: 'ip-api',
+        country: '中国',
+        city: '北京',
+        place: '中国-北京',
+        rawJson: '{"status":"success","country":"中国","city":"北京"}',
+    });
+
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'success',
+        latencyMs: 18,
+        nowIso,
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+
+    const resolved = await waitFor(() => h.db.getProxyById(proxy.id)?.native_lookup_status === 'resolved');
+    assert.equal(resolved, true);
+    const updated = h.db.getProxyById(proxy.id);
+    assert.equal(updated.service_branch, '海军');
+    assert.equal(updated.native_place, '中国-北京');
+    assert.equal(updated.native_provider, 'ip-api');
+    assert.equal(updated.native_lookup_raw_json.includes('"country":"中国"'), true);
+    assert.equal(h.db.getEvents(30).some((item) => item.event_type === 'native_lookup_resolved'), true);
+    assert.equal(logger.entries.some((item) => item.event === '籍贯解析成功'), true);
+
+    cleanupDb(h);
+});
+
+test('applyCombatOutcome should mark native lookup failed with retry and keep existing fields', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.native.enabled = true;
+    h.config.native.retryHours = 1;
+    const nowIso = '2026-03-14T09:40:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.132', port: 8080, protocol: 'http' }],
+        () => '籍贯-失败-132',
+        'src',
+        'batch',
+        nowIso,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_country: '中国',
+        native_city: '上海',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+        updated_at: nowIso,
+    });
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date(nowIso),
+    });
+    engine.resolveNativePlaceByIp = async () => {
+        throw new Error('ip-api-timeout');
+    };
+
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'network_error',
+        latencyMs: 0,
+        nowIso,
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+
+    const failed = await waitFor(() => h.db.getProxyById(proxy.id)?.native_lookup_status === 'failed');
+    assert.equal(failed, true);
+    const updated = h.db.getProxyById(proxy.id);
+    assert.equal(updated.native_place, '未知');
+    assert.equal(updated.native_country, '中国');
+    assert.equal(updated.native_city, '上海');
+    assert.equal(typeof updated.native_next_retry_at, 'string');
+    assert.equal(Date.parse(updated.native_next_retry_at) > Date.parse(nowIso), true);
+    assert.equal(h.db.getEvents(30).some((item) => item.event_type === 'native_lookup_failed'), true);
+    assert.equal(logger.entries.some((item) => item.event === '籍贯解析失败' && item.reason === 'ip-api-timeout'), true);
+
+    cleanupDb(h);
+});
+
+test('applyCombatOutcome should skip non-target branch and honor native retry window', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.native.enabled = true;
+    h.config.native.targetBranches = ['海军'];
+    const nowIso = '2026-03-14T09:50:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.133', port: 8080, protocol: 'http' }],
+        () => '籍贯-跳过-133',
+        'src',
+        'batch',
+        nowIso,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    let lookupCalls = 0;
+    let currentNow = nowIso;
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date(currentNow),
+    });
+    engine.resolveNativePlaceByIp = async () => {
+        lookupCalls += 1;
+        return {
+            provider: 'ip-api',
+            country: '中国',
+            city: '广州',
+            place: '中国-广州',
+            rawJson: '{"status":"success","country":"中国","city":"广州"}',
+        };
+    };
+
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'src',
+        outcome: 'success',
+        latencyMs: 10,
+        nowIso,
+        stage: '评分(L0)',
+        combatStage: 'l0',
+    });
+    const skipped = await waitFor(() => h.db.getProxyById(proxy.id)?.native_lookup_status === 'skipped');
+    assert.equal(skipped, true);
+    assert.equal(lookupCalls, 0);
+
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_lookup_status: 'failed',
+        native_next_retry_at: '2026-03-14T10:30:00.000Z',
+        updated_at: nowIso,
+    });
+    currentNow = '2026-03-14T10:00:00.000Z';
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'success',
+        latencyMs: 12,
+        nowIso: currentNow,
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(lookupCalls, 0);
+
+    h.db.updateProxyById(proxy.id, {
+        native_next_retry_at: '2026-03-14T09:00:00.000Z',
+        updated_at: currentNow,
+    });
+    currentNow = '2026-03-14T10:40:00.000Z';
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'success',
+        latencyMs: 12,
+        nowIso: currentNow,
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+    const resolved = await waitFor(() => h.db.getProxyById(proxy.id)?.native_lookup_status === 'resolved');
+    assert.equal(resolved, true);
+    assert.equal(lookupCalls, 1);
+    assert.equal(h.db.getProxyById(proxy.id).native_place, '中国-广州');
+    cleanupDb(h);
+});
+
+test('resolveNativePlaceByIp should cover unavailable/http/json/status/success branches', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-native-resolve.db'));
+    config.native.enabled = true;
+    const db = {
+        getProxyById() {
+            return null;
+        },
+    };
+    const workerPool = {
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger });
+    const oldFetch = global.fetch;
+    const oldAbortSignal = global.AbortSignal;
+    const oldJsonParse = JSON.parse;
+
+    try {
+        global.fetch = undefined;
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('1.1.1.1', 800),
+            /ip-api-fetch-unavailable/,
+        );
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return '{"status":"success"}';
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('', 800),
+            /ip-api-ip-missing/,
+        );
+
+        global.AbortSignal = undefined;
+        global.fetch = async () => ({
+            ok: false,
+            status: 500,
+            async text() {
+                return '';
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('2.2.2.2', 900),
+            /ip-api-http-500/,
+        );
+
+        global.AbortSignal = oldAbortSignal;
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return '{bad-json';
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('3.3.3.3', 900),
+            /ip-api-invalid-json/,
+        );
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({ status: 'fail', message: 'quota' });
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('4.4.4.4', 900),
+            /ip-api-quota/,
+        );
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({ country: '美国', city: '纽约' });
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('4.4.4.5', 900),
+            /ip-api-request-failed/,
+        );
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({ status: 'success', country: '日本', city: '' });
+            },
+        });
+        const resolved = await engine.resolveNativePlaceByIp('5.5.5.5', 900);
+        assert.equal(resolved.provider, 'ip-api');
+        assert.equal(resolved.place, '日本-未知');
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({ status: 'success', country: '', city: '首尔' });
+            },
+        });
+        const fallbackCountry = await engine.resolveNativePlaceByIp('5.5.5.6', 0);
+        assert.equal(fallbackCountry.place, '未知-首尔');
+
+        JSON.parse = (raw) => {
+            if (raw === '') {
+                return { status: 'success', country: '中国', city: '厦门' };
+            }
+            return oldJsonParse(raw);
+        };
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return '';
+            },
+        });
+        const fallbackRawJson = await engine.resolveNativePlaceByIp('5.5.5.7', 900);
+        assert.equal(fallbackRawJson.place, '中国-厦门');
+        assert.equal(fallbackRawJson.rawJson, JSON.stringify({ status: 'success', country: '中国', city: '厦门' }));
+    } finally {
+        global.fetch = oldFetch;
+        global.AbortSignal = oldAbortSignal;
+        JSON.parse = oldJsonParse;
+    }
+});
+
+test('native lookup decision/task/schedule helpers should cover edge branches', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.native.enabled = true;
+    h.config.native.targetBranches = ['海军'];
+    const nowIso = '2026-03-14T11:20:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.134', port: 8080, protocol: 'http' }],
+        () => '籍贯-边界-134',
+        'src',
+        'batch',
+        nowIso,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date(nowIso),
+    });
+
+    const missingDecision = engine.resolveNativeLookupDecision(null, nowIso);
+    assert.equal(missingDecision.action, 'none');
+    assert.equal(missingDecision.reason, 'proxy-missing');
+
+    h.db.updateProxyById(proxy.id, {
+        native_lookup_status: 'skipped',
+        updated_at: nowIso,
+    });
+    const nonTargetDecision = engine.resolveNativeLookupDecision(h.db.getProxyById(proxy.id), nowIso);
+    assert.equal(nonTargetDecision.action, 'none');
+    assert.equal(nonTargetDecision.reason, 'branch-not-target');
+    const missingBranchDecision = engine.resolveNativeLookupDecision({
+        id: proxy.id,
+        service_branch: null,
+        native_place: '未知',
+        native_lookup_status: null,
+        native_next_retry_at: null,
+    }, nowIso);
+    assert.equal(missingBranchDecision.action, 'skip');
+    assert.equal(missingBranchDecision.reason, 'branch-not-target');
+
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '海军',
+        native_place: '中国-上海',
+        updated_at: nowIso,
+    });
+    const knownDecision = engine.resolveNativeLookupDecision(h.db.getProxyById(proxy.id), nowIso);
+    assert.equal(knownDecision.action, 'none');
+    assert.equal(knownDecision.reason, 'native-already-known');
+    const emptyNativePlaceDecision = engine.resolveNativeLookupDecision({
+        id: proxy.id,
+        service_branch: '海军',
+        native_place: '',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+    }, nowIso);
+    assert.equal(emptyNativePlaceDecision.action, 'lookup');
+    assert.equal(emptyNativePlaceDecision.reason, 'eligible');
+
+    await engine.runNativeLookupTask(99999, 'src');
+
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '陆军',
+        native_place: '未知',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+        updated_at: nowIso,
+    });
+    await engine.runNativeLookupTask(proxy.id, 'src');
+    assert.equal(h.db.getProxyById(proxy.id).native_lookup_status, 'skipped');
+
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_lookup_status: 'failed',
+        native_next_retry_at: '2099-01-01T00:00:00.000Z',
+        updated_at: nowIso,
+    });
+    await engine.runNativeLookupTask(proxy.id, 'src');
+    assert.equal(h.db.getProxyById(proxy.id).native_lookup_status, 'failed');
+
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+        updated_at: nowIso,
+    });
+    engine.resolveNativePlaceByIp = async () => {
+        h.db.updateProxyById(proxy.id, {
+            native_place: '中国-深圳',
+            updated_at: nowIso,
+        });
+        return {
+            provider: 'ip-api',
+            country: '中国',
+            city: '广州',
+            place: '中国-广州',
+            rawJson: '{"status":"success"}',
+        };
+    };
+    await engine.runNativeLookupTask(proxy.id, 'src');
+    assert.equal(h.db.getProxyById(proxy.id).native_place, '中国-深圳');
+
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+        updated_at: nowIso,
+    });
+    engine.resolveNativePlaceByIp = async () => {
+        h.db.updateProxyById(proxy.id, {
+            native_place: '中国-杭州',
+            updated_at: nowIso,
+        });
+        throw new Error('ip-api-recheck-fail');
+    };
+    await engine.runNativeLookupTask(proxy.id, 'src');
+    assert.equal(h.db.getProxyById(proxy.id).native_lookup_status, 'pending');
+
+    h.db.updateProxyById(proxy.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+        updated_at: nowIso,
+    });
+    engine.nativeLookupInFlight.add(proxy.id);
+    engine.scheduleNativeLookup(h.db.getProxyById(proxy.id), 'src', nowIso);
+    assert.equal(engine.nativeLookupInFlight.has(proxy.id), true);
+    engine.nativeLookupInFlight.delete(proxy.id);
+
+    engine.runNativeLookupTask = async () => {
+        throw new Error('native-lookup-task-failed');
+    };
+    engine.scheduleNativeLookup(h.db.getProxyById(proxy.id), 'src', nowIso);
+    const logged = await waitFor(() => logger.entries.some((item) => item.reason === 'native-lookup-task-failed'));
+    assert.equal(logged, true);
+
+    const originalGetProxyById = h.db.getProxyById.bind(h.db);
+    h.db.getProxyById = () => null;
+    engine.markNativeLookupSkipped({
+        id: proxy.id,
+        display_name: '籍贯-跳过-兜底',
+        ip: '10.0.0.134',
+        service_branch: '陆军',
+    }, 'src', nowIso, 'branch-not-target');
+    h.db.getProxyById = originalGetProxyById;
+    assert.equal(logger.entries.some((item) => item.event === '籍贯解析跳过' && item.proxyName === '籍贯-跳过-兜底'), true);
+
+    cleanupDb(h);
+});
+
+test('native lookup should fallback to cached proxy when db row disappears and default error reason', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.native.enabled = true;
+    h.config.native.targetBranches = ['海军'];
+    const nowIso = '2026-03-14T11:40:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.135', port: 8080, protocol: 'http' }],
+        () => '籍贯-并发删除-135',
+        'src',
+        'batch',
+        nowIso,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.136', port: 8080, protocol: 'http' }],
+        () => '籍贯-并发删除-136',
+        'src',
+        'batch',
+        nowIso,
+    );
+    const proxies = h.db.getProxyList({ limit: 5 });
+    const proxySuccess = proxies.find((item) => item.ip === '10.0.0.135');
+    const proxyFailure = proxies.find((item) => item.ip === '10.0.0.136');
+    assert.ok(proxySuccess);
+    assert.ok(proxyFailure);
+
+    h.db.updateProxyById(proxySuccess.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+        updated_at: nowIso,
+    });
+    h.db.updateProxyById(proxyFailure.id, {
+        service_branch: '海军',
+        native_place: '未知',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+        updated_at: nowIso,
+    });
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date(nowIso),
+    });
+    const realGetProxyById = h.db.getProxyById.bind(h.db);
+    let forceNullGetById = false;
+    h.db.getProxyById = (id) => (forceNullGetById ? null : realGetProxyById(id));
+
+    engine.resolveNativePlaceByIp = async (ip) => {
+        if (ip === proxySuccess.ip) {
+            forceNullGetById = true;
+            return {
+                provider: 'ip-api',
+                country: '中国',
+                city: '成都',
+                place: '中国-成都',
+                rawJson: '{"status":"success","country":"中国","city":"成都"}',
+            };
+        }
+        throw new Error(`unexpected-ip-${ip}`);
+    };
+    await engine.runNativeLookupTask(proxySuccess.id, 'src');
+    forceNullGetById = false;
+    assert.equal(logger.entries.some((item) => item.event === '籍贯解析成功' && item.proxyName === proxySuccess.display_name), true);
+    assert.equal(h.db.getEvents(30).some((item) => item.event_type === 'native_lookup_resolved'), true);
+
+    engine.resolveNativeLookupDecision = () => ({
+        action: 'lookup',
+        reason: 'forced',
+        policy: {
+            enabled: true,
+            timeoutMs: 800,
+            retryHours: 0,
+            targetBranches: ['海军'],
+        },
+    });
+    engine.resolveNativePlaceByIp = async () => {
+        forceNullGetById = true;
+        throw null;
+    };
+    await engine.runNativeLookupTask(proxyFailure.id, 'src');
+    forceNullGetById = false;
+    assert.equal(logger.entries.some((item) => item.event === '籍贯解析失败' && item.proxyName === proxyFailure.display_name && item.reason === 'native-lookup-failed'), true);
+    assert.equal(h.db.getEvents(30).some((item) => item.event_type === 'native_lookup_failed'), true);
+
+    engine.runNativeLookupTask = async () => {
+        throw null;
+    };
+    engine.scheduleNativeLookup({
+        id: 778899,
+        ip: '10.0.0.177',
+        display_name: '籍贯-调度-回退-177',
+        service_branch: '海军',
+        native_place: '未知',
+    }, 'src', nowIso);
+    const fallbackLogged = await waitFor(() => logger.entries.some((item) => item.reason === 'native-lookup-task-failed'));
+    assert.equal(fallbackLogged, true);
+    h.db.getProxyById = realGetProxyById;
+
+    cleanupDb(h);
 });
 
 test('resolveBranchingTransition should support custom rule extension', () => {

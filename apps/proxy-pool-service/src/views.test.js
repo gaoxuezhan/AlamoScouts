@@ -19,10 +19,13 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes('按价值分从高到低排的名次，1就是当前最有价值的IP。'), true);
     assert.equal(html.includes('系统一共'), true);
     assert.equal(html.includes("label: '编制'"), true);
+    assert.equal(html.includes("label: '籍贯'"), true);
     assert.equal(html.includes("const displayNameWithBranch ="), false);
     assert.equal(html.includes(" + ' [' + serviceBranch + ']'"), false);
     assert.equal(html.includes("esc(displayName) + '</td>'"), true);
     assert.equal(html.includes("esc(serviceBranch) + '</td>'"), true);
+    assert.equal(html.includes("const nativeTip = nativePlace === '未知'"), true);
+    assert.equal(html.includes("'<td title=\"' + esc(nativeTip) + '\">' + esc(nativePlace) + '</td>'"), true);
     assert.equal(html.includes("label: 'L0(成功/失败)'"), true);
     assert.equal(html.includes("label: 'L1(成功/失败)'"), true);
     assert.equal(html.includes("label: 'L2(成功/失败)'"), true);

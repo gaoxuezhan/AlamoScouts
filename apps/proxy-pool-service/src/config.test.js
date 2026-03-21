@@ -46,6 +46,10 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_BRANCHING_ENABLED',
         'PROXY_HUB_BRANCHING_DEFAULT',
         'PROXY_HUB_BRANCHING_RULES_JSON',
+        'PROXY_HUB_NATIVE_ENABLED',
+        'PROXY_HUB_NATIVE_TIMEOUT_MS',
+        'PROXY_HUB_NATIVE_RETRY_HOURS',
+        'PROXY_HUB_NATIVE_TARGET_BRANCHES',
         'PROXY_HUB_DB_PATH',
         ...Object.keys(overrides),
     ]);
@@ -111,6 +115,10 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(Array.isArray(config.battle.targets.l1), true);
     assert.equal(config.battle.targets.l2Primary[0].name, 'ly-flight-main');
     assert.equal(config.battle.targets.l2Primary[0].url, 'https://www.ly.com/flights/home');
+    assert.equal(config.native.enabled, true);
+    assert.equal(config.native.timeoutMs, 3000);
+    assert.equal(config.native.retryHours, 1);
+    assert.deepEqual(config.native.targetBranches, ['海军', '海豹突击队']);
 });
 
 test('config ranks should be ordered and complete', { concurrency: false }, () => {
@@ -246,6 +254,28 @@ test('config should fallback branching rules when env json is not an array', { c
 
     assert.equal(Array.isArray(config.branching.rules), true);
     assert.equal(config.branching.rules.length >= 4, true);
+});
+
+test('config should support native lookup env overrides', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_NATIVE_ENABLED: 'false',
+        PROXY_HUB_NATIVE_TIMEOUT_MS: '4321',
+        PROXY_HUB_NATIVE_RETRY_HOURS: '2',
+        PROXY_HUB_NATIVE_TARGET_BRANCHES: '海军,海豹突击队,空军,海军',
+    });
+
+    assert.equal(config.native.enabled, false);
+    assert.equal(config.native.timeoutMs, 4321);
+    assert.equal(config.native.retryHours, 2);
+    assert.deepEqual(config.native.targetBranches, ['海军', '海豹突击队', '空军']);
+});
+
+test('config should fallback native target branches when csv env is empty after normalization', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_NATIVE_TARGET_BRANCHES: ',, ,',
+    });
+
+    assert.deepEqual(config.native.targetBranches, ['海军', '海豹突击队']);
 });
 
 test('config should prioritize explicit PROXY_HUB_DB_PATH over profile db mapping', { concurrency: false }, () => {

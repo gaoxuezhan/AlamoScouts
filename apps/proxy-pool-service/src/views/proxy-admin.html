@@ -114,6 +114,7 @@ function getValueBoardHeaders(rankHelp) {
     { label: '姓名', help: '这个IP的显示名称，方便在日志和榜单里快速识别。' },
     { label: '编制', help: '该IP当前所属军种编制，用于体现兵种归属。' },
     { label: '军衔', help: rankHelp },
+    { label: '籍贯', help: 'IP归属地（国家-城市）。悬停可查看解析详情；未知时显示“未知”。' },
     { label: '价值分', help: '这是0到100的综合分，分数越高说明这个IP越值得优先使用。' },
     { label: '生命周期', help: '这个IP现在处于哪个阶段（候选/在役/预备/退役），决定它会不会被优先调度。' },
     { label: '成功率', help: '历史成功次数除以总样本数，反映总体能不能跑通。' },
@@ -239,12 +240,17 @@ async function loadAll() {
     const updatedUtc = x.updated_at || '-';
     const displayName = x.display_name || '-';
     const serviceBranch = x.service_branch || '陆军';
+    const nativePlace = x.native_place || '未知';
+    const nativeTip = nativePlace === '未知'
+      ? '未知'
+      : (x.native_lookup_raw_json || '未知');
     return ''
       + '<tr>'
       + '<td>' + (index + 1) + '</td>'
       + '<td>' + esc(displayName) + '</td>'
       + '<td>' + esc(serviceBranch) + '</td>'
       + '<td>' + esc(x.rank) + '</td>'
+      + '<td title="' + esc(nativeTip) + '">' + esc(nativePlace) + '</td>'
       + '<td class="ok">' + fmtScore(x.ip_value_score) + '</td>'
       + '<td>' + esc(x.lifecycle) + '</td>'
       + '<td>' + fmtPercent(x.success_ratio) + '</td>'
