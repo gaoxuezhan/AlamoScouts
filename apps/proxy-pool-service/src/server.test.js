@@ -30,7 +30,15 @@ function createConfig(port = 0) {
                 l2Fallback: [{ name: 'baidu', url: 'https://www.baidu.com' }],
             },
         },
-        source: { monosans: { name: 'monosans', url: 'https://x', enabled: true } },
+        source: {
+            activeProfile: 'speedx_bundle',
+            activeFeeds: [
+                { name: 'TheSpeedX/http', url: 'https://example.com/http.txt', enabled: true, defaultProtocol: 'http', sourceFormat: 'line' },
+                { name: 'TheSpeedX/socks4', url: 'https://example.com/socks4.txt', enabled: false, defaultProtocol: 'socks4', sourceFormat: 'line' },
+                { name: 'TheSpeedX/socks5', url: 'https://example.com/socks5.txt', enabled: true, defaultProtocol: 'socks5', sourceFormat: 'line' },
+            ],
+            monosans: { name: 'monosans', url: 'https://x', enabled: true },
+        },
         candidateControl: {
             max: 3000,
             gateOverride: false,
@@ -101,6 +109,7 @@ function createStubs() {
         engineStarted: false,
         engineStopped: false,
         engineStopCalls: 0,
+        socks4CleanupCalls: 0,
         rolloutState: {
             id: 1,
             mode: 'SAFE',
@@ -162,6 +171,18 @@ function createStubs() {
         },
         getRolloutSwitchEvents: (limit = 200) => state.rolloutEvents.slice(-limit).reverse(),
         getRuntimeLogs: () => [{ id: 5, event: '开始抓源' }],
+        purgeSocks4Data: () => {
+            state.socks4CleanupCalls += 1;
+            return {
+                sourceName: 'TheSpeedX/socks4',
+                protocol: 'socks4',
+                deleted: 2,
+                beforeSource: 1,
+                beforeProtocol: 1,
+                afterSource: 0,
+                afterProtocol: 0,
+            };
+        },
         close: () => {
             state.dbClosed = true;
         },
@@ -378,9 +399,37 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     ssePool.body.cancel();
 
     await runtime.shutdown('TEST');
+    assert.equal(stubs.state.socks4CleanupCalls, 1);
     assert.equal(stubs.state.dbClosed, true);
     assert.equal(stubs.state.poolClosed, true);
     assert.equal(stubs.state.engineStopped, true);
+});
+
+test('startup socks4 cleanup should be skipped when socks4 feed is enabled', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    const socks4Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks4');
+    socks4Feed.enabled = true;
+
+    const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
+    try {
+        assert.equal(stubs.state.socks4CleanupCalls, 0);
+    } finally {
+        await runtime.shutdown('TEST-SOCKS4-CLEANUP-SKIP');
+    }
+});
+
+test('startup socks4 cleanup should be skipped when activeFeeds is not an array', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    config.source.activeFeeds = null;
+
+    const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
+    try {
+        assert.equal(stubs.state.socks4CleanupCalls, 0);
+    } finally {
+        await runtime.shutdown('TEST-SOCKS4-CLEANUP-NON-ARRAY');
+    }
 });
 
 test('excludeRetired flag should be forwarded to admin stats endpoints', async () => {
@@ -532,6 +581,44 @@ test('candidate control GET should fallback when db method or config is missing'
         assert.deepEqual(body.candidateControl, {});
     } finally {
         await runtime.shutdown('TEST-CANDIDATE-CONTROL-GET-FALLBACK');
+    }
+});
+
+test('candidate control GET should fallback to candidate distribution count', async () => {
+    const stubs = createStubs();
+    stubs.db.getLifecycleDistribution = () => [
+        { lifecycle: 'active', count: 1 },
+        { lifecycle: 'candidate', count: '7' },
+    ];
+    stubs.db.getLifecycleCount = undefined;
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/candidate-control');
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.candidateCount, 7);
+        assert.equal(body.candidateControl.max, 3000);
+    } finally {
+        await runtime.shutdown('TEST-CANDIDATE-CONTROL-DISTRIBUTION-FALLBACK');
+    }
+});
+
+test('candidate control GET should prefer lifecycleCount when available', async () => {
+    const stubs = createStubs();
+    stubs.db.getLifecycleDistribution = () => [
+        { lifecycle: 'candidate', count: 99 },
+    ];
+    stubs.db.getLifecycleCount = () => 5;
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/candidate-control');
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.candidateCount, 5);
+    } finally {
+        await runtime.shutdown('TEST-CANDIDATE-CONTROL-LIFECYCLE-COUNT');
     }
 });
 

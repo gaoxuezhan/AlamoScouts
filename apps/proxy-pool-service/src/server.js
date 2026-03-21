@@ -468,6 +468,22 @@ function createRuntime(options = {}) {
             try {
                 server = app.listen(config.service.port, config.service.host, () => {
                     server.off('error', onError);
+                    const socks4Feed = Array.isArray(config.source?.activeFeeds)
+                        ? config.source.activeFeeds.find((feed) => feed && feed.name === 'TheSpeedX/socks4')
+                        : null;
+                    if (socks4Feed && socks4Feed.enabled === false && typeof db.purgeSocks4Data === 'function') {
+                        const cleanupSummary = db.purgeSocks4Data({
+                            sourceName: socks4Feed.name,
+                            protocol: 'socks4',
+                        });
+                        logger.write({
+                            event: '数据清理',
+                            stage: '服务',
+                            result: `socks4 清理 ${cleanupSummary.deleted}`,
+                            action: '临时停用 TheSpeedX/socks4',
+                            details: cleanupSummary,
+                        });
+                    }
                     logger.write({
                         event: '自动恢复',
                         stage: '服务',

@@ -367,6 +367,132 @@ test('excludeRetired filters should apply to boards, lists and distributions; re
     cleanup(h);
 });
 
+test('purgeSocks4Data should delete socks4 source/protocol rows and keep others', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+    let seq = 0;
+    const nextName = () => `清理-${++seq}`;
+
+    h.db.upsertSourceBatch(
+        [{ ip: '41.0.0.1', port: 80, protocol: 'http' }],
+        nextName,
+        'TheSpeedX/http',
+        'batch-clean-1',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '41.0.0.2', port: 1080, protocol: 'socks4' }],
+        nextName,
+        'TheSpeedX/socks4',
+        'batch-clean-2',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '41.0.0.3', port: 1080, protocol: 'socks4' }],
+        nextName,
+        'legacy-socks4-feed',
+        'batch-clean-3',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '41.0.0.4', port: 80, protocol: 'http' }],
+        nextName,
+        'TheSpeedX/socks4',
+        'batch-clean-4',
+        now,
+    );
+
+    const summary = h.db.purgeSocks4Data({
+        sourceName: 'TheSpeedX/socks4',
+        protocol: 'socks4',
+    });
+
+    assert.equal(summary.beforeSource, 2);
+    assert.equal(summary.beforeProtocol, 2);
+    assert.equal(summary.deleted, 3);
+    assert.equal(summary.afterSource, 0);
+    assert.equal(summary.afterProtocol, 0);
+
+    const remaining = h.db.getProxyList({ limit: 20 });
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].source, 'TheSpeedX/http');
+
+    cleanup(h);
+});
+
+test('purgeSocks4Data should support default source/protocol options', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+    let seq = 0;
+    const nextName = () => `默认清理-${++seq}`;
+
+    h.db.upsertSourceBatch(
+        [{ ip: '42.0.0.1', port: 1080, protocol: 'socks4' }],
+        nextName,
+        'TheSpeedX/socks4',
+        'batch-default-clean-1',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '42.0.0.2', port: 1080, protocol: 'socks4' }],
+        nextName,
+        'legacy-socks4-feed',
+        'batch-default-clean-2',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '42.0.0.3', port: 80, protocol: 'http' }],
+        nextName,
+        'TheSpeedX/http',
+        'batch-default-clean-3',
+        now,
+    );
+
+    const summary = h.db.purgeSocks4Data();
+    assert.equal(summary.sourceName, 'TheSpeedX/socks4');
+    assert.equal(summary.protocol, 'socks4');
+    assert.equal(summary.deleted, 2);
+    assert.equal(summary.afterSource, 0);
+    assert.equal(summary.afterProtocol, 0);
+
+    const remaining = h.db.getProxyList({ limit: 20 });
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].source, 'TheSpeedX/http');
+
+    cleanup(h);
+});
+
+test('getRecruitCampBoard should fallback invalid lifecycle counts to zero', () => {
+    const h = createDb();
+    const originalPrepare = h.db.db.prepare.bind(h.db.db);
+
+    h.db.db.prepare = (sql) => {
+        if (String(sql).includes('GROUP BY lifecycle')) {
+            return {
+                all() {
+                    return [
+                        { lifecycle: 'active', count: 'invalid' },
+                        { lifecycle: 'reserve', count: 2 },
+                        { lifecycle: 'unknown', count: 7 },
+                    ];
+                },
+            };
+        }
+        return originalPrepare(sql);
+    };
+
+    try {
+        const camp = h.db.getRecruitCampBoard();
+        assert.equal(camp.find((item) => item.lifecycle === 'active')?.count, 0);
+        assert.equal(camp.find((item) => item.lifecycle === 'reserve')?.count, 2);
+        assert.equal(camp.find((item) => item.lifecycle === 'candidate')?.count, 0);
+        assert.equal(camp.find((item) => item.lifecycle === 'retired')?.count, 0);
+    } finally {
+        h.db.db.prepare = originalPrepare;
+        cleanup(h);
+    }
+});
+
 test('value board API should sort by value and parse breakdown and honor fields', () => {
     const h = createDb();
     const now = new Date().toISOString();

@@ -33,6 +33,7 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_SOURCE_DEFAULT_PROTOCOL',
         'PROXY_HUB_SOURCE_FORMAT',
         'PROXY_HUB_SOURCE_PROFILE',
+        'PROXY_HUB_SPEEDX_SOCKS4_ENABLED',
         'PROXY_HUB_DB_PATH',
         ...Object.keys(overrides),
     ]);
@@ -73,6 +74,7 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(Array.isArray(config.source.activeFeeds), true);
     assert.equal(config.source.activeFeeds.length, 3);
     assert.equal(config.source.activeFeeds[0].url.includes('/http.txt'), true);
+    assert.equal(config.source.activeFeeds.some((feed) => feed.name === 'TheSpeedX/socks4' && feed.enabled === false), true);
     assert.equal(config.source.profiles.monosans_archive.enabled, false);
     assert.equal(config.storage.dbPath.includes('proxyhub-speedx-bundle.db'), true);
     assert.equal(config.validation.allowedProtocols.includes('socks4'), true);
@@ -133,6 +135,16 @@ test('config should switch db and feeds by source profile when env profile chang
     assert.equal(config.source.activeFeeds.length, 1);
     assert.equal(config.source.activeFeeds[0].url.includes('proxies.json'), true);
     assert.equal(config.storage.dbPath.includes('proxyhub-v1.db'), true);
+});
+
+test('config should allow re-enable speedx socks4 feed by env switch', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_SOURCE_PROFILE: 'speedx_bundle',
+        PROXY_HUB_SPEEDX_SOCKS4_ENABLED: 'true',
+    });
+
+    assert.equal(config.source.activeProfile, 'speedx_bundle');
+    assert.equal(config.source.activeFeeds.some((feed) => feed.name === 'TheSpeedX/socks4' && feed.enabled === true), true);
 });
 
 test('config should prioritize explicit PROXY_HUB_DB_PATH over profile db mapping', { concurrency: false }, () => {

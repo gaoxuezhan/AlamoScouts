@@ -1194,6 +1194,50 @@ class ProxyHubDb {
         ];
     }
 
+    // 0270_purgeSocks4Data_清理socks4来源数据逻辑
+    purgeSocks4Data(options = {}) {
+        const sourceName = options.sourceName || 'TheSpeedX/socks4';
+        const protocol = options.protocol || 'socks4';
+
+        const beforeSource = Number(this.db.prepare(`
+            SELECT COUNT(*) AS count
+            FROM proxies
+            WHERE source = ?
+        `).get(sourceName)?.count || 0);
+        const beforeProtocol = Number(this.db.prepare(`
+            SELECT COUNT(*) AS count
+            FROM proxies
+            WHERE protocol = ?
+        `).get(protocol)?.count || 0);
+
+        const deleted = Number(this.db.prepare(`
+            DELETE FROM proxies
+            WHERE source = @sourceName
+               OR protocol = @protocol
+        `).run({ sourceName, protocol }).changes || 0);
+
+        const afterSource = Number(this.db.prepare(`
+            SELECT COUNT(*) AS count
+            FROM proxies
+            WHERE source = ?
+        `).get(sourceName)?.count || 0);
+        const afterProtocol = Number(this.db.prepare(`
+            SELECT COUNT(*) AS count
+            FROM proxies
+            WHERE protocol = ?
+        `).get(protocol)?.count || 0);
+
+        return {
+            sourceName,
+            protocol,
+            deleted,
+            beforeSource,
+            beforeProtocol,
+            afterSource,
+            afterProtocol,
+        };
+    }
+
     // 0188_getHonors_获取荣誉逻辑
     getHonors(limit = 100) {
         return this.db.prepare(`
