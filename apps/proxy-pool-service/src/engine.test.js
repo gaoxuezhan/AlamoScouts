@@ -1410,6 +1410,35 @@ test('runBattleL2Cycle should process candidates and cover guard/error branches'
     cleanupDb(h);
 });
 
+test('runBattleL2Cycle should return early when there are no candidates', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-l2-empty.db'));
+    config.battle.enabled = true;
+
+    let runTaskCalls = 0;
+    const db = {
+        listProxiesForBattleL2() {
+            return [];
+        },
+    };
+    const workerPool = {
+        async runTask() {
+            runTaskCalls += 1;
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger });
+    engine.started = true;
+
+    await engine.runBattleL2Cycle();
+    assert.equal(runTaskCalls, 0);
+    assert.equal(engine.isBattleL2Running, false);
+});
+
 test('runBattle cycles should log outer-catch fallback reason when candidate listing throws', async () => {
     const logger = createLogger();
     const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-battle-outer.db'));
