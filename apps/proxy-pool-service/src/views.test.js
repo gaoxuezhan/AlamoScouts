@@ -18,6 +18,11 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes('代理明细（前50）'), false);
     assert.equal(html.includes('按价值分从高到低排的名次，1就是当前最有价值的IP。'), true);
     assert.equal(html.includes('系统一共'), true);
+    assert.equal(html.includes("label: '编制'"), true);
+    assert.equal(html.includes("const displayNameWithBranch ="), false);
+    assert.equal(html.includes(" + ' [' + serviceBranch + ']'"), false);
+    assert.equal(html.includes("esc(displayName) + '</td>'"), true);
+    assert.equal(html.includes("esc(serviceBranch) + '</td>'"), true);
 });
 
 test('renderRuntimeLogsPage should return static html', () => {

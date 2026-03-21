@@ -112,6 +112,7 @@ function getValueBoardHeaders(rankHelp) {
   return [
     { label: '排名', help: '按价值分从高到低排的名次，1就是当前最有价值的IP。' },
     { label: '姓名', help: '这个IP的显示名称，方便在日志和榜单里快速识别。' },
+    { label: '编制', help: '该IP当前所属军种编制，用于体现兵种归属。' },
     { label: '军衔', help: rankHelp },
     { label: '价值分', help: '这是0到100的综合分，分数越高说明这个IP越值得优先使用。' },
     { label: '生命周期', help: '这个IP现在处于哪个阶段（候选/在役/预备/退役），决定它会不会被优先调度。' },
@@ -234,11 +235,11 @@ async function loadAll() {
     const updatedUtc = x.updated_at || '-';
     const displayName = x.display_name || '-';
     const serviceBranch = x.service_branch || '陆军';
-    const displayNameWithBranch = displayName + ' [' + serviceBranch + ']';
     return ''
       + '<tr>'
       + '<td>' + (index + 1) + '</td>'
-      + '<td>' + esc(displayNameWithBranch) + '</td>'
+      + '<td>' + esc(displayName) + '</td>'
+      + '<td>' + esc(serviceBranch) + '</td>'
       + '<td>' + esc(x.rank) + '</td>'
       + '<td class="ok">' + fmtScore(x.ip_value_score) + '</td>'
       + '<td>' + esc(x.lifecycle) + '</td>'
