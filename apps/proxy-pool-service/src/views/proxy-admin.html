@@ -117,6 +117,10 @@ function getValueBoardHeaders(rankHelp) {
     { label: '生命周期', help: '这个IP现在处于哪个阶段（候选/在役/预备/退役），决定它会不会被优先调度。' },
     { label: '成功率', help: '历史成功次数除以总样本数，反映总体能不能跑通。' },
     { label: '战场胜率', help: '战场测试里成功次数除以战场总次数，反映真实战场好不好用。' },
+    { label: 'L0(成功/失败)', help: 'L0层的累计成功/失败次数，失败包含 blocked、timeout、network_error、invalid_feedback。' },
+    { label: 'L1(成功/失败)', help: 'L1战场测试的累计成功/失败次数。' },
+    { label: 'L2(成功/失败)', help: 'L2战场测试的累计成功/失败次数。' },
+    { label: 'L3(成功/失败)', help: 'L3战场测试的累计成功/失败次数。' },
     { label: '激活荣誉', help: '当前生效中的荣誉标签，代表这个IP最近在某些维度表现突出。' },
     { label: '地址', help: 'IP、端口和协议组合地址，排障和复现问题时最直接。' },
     { label: '来源', help: '这个IP来自哪个抓取源，可用来判断源质量。' },
@@ -244,6 +248,10 @@ async function loadAll() {
       + '<td>' + esc(x.lifecycle) + '</td>'
       + '<td>' + fmtPercent(x.success_ratio) + '</td>'
       + '<td>' + fmtPercent(x.battle_ratio) + '</td>'
+      + '<td class="mono">' + fmt(x.l0_success_count) + '/' + fmt(x.l0_fail_count) + '</td>'
+      + '<td class="mono">' + fmt(x.l1_success_count) + '/' + fmt(x.l1_fail_count) + '</td>'
+      + '<td class="mono">' + fmt(x.l2_success_count) + '/' + fmt(x.l2_fail_count) + '</td>'
+      + '<td class="mono">' + fmt(x.l3_success_count) + '/' + fmt(x.l3_fail_count) + '</td>'
       + '<td>' + esc(honorText) + '</td>'
       + '<td class="mono">' + esc(address) + '</td>'
       + '<td>' + esc(x.source) + '</td>'

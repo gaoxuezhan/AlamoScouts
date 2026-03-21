@@ -18,6 +18,14 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes('代理明细（前50）'), false);
     assert.equal(html.includes('按价值分从高到低排的名次，1就是当前最有价值的IP。'), true);
     assert.equal(html.includes('系统一共'), true);
+    assert.equal(html.includes("label: 'L0(成功/失败)'"), true);
+    assert.equal(html.includes("label: 'L1(成功/失败)'"), true);
+    assert.equal(html.includes("label: 'L2(成功/失败)'"), true);
+    assert.equal(html.includes("label: 'L3(成功/失败)'"), true);
+    assert.equal(html.includes("fmt(x.l0_success_count) + '/' + fmt(x.l0_fail_count)"), true);
+    assert.equal(html.includes("fmt(x.l1_success_count) + '/' + fmt(x.l1_fail_count)"), true);
+    assert.equal(html.includes("fmt(x.l2_success_count) + '/' + fmt(x.l2_fail_count)"), true);
+    assert.equal(html.includes("fmt(x.l3_success_count) + '/' + fmt(x.l3_fail_count)"), true);
 });
 
 test('renderRuntimeLogsPage should return static html', () => {

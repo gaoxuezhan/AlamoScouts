@@ -1189,15 +1189,43 @@ class ProxyHubDb {
 
         const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
         const rows = this.db.prepare(`
-            SELECT id, display_name, ip, port, protocol, source, lifecycle, rank,
-                service_branch,
-                ip_value_score, ip_value_breakdown_json,
-                combat_points, health_score, discipline_score,
-                success_count, total_samples, battle_success_count, battle_fail_count,
-                honor_active_json, retired_type, updated_at
+            SELECT
+                p.id, p.display_name, p.ip, p.port, p.protocol, p.source, p.lifecycle, p.rank,
+                p.service_branch,
+                p.ip_value_score, p.ip_value_breakdown_json,
+                p.combat_points, p.health_score, p.discipline_score,
+                p.success_count, p.total_samples, p.battle_success_count, p.battle_fail_count,
+                p.honor_active_json, p.retired_type, p.updated_at,
+                p.success_count AS l0_success_count,
+                (
+                    p.block_count
+                    + p.timeout_count
+                    + p.network_error_count
+                    + p.invalid_feedback_count
+                ) AS l0_fail_count,
+                COALESCE(stage_stats.l1_success_count, 0) AS l1_success_count,
+                COALESCE(stage_stats.l1_fail_count, 0) AS l1_fail_count,
+                COALESCE(stage_stats.l2_success_count, 0) AS l2_success_count,
+                COALESCE(stage_stats.l2_fail_count, 0) AS l2_fail_count,
+                COALESCE(stage_stats.l3_success_count, 0) AS l3_success_count,
+                COALESCE(stage_stats.l3_fail_count, 0) AS l3_fail_count
             FROM proxies
+            AS p
+            LEFT JOIN (
+                SELECT
+                    proxy_id,
+                    SUM(CASE WHEN stage = 'l1' AND outcome = 'success' THEN 1 ELSE 0 END) AS l1_success_count,
+                    SUM(CASE WHEN stage = 'l1' AND outcome IN ('blocked', 'timeout', 'network_error', 'invalid_feedback') THEN 1 ELSE 0 END) AS l1_fail_count,
+                    SUM(CASE WHEN stage = 'l2' AND outcome = 'success' THEN 1 ELSE 0 END) AS l2_success_count,
+                    SUM(CASE WHEN stage = 'l2' AND outcome IN ('blocked', 'timeout', 'network_error', 'invalid_feedback') THEN 1 ELSE 0 END) AS l2_fail_count,
+                    SUM(CASE WHEN stage = 'l3' AND outcome = 'success' THEN 1 ELSE 0 END) AS l3_success_count,
+                    SUM(CASE WHEN stage = 'l3' AND outcome IN ('blocked', 'timeout', 'network_error', 'invalid_feedback') THEN 1 ELSE 0 END) AS l3_fail_count
+                FROM battle_test_runs
+                GROUP BY proxy_id
+            ) AS stage_stats
+            ON stage_stats.proxy_id = p.id
             ${where}
-            ORDER BY ip_value_score DESC, combat_points DESC, updated_at DESC
+            ORDER BY p.ip_value_score DESC, p.combat_points DESC, p.updated_at DESC
             LIMIT @limit
         `).all(params);
 

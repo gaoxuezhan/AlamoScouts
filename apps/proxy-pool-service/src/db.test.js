@@ -537,6 +537,10 @@ test('value board API should sort by value and parse breakdown and honor fields'
         ip_value_breakdown_json: JSON.stringify({ grade: 'A' }),
         honor_active_json: JSON.stringify(['钢铁连胜']),
         success_count: 8,
+        block_count: 1,
+        timeout_count: 2,
+        network_error_count: 3,
+        invalid_feedback_count: 4,
         total_samples: 10,
         battle_success_count: 3,
         battle_fail_count: 1,
@@ -550,6 +554,73 @@ test('value board API should sort by value and parse breakdown and honor fields'
         updated_at: now,
     });
 
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l1',
+        target: 'l1-a',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 20,
+        reason: 'ok',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l1',
+        target: 'l1-b',
+        outcome: 'blocked',
+        status_code: 403,
+        latency_ms: 30,
+        reason: 'blocked',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l1',
+        target: 'l1-c',
+        outcome: 'timeout',
+        status_code: null,
+        latency_ms: 35,
+        reason: 'timeout',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l2',
+        target: 'l2-a',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 40,
+        reason: 'ok',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l2',
+        target: 'l2-b',
+        outcome: 'invalid_feedback',
+        status_code: 200,
+        latency_ms: 45,
+        reason: 'bad',
+        details: {},
+    });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l3',
+        target: 'l3-a',
+        outcome: 'network_error',
+        status_code: null,
+        latency_ms: 50,
+        reason: 'err',
+        details: {},
+    });
+
     const board = h.db.getValueBoard(10);
     assert.equal(board.length, 2);
     assert.equal(board[0].ip_value_score >= board[1].ip_value_score, true);
@@ -558,6 +629,22 @@ test('value board API should sort by value and parse breakdown and honor fields'
     assert.deepEqual(board[1].honor_active, []);
     assert.equal(board[0].success_ratio, 0.8);
     assert.equal(board[0].battle_ratio, 0.75);
+    assert.equal(board[0].l0_success_count, 8);
+    assert.equal(board[0].l0_fail_count, 10);
+    assert.equal(board[0].l1_success_count, 1);
+    assert.equal(board[0].l1_fail_count, 2);
+    assert.equal(board[0].l2_success_count, 1);
+    assert.equal(board[0].l2_fail_count, 1);
+    assert.equal(board[0].l3_success_count, 0);
+    assert.equal(board[0].l3_fail_count, 1);
+    assert.equal(board[1].l0_success_count, 0);
+    assert.equal(board[1].l0_fail_count, 0);
+    assert.equal(board[1].l1_success_count, 0);
+    assert.equal(board[1].l1_fail_count, 0);
+    assert.equal(board[1].l2_success_count, 0);
+    assert.equal(board[1].l2_fail_count, 0);
+    assert.equal(board[1].l3_success_count, 0);
+    assert.equal(board[1].l3_fail_count, 0);
 
     const filtered = h.db.getValueBoard(10, 'active');
     assert.equal(filtered.length, 1);
