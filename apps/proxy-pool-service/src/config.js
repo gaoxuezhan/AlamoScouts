@@ -210,6 +210,26 @@ const l2LookbackByProfile = {
     soak: 25,
 };
 
+const defaultBattleL3Targets = [
+    {
+        name: 'ly-flight-browser',
+        url: process.env.PROXY_HUB_BATTLE_L3_PRIMARY_URL
+            || process.env.PROXY_HUB_BATTLE_L2_PRIMARY_URL
+            || 'https://www.ly.com/flights/home',
+    },
+];
+const resolvedBattleL3Targets = parseJsonArrayEnv(
+    process.env.PROXY_HUB_BATTLE_L3_TARGETS_JSON,
+    defaultBattleL3Targets,
+).map((target) => ({
+    name: String(target?.name || target?.url || 'l3-target'),
+    url: String(target?.url || ''),
+})).filter((target) => target.url.length > 0);
+const resolvedBattleL3Protocols = String(process.env.PROXY_HUB_BATTLE_L3_ALLOWED_PROTOCOLS || 'http,https,socks5')
+    .split(',')
+    .map((protocol) => String(protocol || '').trim().toLowerCase())
+    .filter((protocol, index, list) => protocol.length > 0 && list.indexOf(protocol) === index);
+
 // 0232_hasOwnEnv_检查环境变量是否显式配置逻辑
 function hasOwnEnv(name) {
     return Object.prototype.hasOwnProperty.call(process.env, name);
@@ -457,6 +477,16 @@ module.exports = {
         timeoutMs: {
             l1: Number(process.env.PROXY_HUB_BATTLE_L1_TIMEOUT_MS || 5_000),
             l2: Number(process.env.PROXY_HUB_BATTLE_L2_TIMEOUT_MS || 8_000),
+        },
+        l3: {
+            enabled: toBool(process.env.PROXY_HUB_BATTLE_L3_ENABLED, true),
+            syncMs: Number(process.env.PROXY_HUB_BATTLE_L3_MS || 2_700_000),
+            maxPerCycle: Number(process.env.PROXY_HUB_BATTLE_L3_MAX || 12),
+            concurrency: Number(process.env.PROXY_HUB_BATTLE_L3_CONCURRENCY || 3),
+            lookbackMinutes: Number(process.env.PROXY_HUB_BATTLE_L3_LOOKBACK_MINUTES || l2LookbackByProfile[activeProfile]),
+            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 12_000),
+            allowedProtocols: deepClone(resolvedBattleL3Protocols),
+            targets: deepClone(resolvedBattleL3Targets),
         },
         blockedStatusCodes: [401, 403, 429, 503],
         blockSignals: [
