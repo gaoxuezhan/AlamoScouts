@@ -28,6 +28,15 @@ function normalizeLimit(value, fallback, min, max) {
     return Math.max(min, Math.min(max, normalized));
 }
 
+// 0268_normalizeBooleanFlag_规范化布尔开关逻辑
+function normalizeBooleanFlag(value, fallback = false) {
+    if (value == null) return fallback;
+    const text = String(value).trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+    if (['0', 'false', 'no', 'off'].includes(text)) return false;
+    return fallback;
+}
+
 // 0093_createRuntime_创建运行时逻辑
 function createRuntime(options = {}) {
     const config = options.config || defaultConfig;
@@ -103,12 +112,24 @@ function createRuntime(options = {}) {
         res.type('html').send(renderRuntimeLogsPage());
     });
 
-    app.get('/v1/proxies/pool-status', (_req, res) => {
+    app.get('/v1/proxies/pool-status', (req, res) => {
+        const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
+        const sourceDistribution = db.getSourceDistribution({ excludeRetired });
+        const lifecycleDistribution = db.getLifecycleDistribution({ excludeRetired });
+        let latestSnapshot = db.getLatestSnapshot();
+        if (excludeRetired && latestSnapshot) {
+            latestSnapshot = {
+                ...latestSnapshot,
+                source_distribution: sourceDistribution,
+                rank_distribution: db.getRankBoard({ excludeRetired }),
+                lifecycle_distribution: lifecycleDistribution,
+            };
+        }
         res.json({
             poolStatus: workerPool.getStatus(),
-            sourceDistribution: db.getSourceDistribution(),
-            lifecycleDistribution: db.getLifecycleDistribution(),
-            latestSnapshot: db.getLatestSnapshot(),
+            sourceDistribution,
+            lifecycleDistribution,
+            latestSnapshot,
         });
     });
 
@@ -116,9 +137,10 @@ function createRuntime(options = {}) {
         const limit = normalizeLimit(req.query.limit, 200, 1, 500);
         const rank = req.query.rank ? String(req.query.rank) : undefined;
         const lifecycle = req.query.lifecycle ? String(req.query.lifecycle) : undefined;
+        const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
 
         res.json({
-            items: db.getProxyList({ limit, rank, lifecycle }),
+            items: db.getProxyList({ limit, rank, lifecycle, excludeRetired }),
         });
     });
 
@@ -139,8 +161,9 @@ function createRuntime(options = {}) {
     app.get('/v1/proxies/value-board', (req, res) => {
         const limit = normalizeLimit(req.query.limit, 100, 1, 500);
         const lifecycle = req.query.lifecycle ? String(req.query.lifecycle) : undefined;
+        const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
         res.json({
-            items: db.getValueBoard(limit, lifecycle),
+            items: db.getValueBoard(limit, lifecycle, { excludeRetired }),
         });
     });
 
@@ -359,9 +382,16 @@ function createRuntime(options = {}) {
         });
     });
 
-    app.get('/v1/proxies/ranks/board', (_req, res) => {
+    app.get('/v1/proxies/ranks/board', (req, res) => {
+        const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
         res.json({
-            items: db.getRankBoard(),
+            items: db.getRankBoard({ excludeRetired }),
+        });
+    });
+
+    app.get('/v1/proxies/recruit-camp', (_req, res) => {
+        res.json({
+            items: db.getRecruitCampBoard(),
         });
     });
 

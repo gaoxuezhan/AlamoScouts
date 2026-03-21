@@ -65,7 +65,7 @@
     </section>
 
     <section class="card">
-      <h2>来源分布 / 生命周期 / 军衔分布</h2>
+      <h2>来源分布 / 生命周期 / 现役军衔分布 / 新兵训练营</h2>
       <div class="content"><div id="distributions"></div></div>
     </section>
 
@@ -164,10 +164,21 @@ function renderDistributions(snapshot) {
   const src = (snapshot.sourceDistribution || []).map(function(x){ return '<span class="pill">' + esc(x.source) + ': ' + x.count + '</span>'; }).join('');
   const life = (snapshot.lifecycleDistribution || []).map(function(x){ return '<span class="pill">' + esc(x.lifecycle) + ': ' + x.count + '</span>'; }).join('');
   const rank = (snapshot.rankBoard || []).map(function(x){ return '<span class="pill">' + esc(x.rank) + ': ' + x.count + '</span>'; }).join('');
+  const recruitMap = { active: 0, reserve: 0, candidate: 0 };
+  (snapshot.recruitCamp || []).forEach(function(x){
+    if (x && Object.prototype.hasOwnProperty.call(recruitMap, x.lifecycle)) {
+      recruitMap[x.lifecycle] = Number(x.count || 0);
+    }
+  });
+  const recruit = ''
+    + '<span class="pill">active(新兵连): ' + recruitMap.active + '</span>'
+    + '<span class="pill">reserve(医务室): ' + recruitMap.reserve + '</span>'
+    + '<span class="pill">candidate(预备队): ' + recruitMap.candidate + '</span>';
   distributions.innerHTML = ''
     + '<div><strong>来源分布</strong><div>' + (src || '-') + '</div></div>'
     + '<div style="margin-top:8px"><strong>生命周期</strong><div>' + (life || '-') + '</div></div>'
-    + '<div style="margin-top:8px"><strong>军衔分布</strong><div>' + (rank || '-') + '</div></div>';
+    + '<div style="margin-top:8px"><strong>现役军衔分布</strong><div>' + (rank || '-') + '</div></div>'
+    + '<div style="margin-top:8px"><strong>新兵训练营</strong><div>' + recruit + '</div></div>';
 }
 
 function renderSimpleTable(el, headers, rows) {
@@ -184,26 +195,33 @@ function renderSimpleTable(el, headers, rows) {
 
 async function loadAll() {
   const data = await Promise.all([
-    fetch('/v1/proxies/pool-status').then(function(r){ return r.json(); }),
-    fetch('/v1/proxies/ranks/board').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/pool-status?excludeRetired=true').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/ranks/board?excludeRetired=true').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/recruit-camp').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/honors?limit=30').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/retirements?limit=30').then(function(r){ return r.json(); }),
-    fetch('/v1/proxies/value-board?limit=100').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/value-board?limit=100&excludeRetired=true').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/policy').then(function(r){ return r.json(); }),
     fetch('/v1/proxies/events?limit=50').then(function(r){ return r.json(); }),
-    fetch('/v1/proxies/list?limit=50').then(function(r){ return r.json(); }),
+    fetch('/v1/proxies/list?limit=50&excludeRetired=true').then(function(r){ return r.json(); }),
   ]);
 
   const pool = data[0];
   const ranks = data[1];
-  const honors = data[2];
-  const retires = data[3];
-  const values = data[4];
-  const policyPayload = data[5];
-  const events = data[6];
-  const proxies = data[7];
+  const recruitCamp = data[2];
+  const honors = data[3];
+  const retires = data[4];
+  const values = data[5];
+  const policyPayload = data[6];
+  const events = data[7];
+  const proxies = data[8];
   renderPool(pool.poolStatus);
-  renderDistributions({ sourceDistribution: pool.sourceDistribution, lifecycleDistribution: pool.lifecycleDistribution, rankBoard: ranks.items });
+  renderDistributions({
+    sourceDistribution: pool.sourceDistribution,
+    lifecycleDistribution: pool.lifecycleDistribution,
+    rankBoard: ranks.items,
+    recruitCamp: recruitCamp.items,
+  });
 
   renderSimpleTable(honorTable, ['时间', '代理', '荣誉', '状态', '原因'], (honors.items || []).map(function(x){
     return '<tr><td class="mono">' + esc(x.awarded_at) + '</td><td>' + esc(x.display_name) + '</td><td>' + esc(x.honor_type) + '</td><td class="' + (x.active ? 'ok' : 'warn') + '">' + (x.active ? '激活' : '历史') + '</td><td>' + esc(x.reason || '-') + '</td></tr>';
