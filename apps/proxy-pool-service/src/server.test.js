@@ -131,8 +131,9 @@ function createStubs() {
         getProxyList: () => [{ id: 1 }],
         getEvents: () => [{ id: 2 }],
         getBattleTestRuns: () => [{ id: 6, stage: 'l1' }],
-        getValueBoard: () => [{ id: 7, ip_value_score: 88.8 }],
+        getValueBoard: () => [{ id: 7, ip_value_score: 88.8, service_branch: '陆军' }],
         getRankBoard: () => [{ rank: '新兵', count: 1 }],
+        getServiceBranchDistribution: () => [{ service_branch: '陆军', count: 1 }],
         getRecruitCampBoard: () => [
             { lifecycle: 'active', label: '新兵连', count: 1 },
             { lifecycle: 'reserve', label: '医务室', count: 0 },
@@ -259,10 +260,12 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/pool-status',
         '/v1/proxies/list?limit=9999',
         '/v1/proxies/list?limit=10&rank=%E5%88%97%E5%85%B5&lifecycle=active',
+        '/v1/proxies/list?limit=10&serviceBranch=%E6%B5%B7%E5%86%9B',
         '/v1/proxies/events?limit=0',
         '/v1/proxies/battle-tests?limit=1000',
         '/v1/proxies/value-board?limit=20',
         '/v1/proxies/value-board?limit=20&lifecycle=active',
+        '/v1/proxies/value-board?limit=20&serviceBranch=%E6%B5%B7%E5%86%9B',
         '/v1/proxies/policy',
         '/v1/proxies/rollout',
         '/v1/proxies/rollout/guardrails',
@@ -270,6 +273,7 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         '/v1/proxies/rollout/orchestrator/events',
         '/v1/proxies/candidate-control',
         '/v1/proxies/ranks/board',
+        '/v1/proxies/branches/board',
         '/v1/proxies/recruit-camp',
         '/v1/proxies/honors?limit=1000',
         '/v1/proxies/retirements?limit=-1',
@@ -438,6 +442,7 @@ test('excludeRetired flag should be forwarded to admin stats endpoints', async (
         source: [],
         lifecycle: [],
         rank: [],
+        branch: [],
         list: [],
         value: [],
     };
@@ -460,6 +465,10 @@ test('excludeRetired flag should be forwarded to admin stats endpoints', async (
         calls.rank.push(options);
         return [{ rank: '新兵', count: 1 }];
     };
+    stubs.db.getServiceBranchDistribution = (options) => {
+        calls.branch.push(options);
+        return [{ service_branch: '海军', count: 1 }];
+    };
     stubs.db.getProxyList = (options) => {
         calls.list.push(options);
         return [];
@@ -480,8 +489,9 @@ test('excludeRetired flag should be forwarded to admin stats endpoints', async (
         const poolStatusRes = await fetch(baseUrl + '/v1/proxies/pool-status?excludeRetired=true');
         const poolStatus = await poolStatusRes.json();
         await fetch(baseUrl + '/v1/proxies/ranks/board?excludeRetired=true');
-        await fetch(baseUrl + '/v1/proxies/list?limit=20&excludeRetired=true');
-        await fetch(baseUrl + '/v1/proxies/value-board?limit=20&excludeRetired=true');
+        await fetch(baseUrl + '/v1/proxies/branches/board?excludeRetired=true');
+        await fetch(baseUrl + '/v1/proxies/list?limit=20&excludeRetired=true&serviceBranch=%E6%B5%B7%E5%86%9B');
+        await fetch(baseUrl + '/v1/proxies/value-board?limit=20&excludeRetired=true&serviceBranch=%E6%B5%B7%E5%86%9B');
         await fetch(baseUrl + '/v1/proxies/list?limit=20&excludeRetired=off');
         await fetch(baseUrl + '/v1/proxies/list?limit=20&excludeRetired=not-bool');
         const campRes = await fetch(baseUrl + '/v1/proxies/recruit-camp');
@@ -490,10 +500,13 @@ test('excludeRetired flag should be forwarded to admin stats endpoints', async (
         assert.equal(calls.source.at(-1).excludeRetired, true);
         assert.equal(calls.lifecycle.at(-1).excludeRetired, true);
         assert.equal(calls.rank.at(-2).excludeRetired, true);
+        assert.equal(calls.branch.at(-1).excludeRetired, true);
         assert.equal(calls.list.at(-3).excludeRetired, true);
+        assert.equal(calls.list.at(-3).serviceBranch, '海军');
         assert.equal(calls.list.at(-2).excludeRetired, false);
         assert.equal(calls.list.at(-1).excludeRetired, false);
         assert.equal(calls.value.at(-1).options.excludeRetired, true);
+        assert.equal(calls.value.at(-1).options.serviceBranch, '海军');
         assert.deepEqual(poolStatus.latestSnapshot.source_distribution, [{ source: 'filtered-source', count: 1 }]);
         assert.deepEqual(poolStatus.latestSnapshot.rank_distribution, [{ rank: '新兵', count: 1 }]);
         assert.deepEqual(poolStatus.latestSnapshot.lifecycle_distribution, [{ lifecycle: 'active', count: 1 }]);
@@ -619,6 +632,21 @@ test('candidate control GET should prefer lifecycleCount when available', async 
         assert.equal(body.candidateCount, 5);
     } finally {
         await runtime.shutdown('TEST-CANDIDATE-CONTROL-LIFECYCLE-COUNT');
+    }
+});
+
+test('branches board endpoint should fallback when db method is missing', async () => {
+    const stubs = createStubs();
+    stubs.db.getServiceBranchDistribution = undefined;
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/branches/board?excludeRetired=true');
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.deepEqual(body.items, []);
+    } finally {
+        await runtime.shutdown('TEST-BRANCH-BOARD-FALLBACK');
     }
 });
 

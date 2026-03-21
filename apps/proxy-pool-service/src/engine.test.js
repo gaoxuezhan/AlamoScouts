@@ -16,6 +16,8 @@ const {
     readFailureBackoff,
     resolveFailureBackoff,
     resolveSourceFeeds,
+    readBranchingConfig,
+    resolveBranchingTransition,
     ProxyHubEngine,
 } = require('./engine');
 
@@ -194,6 +196,159 @@ test('engine utility functions should cover helper branches', async () => {
         multiplier: 1.8,
         maxMs: 21600000,
     });
+    const branchPolicy = readBranchingConfig({});
+    assert.equal(branchPolicy.enabled, true);
+    assert.equal(branchPolicy.defaultBranch, '陆军');
+    assert.equal(Array.isArray(branchPolicy.rules), true);
+    assert.equal(branchPolicy.rules.length >= 4, true);
+    const disabledPolicy = readBranchingConfig({ branching: { enabled: false } });
+    assert.equal(disabledPolicy.enabled, false);
+    const normalizedPolicy = readBranchingConfig({
+        branching: {
+            rules: [{
+                id: 'norm',
+                stage: 'l9',
+                outcomes: [],
+                from: [],
+                failStreakOp: 'bad-op',
+                fallbackAt: 'bad',
+                failStreakValue: 'bad',
+            }],
+        },
+    });
+    assert.equal(normalizedPolicy.rules[0].failStreakOp, 'none');
+    assert.equal(normalizedPolicy.rules[0].fallbackAt, null);
+    assert.equal(normalizedPolicy.rules[0].failStreakValue, 0);
+    const generatedIdPolicy = readBranchingConfig({
+        branching: {
+            rules: [{
+                stage: 'l2',
+                outcomes: ['success'],
+                from: ['陆军'],
+            }],
+        },
+    });
+    assert.equal(generatedIdPolicy.rules[0].id, 'branch_rule_1');
+    const stringRulePolicy = readBranchingConfig({
+        branching: {
+            rules: [{
+                id: 'string-rule',
+                stages: 'l2',
+                outcomes: 'success',
+                from: '陆军',
+            }],
+        },
+    });
+    assert.deepEqual(stringRulePolicy.rules[0].stages, ['*']);
+    assert.deepEqual(stringRulePolicy.rules[0].outcomes, ['*']);
+    assert.deepEqual(stringRulePolicy.rules[0].from, ['*']);
+    const branchPromote = resolveBranchingTransition({
+        proxy: { service_branch: '陆军', branch_fail_streak: 0 },
+        stage: 'l2',
+        outcome: 'success',
+        config: {},
+    });
+    assert.equal(branchPromote.updates.service_branch, '海军');
+    assert.equal(branchPromote.updates.branch_fail_streak, undefined);
+    assert.equal(branchPromote.events[0].event_type, 'branch_transfer');
+    const branchDisabled = resolveBranchingTransition({
+        proxy: { service_branch: '陆军', branch_fail_streak: 0 },
+        stage: 'l2',
+        outcome: 'success',
+        config: { branching: { enabled: false } },
+    });
+    assert.deepEqual(branchDisabled, { updates: {}, events: [] });
+    const branchNoMatch = resolveBranchingTransition({
+        proxy: { service_branch: '陆军', branch_fail_streak: 0 },
+        stage: 'l9',
+        outcome: 'blocked',
+        config: {},
+    });
+    assert.deepEqual(branchNoMatch, { updates: {}, events: [] });
+    const branchSet = resolveBranchingTransition({
+        proxy: { service_branch: '空军', branch_fail_streak: 1 },
+        stage: 'l9',
+        outcome: 'success',
+        config: {
+            branching: {
+                rules: [{
+                    id: 'set-streak',
+                    stage: 'l9',
+                    outcomes: ['success'],
+                    from: ['空军'],
+                    failStreakOp: 'set',
+                    failStreakValue: 4,
+                }],
+            },
+        },
+    });
+    assert.equal(branchSet.updates.branch_fail_streak, 4);
+    assert.equal(branchSet.events[0].event_type, 'branch_streak');
+    const branchNoop = resolveBranchingTransition({
+        proxy: { service_branch: '空军', branch_fail_streak: 4 },
+        stage: 'l9',
+        outcome: 'success',
+        config: {
+            branching: {
+                rules: [{
+                    id: 'set-streak-noop',
+                    stage: 'l9',
+                    outcomes: ['success'],
+                    from: ['空军'],
+                    failStreakOp: 'set',
+                    failStreakValue: 4,
+                }],
+            },
+        },
+    });
+    assert.deepEqual(branchNoop, { updates: {}, events: [] });
+    const branchResetOnly = resolveBranchingTransition({
+        proxy: { service_branch: '海军', branch_fail_streak: 2 },
+        stage: 'l2',
+        outcome: 'success',
+        config: {},
+    });
+    assert.equal(branchResetOnly.updates.branch_fail_streak, 0);
+    assert.equal(branchResetOnly.events[0].event_type, 'branch_streak_reset');
+    assert.equal(branchResetOnly.events[0].message.includes('编制计数清零'), true);
+    const branchFallbackDefault = resolveBranchingTransition({
+        proxy: { service_branch: '海军', branch_fail_streak: 0 },
+        stage: 'l9',
+        outcome: 'blocked',
+        config: {
+            branching: {
+                defaultBranch: '预备役',
+                rules: [{
+                    id: 'fallback-default',
+                    stage: 'l9',
+                    outcomes: ['blocked'],
+                    from: ['海军'],
+                    failStreakOp: 'increment',
+                    fallbackAt: 1,
+                }],
+            },
+        },
+    });
+    assert.equal(branchFallbackDefault.updates.service_branch, '预备役');
+    assert.equal(branchFallbackDefault.events[0].event_type, 'branch_fallback');
+    const branchEmptyInputs = resolveBranchingTransition({
+        proxy: { service_branch: '', branch_fail_streak: 0 },
+        stage: '',
+        outcome: '',
+        config: {
+            branching: {
+                defaultBranch: '陆军',
+                rules: [{
+                    id: 'empty-inputs',
+                    stages: ['*'],
+                    outcomes: ['*'],
+                    from: ['陆军'],
+                    to: '海军',
+                }],
+            },
+        },
+    });
+    assert.equal(branchEmptyInputs.updates.service_branch, '海军');
     assert.deepEqual(resolveSourceFeeds(), []);
     assert.deepEqual(resolveSourceFeeds({ source: {} }), []);
     assert.equal(resolveSourceFeeds({
@@ -423,6 +578,40 @@ test('runSourceCycle should skip when not started or source disabled', async () 
 
     assert.equal(logger.entries.length, 0);
     cleanupDb(h);
+});
+
+test('runValidationCycle should use proxy source first and fallback to sourceName', async () => {
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-validation-source.db'));
+    const logger = createLogger();
+    const candidates = [
+        { id: 1, source: 'proxy-source-a' },
+        { id: 2 },
+    ];
+    const db = {
+        listProxiesForValidation() {
+            return candidates;
+        },
+    };
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger });
+    const seenSources = [];
+    engine.processProxy = async (proxy, source) => {
+        seenSources.push(`${proxy.id}:${source}`);
+    };
+
+    await engine.runValidationCycle('fallback-source');
+
+    assert.deepEqual(seenSources, [
+        '1:proxy-source-a',
+        '2:fallback-source',
+    ]);
 });
 
 test('runSourceCycle and processProxy should handle success path', async () => {
@@ -1212,6 +1401,113 @@ test('applyCombatOutcome should return early when proxy does not exist', async (
         stage: '评分',
     });
     assert.equal(logger.entries.length, 0);
+});
+
+test('resolveBranchingTransition should support custom rule extension', () => {
+    const transition = resolveBranchingTransition({
+        proxy: {
+            service_branch: '空军',
+            branch_fail_streak: 0,
+        },
+        stage: 'l9',
+        outcome: 'success',
+        config: {
+            branching: {
+                rules: [
+                    {
+                        id: 'custom-l9',
+                        priority: 1,
+                        stage: 'l9',
+                        outcomes: ['success'],
+                        from: ['空军'],
+                        to: '天军',
+                        failStreakOp: 'reset',
+                    },
+                ],
+            },
+        },
+    });
+
+    assert.equal(transition.updates.service_branch, '天军');
+    assert.equal(transition.updates.branch_fail_streak, undefined);
+    assert.equal(transition.events.length, 1);
+    assert.equal(transition.events[0].event_type, 'branch_transition');
+});
+
+test('applyCombatOutcome should apply l2 branch transfer and fallback rules', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const now = '2026-03-14T10:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.91', port: 8080, protocol: 'http' }],
+        () => '编制-流转-91',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger });
+
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'success',
+        latencyMs: 20,
+        nowIso: '2026-03-14T10:00:00.000Z',
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+    const promoted = h.db.getProxyById(proxy.id);
+    assert.equal(promoted.service_branch, '海军');
+    assert.equal(promoted.branch_fail_streak, 0);
+
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'network_error',
+        latencyMs: 0,
+        nowIso: '2026-03-14T10:10:00.000Z',
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'network_error',
+        latencyMs: 0,
+        nowIso: '2026-03-14T10:20:00.000Z',
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+    const beforeFallback = h.db.getProxyById(proxy.id);
+    assert.equal(beforeFallback.service_branch, '海军');
+    assert.equal(beforeFallback.branch_fail_streak, 2);
+
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l2',
+        outcome: 'network_error',
+        latencyMs: 0,
+        nowIso: '2026-03-14T10:30:00.000Z',
+        stage: '评分(L2)',
+        combatStage: 'l2',
+    });
+    const fallenBack = h.db.getProxyById(proxy.id);
+    assert.equal(fallenBack.service_branch, '陆军');
+    assert.equal(fallenBack.branch_fail_streak, 0);
+    assert.equal(h.db.getEvents(50).some((item) => item.event_type === 'branch_fallback'), true);
+    assert.equal(logger.entries.some((item) => item.event === '编制流转'), true);
+
+    cleanupDb(h);
 });
 
 test('runBattleL1Cycle should cover guard and error branches', async () => {

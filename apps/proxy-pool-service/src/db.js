@@ -64,6 +64,8 @@ class ProxyHubDb {
                 display_name TEXT NOT NULL UNIQUE,
                 lifecycle TEXT NOT NULL DEFAULT 'candidate',
                 rank TEXT NOT NULL DEFAULT '新兵',
+                service_branch TEXT NOT NULL DEFAULT '陆军',
+                branch_fail_streak INTEGER NOT NULL DEFAULT 0,
                 service_hours REAL NOT NULL DEFAULT 0,
                 rank_service_hours REAL NOT NULL DEFAULT 0,
                 combat_points INTEGER NOT NULL DEFAULT 0,
@@ -313,6 +315,8 @@ class ProxyHubDb {
             { name: 'last_l1_success_at', sql: 'TEXT' },
             { name: 'backoff_until', sql: 'TEXT' },
             { name: 'backoff_reason', sql: 'TEXT' },
+            { name: 'service_branch', sql: "TEXT NOT NULL DEFAULT '陆军'" },
+            { name: 'branch_fail_streak', sql: 'INTEGER NOT NULL DEFAULT 0' },
         ];
 
         for (const column of requiredColumns) {
@@ -1066,7 +1070,7 @@ class ProxyHubDb {
     }
 
     // 0187_getProxyList_获取代理列表逻辑
-    getProxyList({ limit = 200, rank, lifecycle, excludeRetired = false } = {}) {
+    getProxyList({ limit = 200, rank, lifecycle, serviceBranch, excludeRetired = false } = {}) {
         const clauses = [];
         const params = {};
 
@@ -1078,6 +1082,10 @@ class ProxyHubDb {
             clauses.push('lifecycle = @lifecycle');
             params.lifecycle = lifecycle;
         }
+        if (serviceBranch) {
+            clauses.push('service_branch = @service_branch');
+            params.service_branch = serviceBranch;
+        }
         if (excludeRetired) {
             clauses.push("lifecycle != 'retired'");
         }
@@ -1085,6 +1093,7 @@ class ProxyHubDb {
         const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
         return this.db.prepare(`
             SELECT id, display_name, ip, port, protocol, source, lifecycle, rank,
+                service_branch, branch_fail_streak,
                 service_hours, rank_service_hours, combat_points, health_score, discipline_score,
                 success_count, block_count, timeout_count, network_error_count,
                 total_samples, retired_type, is_applied, updated_at, last_checked_at,
@@ -1129,9 +1138,14 @@ class ProxyHubDb {
         const clauses = [];
         const params = { limit: safeLimit };
         const excludeRetired = options.excludeRetired === true;
+        const serviceBranch = options.serviceBranch ? String(options.serviceBranch) : undefined;
         if (lifecycle) {
             clauses.push('lifecycle = @lifecycle');
             params.lifecycle = String(lifecycle);
+        }
+        if (serviceBranch) {
+            clauses.push('service_branch = @service_branch');
+            params.service_branch = serviceBranch;
         }
         if (excludeRetired) {
             clauses.push("lifecycle != 'retired'");
@@ -1140,6 +1154,7 @@ class ProxyHubDb {
         const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
         const rows = this.db.prepare(`
             SELECT id, display_name, ip, port, protocol, source, lifecycle, rank,
+                service_branch,
                 ip_value_score, ip_value_breakdown_json,
                 combat_points, health_score, discipline_score,
                 success_count, total_samples, battle_success_count, battle_fail_count,
@@ -1394,6 +1409,19 @@ class ProxyHubDb {
             FROM proxies
             ${where}
             GROUP BY lifecycle
+        `).all();
+    }
+
+    // 0272_getServiceBranchDistribution_获取编制分布逻辑
+    getServiceBranchDistribution(options = {}) {
+        const excludeRetired = options.excludeRetired === true;
+        const where = excludeRetired ? "WHERE lifecycle != 'retired'" : '';
+        return this.db.prepare(`
+            SELECT service_branch, COUNT(*) AS count
+            FROM proxies
+            ${where}
+            GROUP BY service_branch
+            ORDER BY count DESC, service_branch ASC
         `).all();
     }
 

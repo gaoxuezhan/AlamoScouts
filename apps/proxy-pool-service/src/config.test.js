@@ -34,6 +34,9 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_SOURCE_FORMAT',
         'PROXY_HUB_SOURCE_PROFILE',
         'PROXY_HUB_SPEEDX_SOCKS4_ENABLED',
+        'PROXY_HUB_BRANCHING_ENABLED',
+        'PROXY_HUB_BRANCHING_DEFAULT',
+        'PROXY_HUB_BRANCHING_RULES_JSON',
         'PROXY_HUB_DB_PATH',
         ...Object.keys(overrides),
     ]);
@@ -78,6 +81,9 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.source.profiles.monosans_archive.enabled, false);
     assert.equal(config.storage.dbPath.includes('proxyhub-speedx-bundle.db'), true);
     assert.equal(config.validation.allowedProtocols.includes('socks4'), true);
+    assert.equal(config.branching.defaultBranch, '陆军');
+    assert.equal(Array.isArray(config.branching.rules), true);
+    assert.equal(config.branching.rules.length >= 4, true);
     assert.equal(config.battle.enabled, true);
     assert.equal(config.battle.l1SyncMs, 300000);
     assert.equal(config.battle.l2SyncMs, 1800000);
@@ -145,6 +151,46 @@ test('config should allow re-enable speedx socks4 feed by env switch', { concurr
 
     assert.equal(config.source.activeProfile, 'speedx_bundle');
     assert.equal(config.source.activeFeeds.some((feed) => feed.name === 'TheSpeedX/socks4' && feed.enabled === true), true);
+});
+
+test('config should support branching env overrides', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BRANCHING_ENABLED: 'false',
+        PROXY_HUB_BRANCHING_DEFAULT: '空军',
+        PROXY_HUB_BRANCHING_RULES_JSON: JSON.stringify([
+            {
+                id: 'custom',
+                priority: 1,
+                stage: 'l2',
+                outcomes: ['success'],
+                from: ['空军'],
+                to: '太空军',
+            },
+        ]),
+    });
+
+    assert.equal(config.branching.enabled, false);
+    assert.equal(config.branching.defaultBranch, '空军');
+    assert.equal(config.branching.rules.length, 1);
+    assert.equal(config.branching.rules[0].id, 'custom');
+});
+
+test('config should fallback branching rules when env json is invalid', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BRANCHING_RULES_JSON: '{bad-json',
+    });
+
+    assert.equal(Array.isArray(config.branching.rules), true);
+    assert.equal(config.branching.rules.length >= 4, true);
+});
+
+test('config should fallback branching rules when env json is not an array', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BRANCHING_RULES_JSON: '{"id":"not-array"}',
+    });
+
+    assert.equal(Array.isArray(config.branching.rules), true);
+    assert.equal(config.branching.rules.length >= 4, true);
 });
 
 test('config should prioritize explicit PROXY_HUB_DB_PATH over profile db mapping', { concurrency: false }, () => {
