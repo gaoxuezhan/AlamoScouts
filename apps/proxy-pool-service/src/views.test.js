@@ -23,6 +23,14 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes(" + ' [' + serviceBranch + ']'"), false);
     assert.equal(html.includes("esc(displayName) + '</td>'"), true);
     assert.equal(html.includes("esc(serviceBranch) + '</td>'"), true);
+    assert.equal(html.includes("label: 'L0(成功/失败)'"), true);
+    assert.equal(html.includes("label: 'L1(成功/失败)'"), true);
+    assert.equal(html.includes("label: 'L2(成功/失败)'"), true);
+    assert.equal(html.includes("label: 'L3(成功/失败)'"), true);
+    assert.equal(html.includes("fmt(x.l0_success_count) + '/' + fmt(x.l0_fail_count)"), true);
+    assert.equal(html.includes("fmt(x.l1_success_count) + '/' + fmt(x.l1_fail_count)"), true);
+    assert.equal(html.includes("fmt(x.l2_success_count) + '/' + fmt(x.l2_fail_count)"), true);
+    assert.equal(html.includes("fmt(x.l3_success_count) + '/' + fmt(x.l3_fail_count)"), true);
 });
 
 test('renderRuntimeLogsPage should return static html', () => {

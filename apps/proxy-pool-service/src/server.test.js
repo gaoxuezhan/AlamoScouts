@@ -131,7 +131,19 @@ function createStubs() {
         getProxyList: () => [{ id: 1 }],
         getEvents: () => [{ id: 2 }],
         getBattleTestRuns: () => [{ id: 6, stage: 'l1' }],
-        getValueBoard: () => [{ id: 7, ip_value_score: 88.8, service_branch: '陆军' }],
+        getValueBoard: () => [{
+            id: 7,
+            ip_value_score: 88.8,
+            service_branch: '陆军',
+            l0_success_count: 9,
+            l0_fail_count: 1,
+            l1_success_count: 4,
+            l1_fail_count: 2,
+            l2_success_count: 3,
+            l2_fail_count: 1,
+            l3_success_count: 2,
+            l3_fail_count: 1,
+        }],
         getRankBoard: () => [{ rank: '新兵', count: 1 }],
         getServiceBranchDistribution: () => [{ service_branch: '陆军', count: 1 }],
         getRecruitCampBoard: () => [
@@ -284,6 +296,18 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         const res = await fetch(baseUrl + p, { signal: AbortSignal.timeout(10000) });
         assert.equal(res.status, 200);
     }
+
+    const valueBoardRes = await fetch(baseUrl + '/v1/proxies/value-board?limit=20');
+    const valueBoardPayload = await valueBoardRes.json();
+    assert.equal(valueBoardPayload.items.length > 0, true);
+    assert.equal(typeof valueBoardPayload.items[0].l0_success_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l0_fail_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l1_success_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l1_fail_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l2_success_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l2_fail_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l3_success_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l3_fail_count, 'number');
 
     const patchOk = await fetch(baseUrl + '/v1/proxies/policy', {
         method: 'POST',
