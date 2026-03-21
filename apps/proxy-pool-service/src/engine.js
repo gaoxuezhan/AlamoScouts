@@ -406,6 +406,52 @@ function resolveBranchingTransition({
     return { updates, events };
 }
 
+// 0281_createAbortSignal_创建中止信号逻辑
+function createAbortSignal(timeoutMs) {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        return AbortSignal.timeout(timeoutMs);
+    }
+    return undefined;
+}
+
+// 0282_readNativeLookupConfig_读取籍贯解析配置逻辑
+function readNativeLookupConfig(config = {}) {
+    const raw = config.native || {};
+    const targetBranches = Array.isArray(raw.targetBranches)
+        ? raw.targetBranches
+            .map((item) => String(item || '').trim())
+            .filter((item, index, list) => item.length > 0 && list.indexOf(item) === index)
+        : ['海军', '海豹突击队'];
+    return {
+        enabled: raw.enabled === true,
+        timeoutMs: Math.max(500, Number(raw.timeoutMs) || 3000),
+        retryHours: Math.max(1, Number(raw.retryHours) || 1),
+        targetBranches: targetBranches.length > 0 ? targetBranches : ['海军', '海豹突击队'],
+    };
+}
+
+// 0283_isNativeRetryDue_判断籍贯重试窗口逻辑
+function isNativeRetryDue(nextRetryAt, nowIso) {
+    if (!nextRetryAt) {
+        return true;
+    }
+    const nextMs = Date.parse(nextRetryAt);
+    if (!Number.isFinite(nextMs)) {
+        return true;
+    }
+    const nowMs = Date.parse(nowIso);
+    return Number.isFinite(nowMs) ? nextMs <= nowMs : nextMs <= Date.now();
+}
+
+// 0284_normalizeNativeLookupStatus_规范化籍贯状态逻辑
+function normalizeNativeLookupStatus(status) {
+    const text = String(status || '').trim().toLowerCase();
+    if (['pending', 'resolved', 'failed', 'skipped'].includes(text)) {
+        return text;
+    }
+    return 'pending';
+}
+
 class ProxyHubEngine extends EventEmitter {
     // 0027_constructor_初始化实例逻辑
     constructor({ config, db, workerPool, logger, now }) {
@@ -432,6 +478,7 @@ class ProxyHubEngine extends EventEmitter {
         this.isBattleL3Running = false;
         this.isCandidateSweepRunning = false;
         this.threadPoolAlerting = false;
+        this.nativeLookupInFlight = new Set();
     }
 
     // 0210_isBattleEnabled_判断战场测试开关逻辑
@@ -442,6 +489,280 @@ class ProxyHubEngine extends EventEmitter {
     // 0278_isBattleL3Enabled_判断战场L3开关逻辑
     isBattleL3Enabled() {
         return this.isBattleEnabled() && this.config?.battle?.l3?.enabled === true;
+    }
+
+    // 0285_resolveNativeLookupDecision_解析籍贯查询决策逻辑
+    resolveNativeLookupDecision(proxy, nowIso = new Date().toISOString()) {
+        const policy = readNativeLookupConfig(this.config);
+        if (!policy.enabled) {
+            return { action: 'none', reason: 'native-disabled', policy };
+        }
+        if (!proxy || !proxy.id) {
+            return { action: 'none', reason: 'proxy-missing', policy };
+        }
+
+        const branch = String(proxy.service_branch || '').trim();
+        const isTargetBranch = policy.targetBranches.includes(branch);
+        const status = normalizeNativeLookupStatus(proxy.native_lookup_status);
+        if (!isTargetBranch) {
+            if (status === 'pending') {
+                return { action: 'skip', reason: 'branch-not-target', policy };
+            }
+            return { action: 'none', reason: 'branch-not-target', policy };
+        }
+
+        const nativePlace = String(proxy.native_place || '未知').trim() || '未知';
+        if (nativePlace !== '未知') {
+            return { action: 'none', reason: 'native-already-known', policy };
+        }
+        if (!isNativeRetryDue(proxy.native_next_retry_at, nowIso)) {
+            return { action: 'none', reason: 'retry-not-due', policy };
+        }
+
+        return { action: 'lookup', reason: 'eligible', policy };
+    }
+
+    // 0286_markNativeLookupSkipped_标记籍贯跳过逻辑
+    markNativeLookupSkipped(proxy, sourceName, nowIso, reason = 'branch-not-target') {
+        this.db.updateProxyById(proxy.id, {
+            native_lookup_status: 'skipped',
+            updated_at: nowIso,
+        });
+        const updatedProxy = this.db.getProxyById(proxy.id) || proxy;
+        this.db.insertProxyEvent({
+            timestamp: nowIso,
+            proxy_id: proxy.id,
+            display_name: updatedProxy.display_name,
+            event_type: 'native_lookup_skipped',
+            level: EVENT_LEVEL.INFO,
+            message: `籍贯解析跳过：${updatedProxy.display_name}`,
+            details: {
+                ip: updatedProxy.ip,
+                service_branch: updatedProxy.service_branch,
+                provider: 'ip-api',
+                status: 'skipped',
+                reason,
+            },
+        });
+        this.logger.write({
+            event: '籍贯解析跳过',
+            proxyName: updatedProxy.display_name,
+            ipSource: sourceName,
+            stage: '籍贯',
+            result: '跳过',
+            reason,
+            action: '非目标兵种，不触发查询',
+            details: {
+                ip: updatedProxy.ip,
+                service_branch: updatedProxy.service_branch,
+                provider: 'ip-api',
+                status: 'skipped',
+                reason,
+            },
+        });
+    }
+
+    // 0287_resolveNativePlaceByIp_解析IP籍贯逻辑
+    async resolveNativePlaceByIp(ip, timeoutMs = 3000) {
+        if (typeof fetch !== 'function') {
+            throw new Error('ip-api-fetch-unavailable');
+        }
+
+        const safeIp = String(ip || '').trim();
+        if (safeIp.length === 0) {
+            throw new Error('ip-api-ip-missing');
+        }
+
+        const response = await fetch(`http://ip-api.com/json/${encodeURIComponent(safeIp)}?lang=zh-CN`, {
+            signal: createAbortSignal(Math.max(500, Number(timeoutMs) || 3000)),
+            headers: {
+                'user-agent': 'ProxyHub/1.0',
+                accept: 'application/json',
+            },
+        });
+        if (!response.ok) {
+            throw new Error(`ip-api-http-${response.status}`);
+        }
+
+        const rawJson = await response.text();
+        let payload;
+        try {
+            payload = JSON.parse(rawJson);
+        } catch {
+            throw new Error('ip-api-invalid-json');
+        }
+
+        if (String(payload?.status || '').toLowerCase() !== 'success') {
+            const reason = String(payload?.message || 'request-failed').trim();
+            throw new Error(`ip-api-${reason}`);
+        }
+
+        const country = String(payload?.country || '').trim() || '未知';
+        const city = String(payload?.city || '').trim() || '未知';
+        return {
+            provider: 'ip-api',
+            country,
+            city,
+            place: `${country}-${city}`,
+            rawJson: rawJson || JSON.stringify(payload),
+        };
+    }
+
+    // 0288_runNativeLookupTask_执行籍贯补全任务逻辑
+    async runNativeLookupTask(proxyId, sourceName) {
+        const startedAtIso = this.now().toISOString();
+        const proxy = this.db.getProxyById(proxyId);
+        if (!proxy) {
+            return;
+        }
+
+        const decision = this.resolveNativeLookupDecision(proxy, startedAtIso);
+        if (decision.action === 'skip') {
+            this.markNativeLookupSkipped(proxy, sourceName, startedAtIso, decision.reason);
+            return;
+        }
+        if (decision.action !== 'lookup') {
+            return;
+        }
+
+        try {
+            const resolved = await this.resolveNativePlaceByIp(proxy.ip, decision.policy.timeoutMs);
+            const nowIso = this.now().toISOString();
+            const latestProxy = this.db.getProxyById(proxyId) || proxy;
+            const latestDecision = this.resolveNativeLookupDecision(latestProxy, nowIso);
+            if (latestDecision.action !== 'lookup') {
+                return;
+            }
+            this.db.updateProxyById(proxyId, {
+                native_country: resolved.country,
+                native_city: resolved.city,
+                native_place: resolved.place,
+                native_provider: resolved.provider,
+                native_resolved_at: nowIso,
+                native_lookup_status: 'resolved',
+                native_next_retry_at: null,
+                native_lookup_raw_json: resolved.rawJson,
+                updated_at: nowIso,
+            });
+            const updatedProxy = this.db.getProxyById(proxyId) || proxy;
+            this.db.insertProxyEvent({
+                timestamp: nowIso,
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                event_type: 'native_lookup_resolved',
+                level: EVENT_LEVEL.INFO,
+                message: `籍贯解析成功：${updatedProxy.display_name} -> ${resolved.place}`,
+                details: {
+                    ip: updatedProxy.ip,
+                    service_branch: updatedProxy.service_branch,
+                    provider: resolved.provider,
+                    status: 'resolved',
+                    reason: 'ip-api-success',
+                },
+            });
+            this.logger.write({
+                event: '籍贯解析成功',
+                proxyName: updatedProxy.display_name,
+                ipSource: sourceName,
+                stage: '籍贯',
+                result: resolved.place,
+                action: '已写入籍贯',
+                details: {
+                    ip: updatedProxy.ip,
+                    service_branch: updatedProxy.service_branch,
+                    provider: resolved.provider,
+                    status: 'resolved',
+                },
+            });
+        } catch (error) {
+            const nowIso = this.now().toISOString();
+            const latestProxy = this.db.getProxyById(proxyId) || proxy;
+            const latestDecision = this.resolveNativeLookupDecision(latestProxy, nowIso);
+            if (latestDecision.action !== 'lookup') {
+                return;
+            }
+            const retryMs = Math.round((decision.policy.retryHours || 1) * 3_600_000);
+            const retryAt = new Date(Date.parse(nowIso) + retryMs).toISOString();
+            const reason = error?.message || 'native-lookup-failed';
+            this.db.updateProxyById(proxyId, {
+                native_lookup_status: 'failed',
+                native_next_retry_at: retryAt,
+                updated_at: nowIso,
+            });
+            const updatedProxy = this.db.getProxyById(proxyId) || proxy;
+            this.db.insertProxyEvent({
+                timestamp: nowIso,
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                event_type: 'native_lookup_failed',
+                level: EVENT_LEVEL.INFO,
+                message: `籍贯解析失败：${updatedProxy.display_name}`,
+                details: {
+                    ip: updatedProxy.ip,
+                    service_branch: updatedProxy.service_branch,
+                    provider: 'ip-api',
+                    status: 'failed',
+                    reason,
+                    retryAt,
+                },
+            });
+            this.logger.write({
+                event: '籍贯解析失败',
+                proxyName: updatedProxy.display_name,
+                ipSource: sourceName,
+                stage: '籍贯',
+                result: '失败',
+                reason,
+                action: `等待重试至 ${retryAt}`,
+                details: {
+                    ip: updatedProxy.ip,
+                    service_branch: updatedProxy.service_branch,
+                    provider: 'ip-api',
+                    status: 'failed',
+                    reason,
+                    retryAt,
+                },
+            });
+        }
+    }
+
+    // 0289_scheduleNativeLookup_调度籍贯补全逻辑
+    scheduleNativeLookup(proxy, sourceName, nowIso) {
+        const decision = this.resolveNativeLookupDecision(proxy, nowIso);
+        if (decision.action === 'skip') {
+            this.markNativeLookupSkipped(proxy, sourceName, nowIso, decision.reason);
+            return;
+        }
+        if (decision.action !== 'lookup') {
+            return;
+        }
+        if (this.nativeLookupInFlight.has(proxy.id)) {
+            return;
+        }
+
+        this.nativeLookupInFlight.add(proxy.id);
+        const task = this.runNativeLookupTask(proxy.id, sourceName)
+            .catch((error) => {
+                this.logger.write({
+                    event: '籍贯解析失败',
+                    proxyName: proxy.display_name,
+                    ipSource: sourceName,
+                    stage: '籍贯',
+                    result: '异常',
+                    reason: error?.message || 'native-lookup-task-failed',
+                    action: '忽略异常，等待下一轮',
+                    details: {
+                        ip: proxy.ip,
+                        service_branch: proxy.service_branch,
+                        provider: 'ip-api',
+                        status: 'failed',
+                    },
+                });
+            })
+            .finally(() => {
+                this.nativeLookupInFlight.delete(proxy.id);
+            });
+        task.catch(() => {});
     }
 
     // 0028_start_启动逻辑
@@ -876,6 +1197,8 @@ class ProxyHubEngine extends EventEmitter {
                 details: event.details,
             });
         }
+
+        this.scheduleNativeLookup(updatedProxy, sourceName, nowIso);
 
         const activeHonors = parseArrayJson(updatedProxy.honor_active_json);
 
@@ -1501,6 +1824,9 @@ module.exports = {
     resolveSourceFeeds,
     readBranchingConfig,
     resolveBranchingTransition,
+    readNativeLookupConfig,
+    isNativeRetryDue,
+    normalizeNativeLookupStatus,
     ProxyHubEngine,
 };
 

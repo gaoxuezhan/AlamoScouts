@@ -25,6 +25,18 @@ function parseJsonArrayEnv(value, fallback) {
     }
 }
 
+// 0280_parseCsvListEnv_解析CSV列表环境变量逻辑
+function parseCsvListEnv(value, fallback = []) {
+    if (value == null || String(value).trim() === '') {
+        return deepClone(fallback);
+    }
+    const parsed = String(value)
+        .split(',')
+        .map((item) => String(item || '').trim())
+        .filter((item, index, list) => item.length > 0 && list.indexOf(item) === index);
+    return parsed.length > 0 ? parsed : deepClone(fallback);
+}
+
 const legacyRanks = [
     { rank: '新兵', minHours: 0, minPoints: 0, minSamples: 0 },
     { rank: '列兵', minHours: 12, minPoints: 80, minSamples: 20 },
@@ -319,6 +331,10 @@ const resolvedBranchingRules = parseJsonArrayEnv(
     process.env.PROXY_HUB_BRANCHING_RULES_JSON,
     defaultBranchingRules,
 );
+const resolvedNativeTargetBranches = parseCsvListEnv(
+    process.env.PROXY_HUB_NATIVE_TARGET_BRANCHES,
+    ['海军', '海豹突击队'],
+);
 
 const sourceProfiles = {
     speedx_bundle: {
@@ -534,6 +550,12 @@ module.exports = {
         failStreakField: 'branch_fail_streak',
         defaultBranch: String(process.env.PROXY_HUB_BRANCHING_DEFAULT || '陆军'),
         rules: deepClone(resolvedBranchingRules),
+    },
+    native: {
+        enabled: toBool(process.env.PROXY_HUB_NATIVE_ENABLED, true),
+        timeoutMs: Number(process.env.PROXY_HUB_NATIVE_TIMEOUT_MS || 3000),
+        retryHours: Number(process.env.PROXY_HUB_NATIVE_RETRY_HOURS || 1),
+        targetBranches: deepClone(resolvedNativeTargetBranches),
     },
     policyProfiles: deepClone(policyProfiles),
     policy: deepClone(policyProfiles[activeProfile]),

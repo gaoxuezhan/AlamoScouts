@@ -262,8 +262,13 @@ test('query list APIs should support filters and distributions', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'ip_value_score'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'service_branch'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'branch_fail_streak'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'native_place'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'native_lookup_status'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'native_lookup_raw_json'), true);
     assert.equal(all[0].service_branch, '陆军');
     assert.equal(all[0].branch_fail_streak, 0);
+    assert.equal(all[0].native_place, '未知');
+    assert.equal(all[0].native_lookup_status, 'pending');
 
     h.db.updateProxyById(all[0].id, {
         rank: '士官',
@@ -551,6 +556,12 @@ test('value board API should sort by value and parse breakdown and honor fields'
         ip_value_score: 40,
         ip_value_breakdown_json: '[]',
         honor_active_json: '',
+        native_place: '中国-北京',
+        native_country: '中国',
+        native_city: '北京',
+        native_provider: 'ip-api',
+        native_lookup_status: 'resolved',
+        native_lookup_raw_json: '{"status":"success","country":"中国","city":"北京"}',
         updated_at: now,
     });
 
@@ -637,6 +648,8 @@ test('value board API should sort by value and parse breakdown and honor fields'
     assert.equal(board[0].l2_fail_count, 1);
     assert.equal(board[0].l3_success_count, 0);
     assert.equal(board[0].l3_fail_count, 1);
+    assert.equal(board[0].native_place, '未知');
+    assert.equal(board[0].native_lookup_status, 'pending');
     assert.equal(board[1].l0_success_count, 0);
     assert.equal(board[1].l0_fail_count, 0);
     assert.equal(board[1].l1_success_count, 0);
@@ -645,6 +658,9 @@ test('value board API should sort by value and parse breakdown and honor fields'
     assert.equal(board[1].l2_fail_count, 0);
     assert.equal(board[1].l3_success_count, 0);
     assert.equal(board[1].l3_fail_count, 0);
+    assert.equal(board[1].native_place, '中国-北京');
+    assert.equal(board[1].native_lookup_status, 'resolved');
+    assert.equal(board[1].native_lookup_raw_json.includes('"country":"中国"'), true);
 
     const filtered = h.db.getValueBoard(10, 'active');
     assert.equal(filtered.length, 1);
