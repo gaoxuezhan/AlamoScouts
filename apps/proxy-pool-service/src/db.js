@@ -1169,8 +1169,8 @@ class ProxyHubDb {
         const rows = this.db.prepare(`
             SELECT lifecycle, COUNT(*) AS count
             FROM proxies
-            WHERE rank = '新兵'
-              AND lifecycle IN ('active', 'reserve', 'candidate')
+            WHERE (rank = '新兵' AND lifecycle IN ('active', 'reserve', 'candidate'))
+               OR lifecycle = 'retired'
             GROUP BY lifecycle
         `).all();
 
@@ -1178,6 +1178,7 @@ class ProxyHubDb {
             active: 0,
             reserve: 0,
             candidate: 0,
+            retired: 0,
         };
         for (const row of rows) {
             counters[row.lifecycle] = Number(row.count) || 0;
@@ -1187,6 +1188,7 @@ class ProxyHubDb {
             { lifecycle: 'active', label: '新兵连', count: counters.active },
             { lifecycle: 'reserve', label: '医务室', count: counters.reserve },
             { lifecycle: 'candidate', label: '预备队', count: counters.candidate },
+            { lifecycle: 'retired', label: '已退役', count: counters.retired },
         ];
     }
 
