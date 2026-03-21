@@ -37,6 +37,16 @@ function createConfig(dbPath) {
             candidateQuota: 0.15,
             l2LookbackMinutes: 10,
             timeoutMs: { l1: 5000, l2: 8000 },
+            l3: {
+                enabled: true,
+                syncMs: 2700000,
+                maxPerCycle: 12,
+                concurrency: 3,
+                lookbackMinutes: 10,
+                timeoutMs: 12000,
+                allowedProtocols: ['http', 'https', 'socks5'],
+                targets: [{ name: 'ly-browser', url: 'https://www.ly.com/flights/home' }],
+            },
             blockedStatusCodes: [401, 403, 429, 503],
             blockSignals: ['captcha'],
             targets: {
@@ -988,11 +998,15 @@ test('engine start should schedule battle timers when enabled', async () => {
     const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T00:00:00.000Z') });
     let l1Calls = 0;
     let l2Calls = 0;
+    let l3Calls = 0;
     engine.runBattleL1Cycle = async () => {
         l1Calls += 1;
     };
     engine.runBattleL2Cycle = async () => {
         l2Calls += 1;
+    };
+    engine.runBattleL3Cycle = async () => {
+        l3Calls += 1;
     };
 
     await engine.start();
@@ -1001,9 +1015,10 @@ test('engine start should schedule battle timers when enabled', async () => {
     global.setInterval = oldSetInterval;
     global.clearInterval = oldClearInterval;
 
-    assert.equal(timers.length, 6);
+    assert.equal(timers.length, 7);
     assert.equal(l1Calls >= 2, true);
     assert.equal(l2Calls >= 2, true);
+    assert.equal(l3Calls >= 2, true);
     cleanupDb(h);
 });
 
@@ -1510,6 +1525,58 @@ test('applyCombatOutcome should apply l2 branch transfer and fallback rules', as
     cleanupDb(h);
 });
 
+test('applyCombatOutcome should score L3 with L2 weight while applying L3 branch transition', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const now = '2026-03-14T11:00:00.000Z';
+    h.config.policy.scoring.stageMultipliers = {
+        score: { l1: 1, l2: 2 },
+        health: { l1: 1, l2: 1 },
+    };
+    h.config.rollout = {
+        features: {
+            stageWeighting: true,
+            lifecycleHysteresis: false,
+            honorPromotionTuning: false,
+        },
+    };
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.92', port: 8080, protocol: 'http' }],
+        () => '编制-L3-92',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger });
+
+    await engine.applyCombatOutcome({
+        proxyId: proxy.id,
+        sourceName: 'battle-l3-browser',
+        outcome: 'success',
+        latencyMs: 20,
+        nowIso: '2026-03-14T11:00:00.000Z',
+        stage: '评分(L3)',
+        combatStage: 'l2',
+        branchingStage: 'l3',
+    });
+
+    const updated = h.db.getProxyById(proxy.id);
+    assert.equal(updated.combat_points, 12);
+    assert.equal(updated.service_branch, '海豹突击队');
+    assert.equal(h.db.getEvents(20).some((item) => item.event_type === 'branch_transfer'), true);
+    cleanupDb(h);
+});
+
 test('runBattleL1Cycle should cover guard and error branches', async () => {
     const h = createDbHandle();
     const logger = createLogger();
@@ -1735,6 +1802,176 @@ test('runBattleL2Cycle should return early when there are no candidates', async 
     assert.equal(engine.isBattleL2Running, false);
 });
 
+test('runBattleL3Cycle should process candidates and cover guard/error branches', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.battle.enabled = true;
+    h.config.battle.l3.enabled = true;
+    const now = new Date().toISOString();
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.51', port: 8080, protocol: 'http' }],
+        () => '战场-L3-51',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+    h.db.updateProxyById(proxy.id, { lifecycle: 'active', updated_at: now });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: proxy.id,
+        stage: 'l2',
+        target: 'ly',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 20,
+        reason: 'ok',
+        details: {},
+    });
+
+    let mode = 'success';
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'battle-l3-browser') {
+                if (mode === 'throw-message') {
+                    throw new Error('battle-l3-boom');
+                }
+                if (mode === 'throw-null') {
+                    throw null;
+                }
+                if (mode === 'no-runs') {
+                    return {
+                        stage: 'l3',
+                        outcome: 'network_error',
+                    };
+                }
+                return {
+                    stage: 'l3',
+                    outcome: 'success',
+                    latencyMs: 21,
+                    runs: [{ target: 'ly-browser', outcome: 'success', statusCode: 200, latencyMs: 21, reason: 'browser_ok', details: {} }],
+                };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T07:30:00.000Z') });
+
+    engine.started = false;
+    await engine.runBattleL3Cycle();
+
+    engine.started = true;
+    engine.isBattleL3Running = true;
+    await engine.runBattleL3Cycle();
+    engine.isBattleL3Running = false;
+
+    await engine.runBattleL3Cycle();
+    const runs = h.db.getBattleTestRuns(10);
+    assert.equal(runs.some((run) => run.stage === 'l3'), true);
+
+    mode = 'throw-message';
+    await engine.runBattleL3Cycle();
+    assert.equal(logger.entries.some((entry) => entry.event === '战场测试L3失败' && entry.stage === '战场测试L3' && entry.reason === 'battle-l3-boom'), true);
+
+    mode = 'throw-null';
+    await engine.runBattleL3Cycle();
+    assert.equal(logger.entries.some((entry) => entry.event === '战场测试L3失败' && entry.stage === '战场测试L3' && entry.reason === 'battle-l3-task-error'), true);
+
+    const oldGetById = h.db.getProxyById.bind(h.db);
+    h.db.getProxyById = () => null;
+    mode = 'throw-message';
+    await engine.runBattleL3Cycle();
+    mode = 'no-runs';
+    h.db.getProxyById = oldGetById;
+    await engine.runBattleL3Cycle();
+    h.db.getProxyById = () => null;
+    await engine.runBattleL3Cycle();
+    h.db.getProxyById = oldGetById;
+    assert.equal(logger.entries.some((entry) => entry.event === '战场测试L3失败' && entry.reason === 'battle-l3-boom'), true);
+
+    cleanupDb(h);
+});
+
+test('runBattleL3Cycle should return early when disabled or there are no candidates', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-l3-empty.db'));
+    config.battle.enabled = true;
+
+    let runTaskCalls = 0;
+    const db = {
+        listProxiesForBattleL3() {
+            return [];
+        },
+    };
+    const workerPool = {
+        async runTask() {
+            runTaskCalls += 1;
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger });
+    engine.started = true;
+    config.battle.l3.enabled = false;
+    await engine.runBattleL3Cycle();
+    config.battle.l3.enabled = true;
+    await engine.runBattleL3Cycle();
+
+    assert.equal(runTaskCalls, 0);
+    assert.equal(engine.isBattleL3Running, false);
+});
+
+test('runBattleL3Cycle should fallback l3 config object and concurrency defaults', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-l3-fallback.db'));
+    config.battle.enabled = true;
+    config.battle.l3 = undefined;
+
+    let runTaskCalls = 0;
+    const db = {
+        listProxiesForBattleL3() {
+            return [{ id: 1, ip: '10.0.0.1', port: 8080, protocol: 'http', display_name: 'L3-兜底-1' }];
+        },
+        getProxyById() {
+            return { id: 1, battle_success_count: 0, battle_fail_count: 0 };
+        },
+        insertBattleTestRun() {},
+    };
+    const workerPool = {
+        async runTask(type, payload) {
+            assert.equal(type, 'battle-l3-browser');
+            assert.equal(payload.timeoutMs, undefined);
+            runTaskCalls += 1;
+            return {
+                stage: 'l3',
+                outcome: 'success',
+                latencyMs: 12,
+                runs: [],
+            };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger, now: () => new Date('2026-03-14T08:00:00.000Z') });
+    engine.started = true;
+    engine.isBattleL3Enabled = () => true;
+    engine.applyCombatOutcome = async () => {};
+
+    await engine.runBattleL3Cycle();
+
+    assert.equal(runTaskCalls, 1);
+    assert.equal(engine.isBattleL3Running, false);
+});
+
 test('runBattle cycles should log outer-catch fallback reason when candidate listing throws', async () => {
     const logger = createLogger();
     const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-battle-outer.db'));
@@ -1754,6 +1991,12 @@ test('runBattle cycles should log outer-catch fallback reason when candidate lis
             }
             throw new Error('battle-l2-list-fail');
         },
+        listProxiesForBattleL3() {
+            if (throwMode === 'null') {
+                throw null;
+            }
+            throw new Error('battle-l3-list-fail');
+        },
     };
     const workerPool = {
         async runTask() {
@@ -1768,15 +2011,19 @@ test('runBattle cycles should log outer-catch fallback reason when candidate lis
 
     await engine.runBattleL1Cycle();
     await engine.runBattleL2Cycle();
+    await engine.runBattleL3Cycle();
 
     assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L1' && e.reason === 'battle-l1-error'), true);
     assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L2' && e.reason === 'battle-l2-error'), true);
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L3' && e.reason === 'battle-l3-error'), true);
 
     throwMode = 'message';
     await engine.runBattleL1Cycle();
     await engine.runBattleL2Cycle();
+    await engine.runBattleL3Cycle();
     assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L1' && e.reason === 'battle-l1-list-fail'), true);
     assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L2' && e.reason === 'battle-l2-list-fail'), true);
+    assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '战场测试L3' && e.reason === 'battle-l3-list-fail'), true);
 });
 
 test('runSourceCycle should audit manual override gate branch', async () => {

@@ -25,6 +25,7 @@ const {
     isL2ContentValid,
     isFallbackContentValid,
     runBattleL2Task,
+    runBattleL3BrowserTask,
     handleTask,
     attachWorkerListener,
 } = require('./worker');
@@ -375,6 +376,32 @@ function createFakeRequestLib(steps) {
     };
 }
 
+function createFakeBrowserLauncher(steps) {
+    const seq = [...steps];
+    return async () => ({
+        async newPage() {
+            const step = seq.shift() || {};
+            return {
+                async goto() {
+                    if (step.throwError) {
+                        throw step.throwError;
+                    }
+                    return {
+                        status() {
+                            return step.statusCode ?? 200;
+                        },
+                    };
+                },
+                async content() {
+                    return step.body ?? '';
+                },
+                async close() {},
+            };
+        },
+        async close() {},
+    });
+}
+
 test('requestThroughProxy should return success and error branches', async () => {
     const okResult = await requestThroughProxy({
         proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
@@ -626,6 +653,254 @@ test('battle L2 task should classify blocked/network_error/success branches', as
     assert.equal(fallbackInvalid.runs[1].reason, 'fallback_assert_failed');
 });
 
+test('battle L3 browser task should classify success/blocked/timeout and guard branches', async () => {
+    const success = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 'ly-browser', url: 'https://www.ly.com/flights/home' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [403],
+        blockSignals: ['captcha'],
+        allowedProtocols: ['http', 'https'],
+    }, {
+        camoufoxModule: {
+            Camoufox: createFakeBrowserLauncher([
+                { statusCode: 200, body: 'ly browser content long enough for assert' },
+            ]),
+        },
+    });
+    assert.equal(success.stage, 'l3');
+    assert.equal(success.outcome, 'success');
+    assert.equal(success.runs[0].reason, 'browser_ok');
+
+    const blocked = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 'ly-browser', url: 'https://www.ly.com/flights/home' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [403],
+        blockSignals: ['captcha'],
+        allowedProtocols: ['http', 'https'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { statusCode: 403, body: 'blocked' },
+        ]),
+    });
+    assert.equal(blocked.outcome, 'blocked');
+
+    const timeout = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [
+            { name: 't1', url: 'https://x.test' },
+            { name: 't2', url: 'https://y.test' },
+        ],
+        timeoutMs: 50,
+        blockedStatusCodes: [],
+        blockSignals: [],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { throwError: new Error('timeout 5000ms exceeded') },
+            { statusCode: 200, body: 'short' },
+        ]),
+    });
+    assert.equal(timeout.outcome, 'timeout');
+    assert.equal(timeout.runs[0].outcome, 'timeout');
+
+    const non2xx = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 't3', url: 'https://z.test' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [],
+        blockSignals: [],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: async () => ({
+            async newPage() {
+                return {
+                    async goto() {
+                        return { statusCode: 500 };
+                    },
+                };
+            },
+        }),
+    });
+    assert.equal(non2xx.outcome, 'invalid_feedback');
+    assert.equal(non2xx.runs[0].reason, 'non_2xx');
+
+    const network = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://n.test' }],
+        timeoutMs: 50,
+        blockedStatusCodes: [],
+        blockSignals: [],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { throwError: new Error('ECONNRESET') },
+        ]),
+    });
+    assert.equal(network.outcome, 'network_error');
+    assert.equal(network.runs[0].outcome, 'network_error');
+    assert.equal(network.runs[0].target, 'https://n.test');
+
+    const protocolNotAllowed = await runBattleL3BrowserTask({
+        proxy: { protocol: 'socks4', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 't1', url: 'https://x.test' }],
+        allowedProtocols: ['http', 'https'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([]),
+    });
+    assert.equal(protocolNotAllowed.reason, 'protocol_not_allowed');
+    assert.equal(protocolNotAllowed.outcome, 'invalid_feedback');
+
+    const missingTargets = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([]),
+    });
+    assert.equal(missingTargets.reason, 'missing_targets');
+    assert.equal(missingTargets.outcome, 'invalid_feedback');
+
+    const defaultProtocolList = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 't5', url: 'https://d.test' }],
+        allowedProtocols: null,
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { statusCode: 200, body: 'ly browser content long enough for assert' },
+        ]),
+    });
+    assert.equal(defaultProtocolList.outcome, 'success');
+
+    const closeErrors = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http' },
+        targets: [{ name: 't6', url: 'https://close.test' }],
+        allowedProtocols: [],
+    }, {
+        launchBrowser: async () => ({
+            async newPage() {
+                return {
+                    async goto() {
+                        return { status: () => 200 };
+                    },
+                    async content() {
+                        return 'ly browser content long enough for assert';
+                    },
+                    async close() {
+                        throw new Error('page-close-fail');
+                    },
+                };
+            },
+            async close() {
+                throw new Error('browser-close-fail');
+            },
+        }),
+    });
+    assert.equal(closeErrors.outcome, 'success');
+});
+
+test('battle L3 browser task should cover fallback branch paths', async () => {
+    const protocolNotAllowedNoName = await runBattleL3BrowserTask({
+        proxy: { protocol: 'socks5', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://guard.test' }],
+        allowedProtocols: ['http', null],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([]),
+    });
+    assert.equal(protocolNotAllowedNoName.reason, 'protocol_not_allowed');
+    assert.equal(protocolNotAllowedNoName.runs[0].target, 'https://guard.test');
+
+    const blockedNoName = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://blocked.test' }],
+        blockedStatusCodes: [403],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { statusCode: 403, body: 'forbidden' },
+        ]),
+    });
+    assert.equal(blockedNoName.runs[0].target, 'https://blocked.test');
+    assert.equal(blockedNoName.runs[0].outcome, 'blocked');
+
+    const non2xxNoName = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://non2xx.test' }],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: async () => ({
+            async newPage() {
+                return {
+                    async goto() {
+                        return {};
+                    },
+                    async content() {
+                        return 'browser body long enough for non-2xx path';
+                    },
+                    async close() {},
+                };
+            },
+            async close() {},
+        }),
+    });
+    assert.equal(non2xxNoName.runs[0].target, 'https://non2xx.test');
+    assert.equal(non2xxNoName.runs[0].statusCode, 0);
+    assert.equal(non2xxNoName.runs[0].reason, 'non_2xx');
+
+    const contentAssertNoName = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://content.test' }],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { statusCode: 200, body: '' },
+        ]),
+    });
+    assert.equal(contentAssertNoName.runs[0].target, 'https://content.test');
+    assert.equal(contentAssertNoName.runs[0].reason, 'content_assert_failed');
+
+    const successNoName = await runBattleL3BrowserTask({
+        proxy: { ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://success.test' }],
+        allowedProtocols: [],
+    }, {
+        camoufoxModule: createFakeBrowserLauncher([
+            { statusCode: 200, body: 'browser content long enough for success assert' },
+        ]),
+    });
+    assert.equal(successNoName.outcome, 'success');
+    assert.equal(successNoName.runs[0].target, 'https://success.test');
+
+    const browserErrorFallback = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ url: 'https://error.test' }],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: async () => ({
+            async newPage() {
+                return {
+                    async goto() {
+                        throw {};
+                    },
+                    async close() {},
+                };
+            },
+            async close() {},
+        }),
+    });
+    assert.equal(browserErrorFallback.runs[0].target, 'https://error.test');
+    assert.equal(browserErrorFallback.runs[0].reason, 'browser_error');
+
+    const invalidTargetsType = await runBattleL3BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: null,
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([]),
+    });
+    assert.equal(invalidTargetsType.reason, 'missing_targets');
+});
+
 test('stateTransitionTask should return ok', () => {
     assert.deepEqual(stateTransitionTask(), { ok: true });
 });
@@ -669,6 +944,17 @@ test('handleTask should dispatch all task types and throw on unknown type', asyn
         ]),
     });
     assert.equal(l2Result.stage, 'l2');
+
+    const l3Result = await handleTask('battle-l3-browser', {
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 'ly', url: 'https://www.ly.com' }],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { statusCode: 200, body: 'ly browser content long enough for assert' },
+        ]),
+    });
+    assert.equal(l3Result.stage, 'l3');
 
     const transResult = await handleTask('state-transition', {});
     assert.equal(transResult.ok, true);

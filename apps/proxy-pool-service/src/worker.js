@@ -610,6 +610,167 @@ async function runBattleL2Task(payload, deps = {}) {
     };
 }
 
+// 0277_runBattleL3BrowserTask_执行战场L3浏览器实战逻辑
+async function runBattleL3BrowserTask(payload, deps = {}) {
+    const timeoutMs = Number(payload.timeoutMs || 12000);
+    const blockedStatusCodes = payload.blockedStatusCodes || [];
+    const blockSignals = payload.blockSignals || [];
+    const targets = Array.isArray(payload.targets) ? payload.targets : [];
+    const runs = [];
+    const allowedProtocols = Array.isArray(payload.allowedProtocols)
+        ? payload.allowedProtocols.map((item) => String(item || '').toLowerCase())
+        : [];
+    const proxyProtocol = String(payload?.proxy?.protocol || '').toLowerCase();
+
+    if (targets.length === 0) {
+        return {
+            stage: 'l3',
+            outcome: 'invalid_feedback',
+            latencyMs: 0,
+            reason: 'missing_targets',
+            runs,
+        };
+    }
+
+    if (allowedProtocols.length > 0 && !allowedProtocols.includes(proxyProtocol)) {
+        return {
+            stage: 'l3',
+            outcome: 'invalid_feedback',
+            latencyMs: 0,
+            reason: 'protocol_not_allowed',
+            runs: [{
+                target: targets[0].name || targets[0].url,
+                outcome: 'invalid_feedback',
+                statusCode: null,
+                latencyMs: 0,
+                reason: 'protocol_not_allowed',
+                details: { protocol: proxyProtocol },
+            }],
+        };
+    }
+
+    const launchOptions = {
+        headless: true,
+    };
+    if (payload?.proxy?.ip && payload?.proxy?.port) {
+        launchOptions.proxy = {
+            server: buildProxyUrl(payload.proxy),
+        };
+    }
+    let launchBrowser = deps.launchBrowser;
+    if (!launchBrowser) {
+        const camoufoxModule = deps.camoufoxModule || require('camoufox');
+        launchBrowser = camoufoxModule.Camoufox || camoufoxModule;
+    }
+    const browser = await launchBrowser(launchOptions);
+
+    try {
+        for (const target of targets) {
+            const page = await browser.newPage();
+            const started = Date.now();
+            try {
+                const response = await page.goto(target.url, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: timeoutMs,
+                });
+                const statusCode = Number(
+                    response && typeof response.status === 'function'
+                        ? response.status()
+                        : response?.statusCode || 0,
+                );
+                const body = typeof page.content === 'function' ? await page.content() : '';
+                const blockedBySignal = blockedStatusCodes.includes(statusCode) || hasBlockSignal(body, blockSignals);
+
+                if (blockedBySignal) {
+                    runs.push({
+                        target: target.name || target.url,
+                        outcome: 'blocked',
+                        statusCode,
+                        latencyMs: Date.now() - started,
+                        reason: 'blocked_signal',
+                        details: {},
+                    });
+                } else if (statusCode < 200 || statusCode >= 300) {
+                    runs.push({
+                        target: target.name || target.url,
+                        outcome: 'invalid_feedback',
+                        statusCode,
+                        latencyMs: Date.now() - started,
+                        reason: 'non_2xx',
+                        details: {},
+                    });
+                } else if (String(body || '').trim().length < 20) {
+                    runs.push({
+                        target: target.name || target.url,
+                        outcome: 'invalid_feedback',
+                        statusCode,
+                        latencyMs: Date.now() - started,
+                        reason: 'content_assert_failed',
+                        details: {},
+                    });
+                } else {
+                    runs.push({
+                        target: target.name || target.url,
+                        outcome: 'success',
+                        statusCode,
+                        latencyMs: Date.now() - started,
+                        reason: 'browser_ok',
+                        details: {},
+                    });
+                }
+            } catch (error) {
+                const reason = error?.message || 'browser_error';
+                const timeoutMatched = String(reason).toLowerCase().includes('timeout');
+                runs.push({
+                    target: target.name || target.url,
+                    outcome: timeoutMatched ? 'timeout' : 'network_error',
+                    statusCode: null,
+                    latencyMs: Date.now() - started,
+                    reason,
+                    details: {},
+                });
+            } finally {
+                if (typeof page.close === 'function') {
+                    try {
+                        await page.close();
+                    } catch {}
+                }
+            }
+        }
+    } finally {
+        if (browser && typeof browser.close === 'function') {
+            try {
+                await browser.close();
+            } catch {}
+        }
+    }
+
+    const hasSuccess = runs.some((item) => item.outcome === 'success');
+    let outcome = 'network_error';
+    if (hasSuccess) {
+        outcome = 'success';
+    } else if (runs.some((item) => item.outcome === 'blocked')) {
+        outcome = 'blocked';
+    } else if (runs.some((item) => item.outcome === 'timeout')) {
+        outcome = 'timeout';
+    } else if (runs.some((item) => item.outcome === 'invalid_feedback')) {
+        outcome = 'invalid_feedback';
+    }
+
+    const avgLatency = Math.round(
+        runs.reduce((sum, item) => sum + (item.latencyMs || 0), 0)
+        / Math.max(1, runs.length),
+    );
+
+    return {
+        stage: 'l3',
+        outcome,
+        latencyMs: avgLatency,
+        reason: hasSuccess ? 'at_least_one_target_success' : 'all_targets_failed',
+        runs,
+    };
+}
+
 // 0158_handleTask_处理任务逻辑
 async function handleTask(type, payload, deps = {}) {
     if (type === 'fetch-source') {
@@ -626,6 +787,9 @@ async function handleTask(type, payload, deps = {}) {
     }
     if (type === 'battle-l2') {
         return runBattleL2Task(payload, deps);
+    }
+    if (type === 'battle-l3-browser') {
+        return runBattleL3BrowserTask(payload, deps);
     }
     if (type === 'state-transition') {
         return stateTransitionTask(payload, deps);
@@ -676,6 +840,7 @@ module.exports = {
     isL2ContentValid,
     isFallbackContentValid,
     runBattleL2Task,
+    runBattleL3BrowserTask,
     handleTask,
     attachWorkerListener,
 };

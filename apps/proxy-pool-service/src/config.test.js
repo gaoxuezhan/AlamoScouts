@@ -4,6 +4,15 @@ const assert = require('node:assert/strict');
 function loadConfigWithEnv(overrides = {}) {
     const managedKeys = new Set([
         'PROXY_HUB_BATTLE_L2_PRIMARY_URL',
+        'PROXY_HUB_BATTLE_L3_PRIMARY_URL',
+        'PROXY_HUB_BATTLE_L3_ENABLED',
+        'PROXY_HUB_BATTLE_L3_MS',
+        'PROXY_HUB_BATTLE_L3_MAX',
+        'PROXY_HUB_BATTLE_L3_CONCURRENCY',
+        'PROXY_HUB_BATTLE_L3_LOOKBACK_MINUTES',
+        'PROXY_HUB_BATTLE_L3_TIMEOUT_MS',
+        'PROXY_HUB_BATTLE_L3_ALLOWED_PROTOCOLS',
+        'PROXY_HUB_BATTLE_L3_TARGETS_JSON',
         'PROXY_HUB_FEATURE_STAGE_WEIGHTING',
         'PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS',
         'PROXY_HUB_FEATURE_HONOR_PROMOTION_TUNING',
@@ -90,6 +99,13 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.battle.maxBattleL1PerCycle, 60);
     assert.equal(config.battle.maxBattleL2PerCycle, 20);
     assert.equal(config.battle.candidateQuota, 0.30);
+    assert.equal(config.battle.l3.enabled, true);
+    assert.equal(config.battle.l3.syncMs, 2700000);
+    assert.equal(config.battle.l3.maxPerCycle, 12);
+    assert.equal(config.battle.l3.concurrency, 3);
+    assert.equal(config.battle.l3.timeoutMs, 12000);
+    assert.equal(config.battle.l3.allowedProtocols.includes('socks5'), true);
+    assert.equal(config.battle.l3.targets[0].url, 'https://www.ly.com/flights/home');
     assert.equal(config.failureBackoff.enabled, true);
     assert.equal(config.failureBackoff.maxMs, 21600000);
     assert.equal(Array.isArray(config.battle.targets.l1), true);
@@ -112,6 +128,45 @@ test('config should support env override for L2 primary target', { concurrency: 
         PROXY_HUB_BATTLE_L2_PRIMARY_URL: 'https://example.com/l2-primary',
     });
     assert.equal(config.battle.targets.l2Primary[0].url, 'https://example.com/l2-primary');
+});
+
+test('config should support battle l3 env overrides', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L3_ENABLED: 'false',
+        PROXY_HUB_BATTLE_L3_MS: '600000',
+        PROXY_HUB_BATTLE_L3_MAX: '8',
+        PROXY_HUB_BATTLE_L3_CONCURRENCY: '2',
+        PROXY_HUB_BATTLE_L3_LOOKBACK_MINUTES: '45',
+        PROXY_HUB_BATTLE_L3_TIMEOUT_MS: '15000',
+        PROXY_HUB_BATTLE_L3_ALLOWED_PROTOCOLS: 'https,socks5',
+        PROXY_HUB_BATTLE_L3_TARGETS_JSON: JSON.stringify([
+            { name: 'l3-one', url: 'https://example.com/l3-1' },
+            { name: 'l3-two', url: 'https://example.com/l3-2' },
+        ]),
+    });
+    assert.equal(config.battle.l3.enabled, false);
+    assert.equal(config.battle.l3.syncMs, 600000);
+    assert.equal(config.battle.l3.maxPerCycle, 8);
+    assert.equal(config.battle.l3.concurrency, 2);
+    assert.equal(config.battle.l3.lookbackMinutes, 45);
+    assert.equal(config.battle.l3.timeoutMs, 15000);
+    assert.deepEqual(config.battle.l3.allowedProtocols, ['https', 'socks5']);
+    assert.equal(config.battle.l3.targets.length, 2);
+    assert.equal(config.battle.l3.targets[0].name, 'l3-one');
+});
+
+test('config should normalize battle l3 target and protocol env fallbacks', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L3_TARGETS_JSON: JSON.stringify([
+            { url: 'https://example.com/only-url' },
+            { name: '', url: 'https://example.com/empty-name' },
+            {},
+        ]),
+        PROXY_HUB_BATTLE_L3_ALLOWED_PROTOCOLS: 'https,,https,socks5',
+    });
+    assert.equal(config.battle.l3.targets.length, 2);
+    assert.equal(config.battle.l3.targets[0].name, 'https://example.com/only-url');
+    assert.deepEqual(config.battle.l3.allowedProtocols, ['https', 'socks5']);
 });
 
 test('config should support source override for line-based lists', { concurrency: false }, () => {

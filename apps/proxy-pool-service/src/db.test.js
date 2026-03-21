@@ -585,7 +585,7 @@ test('value board API should sort by value and parse breakdown and honor fields'
     cleanup(h);
 });
 
-test('battle APIs should persist run details and support L1/L2 candidate selection', () => {
+test('battle APIs should persist run details and support L1/L2/L3 candidate selection', () => {
     const h = createDb();
     const now = new Date().toISOString();
 
@@ -627,9 +627,45 @@ test('battle APIs should persist run details and support L1/L2 candidate selecti
     const l2Candidates = h.db.listProxiesForBattleL2(2, 10);
     assert.equal(l2Candidates.some((item) => item.id === all[0].id), true);
 
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[1].id,
+        stage: 'l2',
+        target: 'ly-browser',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 60,
+        reason: 'ok',
+        details: { mode: 'browser' },
+    });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[2].id,
+        stage: 'l2',
+        target: 'ly-browser',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 65,
+        reason: 'ok',
+        details: { mode: 'browser' },
+    });
+    h.db.updateProxyById(all[2].id, { protocol: 'socks4', updated_at: now });
+
+    const l3HttpCandidates = h.db.listProxiesForBattleL3(5, 10, ['http']);
+    assert.equal(l3HttpCandidates.some((item) => item.id === all[1].id), true);
+    assert.equal(l3HttpCandidates.some((item) => item.id === all[2].id), false);
+    const l3WithNullableProtocol = h.db.listProxiesForBattleL3(5, 10, ['http', null]);
+    assert.equal(l3WithNullableProtocol.some((item) => item.id === all[1].id), true);
+    const l3AllCandidates = h.db.listProxiesForBattleL3(5, 10, []);
+    assert.equal(l3AllCandidates.some((item) => item.id === all[2].id), true);
+    const l3FallbackArgs = h.db.listProxiesForBattleL3(5, 'bad', null, 'invalid-now');
+    assert.equal(Array.isArray(l3FallbackArgs), true);
+    assert.deepEqual(h.db.listProxiesForBattleL3(0, 10, ['http']), []);
+
     const runs = h.db.getBattleTestRuns(5);
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0].stage, 'l1');
+    assert.equal(runs.length, 3);
+    assert.equal(runs.some((run) => run.stage === 'l1'), true);
+    assert.equal(runs.some((run) => run.stage === 'l2'), true);
 
     cleanup(h);
 });
@@ -684,6 +720,25 @@ test('candidate selectors should skip proxies in failure backoff window', () => 
 
     const l2Candidates = h.db.listProxiesForBattleL2(3, 120, now);
     assert.equal(l2Candidates.some((item) => item.id === all[1].id), false);
+
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[2].id,
+        stage: 'l2',
+        target: 'ly',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 50,
+        reason: 'ok',
+        details: {},
+    });
+    h.db.updateProxyById(all[2].id, {
+        backoff_until: future,
+        backoff_reason: 'l3:network_error',
+        updated_at: now,
+    });
+    const l3Candidates = h.db.listProxiesForBattleL3(3, 120, ['http'], now);
+    assert.equal(l3Candidates.some((item) => item.id === all[2].id), false);
 
     cleanup(h);
 });
