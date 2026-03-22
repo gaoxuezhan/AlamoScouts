@@ -221,6 +221,14 @@ const l2LookbackByProfile = {
     production: 20,
     soak: 25,
 };
+const battleL2SyncMsByProfile = {
+    production: 900_000,
+    soak: 600_000,
+};
+const battleL3SyncMsByProfile = {
+    production: 1_200_000,
+    soak: 600_000,
+};
 
 const defaultBattleL3Targets = [
     {
@@ -228,6 +236,12 @@ const defaultBattleL3Targets = [
         url: process.env.PROXY_HUB_BATTLE_L3_PRIMARY_URL
             || process.env.PROXY_HUB_BATTLE_L2_PRIMARY_URL
             || 'https://www.ly.com/flights/home',
+    },
+    {
+        name: 'baidu-browser',
+        url: process.env.PROXY_HUB_BATTLE_L3_SECONDARY_URL
+            || process.env.PROXY_HUB_BATTLE_L2_FALLBACK_URL
+            || 'https://www.baidu.com',
     },
 ];
 const resolvedBattleL3Targets = parseJsonArrayEnv(
@@ -484,7 +498,8 @@ module.exports = {
     battle: {
         enabled: String(process.env.PROXY_HUB_BATTLE_ENABLED || 'true') === 'true',
         l1SyncMs: Number(process.env.PROXY_HUB_BATTLE_L1_MS || 300_000),
-        l2SyncMs: Number(process.env.PROXY_HUB_BATTLE_L2_MS || 1_800_000),
+        l2SyncMs: Number(process.env.PROXY_HUB_BATTLE_L2_MS || battleL2SyncMsByProfile[activeProfile] || 1_800_000),
+        l2SyncMsByProfile: deepClone(battleL2SyncMsByProfile),
         maxBattleL1PerCycle: Number(process.env.PROXY_HUB_BATTLE_L1_MAX || 60),
         maxBattleL2PerCycle: Number(process.env.PROXY_HUB_BATTLE_L2_MAX || 20),
         candidateQuota: Number(process.env.PROXY_HUB_BATTLE_CANDIDATE_QUOTA || battleL1LifecycleQuotaByProfile[activeProfile].candidate),
@@ -496,13 +511,14 @@ module.exports = {
         },
         l3: {
             enabled: toBool(process.env.PROXY_HUB_BATTLE_L3_ENABLED, true),
-            syncMs: Number(process.env.PROXY_HUB_BATTLE_L3_MS || 2_700_000),
+            syncMs: Number(process.env.PROXY_HUB_BATTLE_L3_MS || battleL3SyncMsByProfile[activeProfile] || 2_700_000),
             maxPerCycle: Number(process.env.PROXY_HUB_BATTLE_L3_MAX || 12),
             concurrency: Number(process.env.PROXY_HUB_BATTLE_L3_CONCURRENCY || 3),
             lookbackMinutes: Number(process.env.PROXY_HUB_BATTLE_L3_LOOKBACK_MINUTES || l2LookbackByProfile[activeProfile]),
-            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 12_000),
+            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 18_000),
             allowedProtocols: deepClone(resolvedBattleL3Protocols),
             targets: deepClone(resolvedBattleL3Targets),
+            syncMsByProfile: deepClone(battleL3SyncMsByProfile),
         },
         blockedStatusCodes: [401, 403, 429, 503],
         blockSignals: [

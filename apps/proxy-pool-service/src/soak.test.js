@@ -23,6 +23,21 @@ async function withTempCwd(fn) {
 function makeConfig() {
     return {
         service: { port: 5070 },
+        battle: {
+            l1SyncMs: 300000,
+            l2SyncMs: 1800000,
+            l2SyncMsByProfile: {
+                production: 1800000,
+                soak: 600000,
+            },
+            l3: {
+                syncMs: 2700000,
+                syncMsByProfile: {
+                    production: 2700000,
+                    soak: 600000,
+                },
+            },
+        },
         soak: { durationHours: 10, summaryIntervalMs: 3600000 },
         policy: {
             promotionProtectHours: 6,
@@ -49,6 +64,15 @@ function makeChild() {
         child.killSignal = signal;
     };
     return child;
+}
+
+// 0140_restoreEnvVar_恢复环境变量逻辑
+function restoreEnvVar(key, value) {
+    if (value == null) {
+        delete process.env[key];
+        return;
+    }
+    process.env[key] = value;
 }
 
 test('soak runtime should detect existing service without spawning', async () => {
@@ -78,25 +102,101 @@ test('soak runtime should spawn service and mark ready', async () => {
     await withTempCwd(async () => {
         const child = makeChild();
         let fetchCalls = 0;
-        const runtime = createSoakRuntime({
-            config: makeConfig(),
-            fetchImpl: async () => {
-                fetchCalls += 1;
-                if (fetchCalls < 2) {
-                    throw new Error('down');
-                }
-                return { ok: true, status: 200, async json() { return { ok: true, poolStatus: { queueSize: 0, workersBusy: 0, workersTotal: 1, failedTasks: 0, restartedWorkers: 0, completedTasks: 0 } }; } };
-            },
-            spawnImpl: () => child,
-        });
+        let spawnOptions = null;
+        const oldProfile = process.env.PROXY_HUB_POLICY_PROFILE;
+        try {
+            delete process.env.PROXY_HUB_POLICY_PROFILE;
+            const runtime = createSoakRuntime({
+                config: makeConfig(),
+                fetchImpl: async () => {
+                    fetchCalls += 1;
+                    if (fetchCalls < 2) {
+                        throw new Error('down');
+                    }
+                    return { ok: true, status: 200, async json() { return { ok: true, poolStatus: { queueSize: 0, workersBusy: 0, workersTotal: 1, failedTasks: 0, restartedWorkers: 0, completedTasks: 0 } }; } };
+                },
+                spawnImpl: (_cmd, _args, options) => {
+                    spawnOptions = options;
+                    return child;
+                },
+            });
 
-        await runtime.ensureService();
-        child.stdout.emit('data', Buffer.from('hello'));
-        child.stderr.emit('data', Buffer.from('oops'));
-        child.emit('exit', 0, null);
+            await runtime.ensureService();
+            child.stdout.emit('data', Buffer.from('hello'));
+            child.stderr.emit('data', Buffer.from('oops'));
+            child.emit('exit', 0, null);
 
-        assert.equal(runtime.state.childManaged, true);
-        assert.equal(runtime.state.crashCount, 1);
+            assert.equal(runtime.state.childManaged, true);
+            assert.equal(runtime.state.crashCount, 1);
+            assert.equal(spawnOptions.env.PROXY_HUB_POLICY_PROFILE, 'soak');
+        } finally {
+            restoreEnvVar('PROXY_HUB_POLICY_PROFILE', oldProfile);
+        }
+    });
+});
+
+test('ensureService should keep explicit policy profile when spawning child process', async () => {
+    await withTempCwd(async () => {
+        const child = makeChild();
+        let fetchCalls = 0;
+        let spawnOptions = null;
+        const oldProfile = process.env.PROXY_HUB_POLICY_PROFILE;
+        try {
+            process.env.PROXY_HUB_POLICY_PROFILE = 'production';
+            const runtime = createSoakRuntime({
+                config: makeConfig(),
+                fetchImpl: async () => {
+                    fetchCalls += 1;
+                    if (fetchCalls < 2) {
+                        throw new Error('down');
+                    }
+                    return { ok: true, status: 200, async json() { return { ok: true }; } };
+                },
+                spawnImpl: (_cmd, _args, options) => {
+                    spawnOptions = options;
+                    return child;
+                },
+            });
+            await runtime.ensureService();
+            assert.equal(spawnOptions.env.PROXY_HUB_POLICY_PROFILE, 'production');
+        } finally {
+            restoreEnvVar('PROXY_HUB_POLICY_PROFILE', oldProfile);
+        }
+    });
+});
+
+test('ensureService should prefer explicit L2/L3 sync env values in service_start timeline', async () => {
+    await withTempCwd(async () => {
+        const child = makeChild();
+        let fetchCalls = 0;
+        const oldProfile = process.env.PROXY_HUB_POLICY_PROFILE;
+        const oldL2 = process.env.PROXY_HUB_BATTLE_L2_MS;
+        const oldL3 = process.env.PROXY_HUB_BATTLE_L3_MS;
+        try {
+            delete process.env.PROXY_HUB_POLICY_PROFILE;
+            process.env.PROXY_HUB_BATTLE_L2_MS = '321000';
+            process.env.PROXY_HUB_BATTLE_L3_MS = '654000';
+            const runtime = createSoakRuntime({
+                config: makeConfig(),
+                fetchImpl: async () => {
+                    fetchCalls += 1;
+                    if (fetchCalls < 2) {
+                        throw new Error('down');
+                    }
+                    return { ok: true, status: 200, async json() { return { ok: true }; } };
+                },
+                spawnImpl: () => child,
+            });
+
+            await runtime.ensureService();
+            const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
+            assert.equal(timeline.includes('"battleL2SyncMs":321000'), true);
+            assert.equal(timeline.includes('"battleL3SyncMs":654000'), true);
+        } finally {
+            restoreEnvVar('PROXY_HUB_POLICY_PROFILE', oldProfile);
+            restoreEnvVar('PROXY_HUB_BATTLE_L2_MS', oldL2);
+            restoreEnvVar('PROXY_HUB_BATTLE_L3_MS', oldL3);
+        }
     });
 });
 
@@ -393,12 +493,121 @@ test('runSoak should complete loop, write report, and kill child when managed', 
         assert.equal(child.killSignal, 'SIGTERM');
         assert.equal(runtime.state.policyActionsApplied, 1);
         assert.equal(runtime.state.lastValueBoard.length, 1);
+        const timeline = fs.readFileSync(result.timelineFile, 'utf8');
+        assert.equal(timeline.includes('"type":"effective_schedule"'), true);
+        assert.equal(timeline.includes('"battleL2SyncMs":600000'), true);
+        assert.equal(timeline.includes('"battleL3SyncMs":600000'), true);
 
         Date.now = oldNow;
         process.env.SOAK_HOURS = oldEnv.SOAK_HOURS;
         process.env.SOAK_POLL_MS = oldEnv.SOAK_POLL_MS;
         process.env.SOAK_SUMMARY_MS = oldEnv.SOAK_SUMMARY_MS;
         process.env.SOAK_POLICY_ACTIONS_FILE = oldEnv.SOAK_POLICY_ACTIONS_FILE;
+    });
+});
+
+test('runSoak should fallback L2/L3 schedule to config defaults when profile maps are missing', async () => {
+    await withTempCwd(async () => {
+        const oldHours = process.env.SOAK_HOURS;
+        const oldPolicyFile = process.env.SOAK_POLICY_ACTIONS_FILE;
+        const oldProfile = process.env.PROXY_HUB_POLICY_PROFILE;
+        const oldL2 = process.env.PROXY_HUB_BATTLE_L2_MS;
+        const oldL3 = process.env.PROXY_HUB_BATTLE_L3_MS;
+        try {
+            process.env.SOAK_HOURS = '0';
+            process.env.SOAK_POLICY_ACTIONS_FILE = '';
+            process.env.PROXY_HUB_POLICY_PROFILE = 'staging';
+            delete process.env.PROXY_HUB_BATTLE_L2_MS;
+            delete process.env.PROXY_HUB_BATTLE_L3_MS;
+            const runtime = createSoakRuntime({
+                config: {
+                    ...makeConfig(),
+                    battle: {
+                        l1SyncMs: 300000,
+                        l2SyncMs: 1110000,
+                        l3: {
+                            syncMs: 2220000,
+                        },
+                    },
+                },
+                fetchImpl: async (url) => {
+                    if (url.endsWith('/health')) {
+                        return { ok: true, status: 200, async json() { return { ok: true }; } };
+                    }
+                    if (url.includes('/v1/proxies/value-board')) {
+                        return { ok: true, status: 200, async json() { return { items: [] }; } };
+                    }
+                    return {
+                        ok: true,
+                        status: 200,
+                        async json() {
+                            return { poolStatus: { queueSize: 0, workersBusy: 0, workersTotal: 1, failedTasks: 0, restartedWorkers: 0, completedTasks: 0 } };
+                        },
+                    };
+                },
+            });
+            await runtime.runSoak();
+            const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
+            assert.equal(timeline.includes('"battleL2SyncMs":1110000'), true);
+            assert.equal(timeline.includes('"battleL3SyncMs":2220000'), true);
+        } finally {
+            restoreEnvVar('SOAK_HOURS', oldHours);
+            restoreEnvVar('SOAK_POLICY_ACTIONS_FILE', oldPolicyFile);
+            restoreEnvVar('PROXY_HUB_POLICY_PROFILE', oldProfile);
+            restoreEnvVar('PROXY_HUB_BATTLE_L2_MS', oldL2);
+            restoreEnvVar('PROXY_HUB_BATTLE_L3_MS', oldL3);
+        }
+    });
+});
+
+test('runSoak should mark env schedule source and apply explicit L1/L2/L3 sync env values', async () => {
+    await withTempCwd(async () => {
+        const oldHours = process.env.SOAK_HOURS;
+        const oldPolicyFile = process.env.SOAK_POLICY_ACTIONS_FILE;
+        const oldProfile = process.env.PROXY_HUB_POLICY_PROFILE;
+        const oldL1 = process.env.PROXY_HUB_BATTLE_L1_MS;
+        const oldL2 = process.env.PROXY_HUB_BATTLE_L2_MS;
+        const oldL3 = process.env.PROXY_HUB_BATTLE_L3_MS;
+        try {
+            process.env.SOAK_HOURS = '0';
+            process.env.SOAK_POLICY_ACTIONS_FILE = '';
+            delete process.env.PROXY_HUB_POLICY_PROFILE;
+            process.env.PROXY_HUB_BATTLE_L1_MS = '123000';
+            process.env.PROXY_HUB_BATTLE_L2_MS = '234000';
+            process.env.PROXY_HUB_BATTLE_L3_MS = '345000';
+
+            const runtime = createSoakRuntime({
+                config: makeConfig(),
+                fetchImpl: async (url) => {
+                    if (url.endsWith('/health')) {
+                        return { ok: true, status: 200, async json() { return { ok: true }; } };
+                    }
+                    if (url.includes('/v1/proxies/value-board')) {
+                        return { ok: true, status: 200, async json() { return { items: [] }; } };
+                    }
+                    return {
+                        ok: true,
+                        status: 200,
+                        async json() {
+                            return { poolStatus: { queueSize: 0, workersBusy: 0, workersTotal: 1, failedTasks: 0, restartedWorkers: 0, completedTasks: 0 } };
+                        },
+                    };
+                },
+            });
+            await runtime.runSoak();
+            const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
+            assert.equal(timeline.includes('"battleL1SyncMs":123000'), true);
+            assert.equal(timeline.includes('"battleL2SyncMs":234000'), true);
+            assert.equal(timeline.includes('"battleL3SyncMs":345000'), true);
+            assert.equal(timeline.includes('"battleL3SyncSource":"env"'), true);
+        } finally {
+            restoreEnvVar('SOAK_HOURS', oldHours);
+            restoreEnvVar('SOAK_POLICY_ACTIONS_FILE', oldPolicyFile);
+            restoreEnvVar('PROXY_HUB_POLICY_PROFILE', oldProfile);
+            restoreEnvVar('PROXY_HUB_BATTLE_L1_MS', oldL1);
+            restoreEnvVar('PROXY_HUB_BATTLE_L2_MS', oldL2);
+            restoreEnvVar('PROXY_HUB_BATTLE_L3_MS', oldL3);
+        }
     });
 });
 
