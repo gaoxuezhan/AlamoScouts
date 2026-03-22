@@ -426,6 +426,114 @@ function normalizeNativeReason(value, fallback = 'request-failed') {
     return normalized || fallback;
 }
 
+const NATIVE_LOOKUP_READABLE_LABELS = {
+    ip: 'IP地址(ip)',
+    network: '网络段(network)',
+    version: 'IP版本(version)',
+    city: '城市(city)',
+    region: '地区(region)',
+    region_code: '地区代码(region_code)',
+    country: '国家(country)',
+    country_name: '国家(country_name)',
+    country_code: '国家代码(country_code)',
+    country_code_iso3: '国家三字码(country_code_iso3)',
+    country_capital: '首都(country_capital)',
+    country_tld: '国家域名后缀(country_tld)',
+    continent_code: '洲代码(continent_code)',
+    in_eu: '是否欧盟(in_eu)',
+    postal: '邮编(postal)',
+    latitude: '纬度(latitude)',
+    longitude: '经度(longitude)',
+    timezone: '时区(timezone)',
+    utc_offset: 'UTC偏移(utc_offset)',
+    country_calling_code: '国家区号(country_calling_code)',
+    currency: '货币代码(currency)',
+    currency_name: '货币名称(currency_name)',
+    languages: '语言(languages)',
+    country_area: '国家面积(country_area)',
+    country_population: '国家人口(country_population)',
+    asn: 'ASN(asn)',
+    org: '组织(org)',
+    isp: '网络归属(isp)',
+    countryName: '国家(countryName)',
+    countryCode: '国家代码(countryCode)',
+    cityName: '城市(cityName)',
+    regionName: '地区(regionName)',
+    latitudeLongitudeAccuracyRadius: '定位精度半径(latitudeLongitudeAccuracyRadius)',
+    isProxy: '代理标记(isProxy)',
+    error: '错误(error)',
+    reason: '原因(reason)',
+    message: '消息(message)',
+};
+
+// 0291_stableSortJsonValue_稳定排序JSON值逻辑
+function stableSortJsonValue(value) {
+    if (Array.isArray(value)) {
+        return value.map((item) => stableSortJsonValue(item));
+    }
+    if (!value || typeof value !== 'object') {
+        return value;
+    }
+    const sortedKeys = Object.keys(value).sort((a, b) => a.localeCompare(b));
+    const result = {};
+    for (const key of sortedKeys) {
+        result[key] = stableSortJsonValue(value[key]);
+    }
+    return result;
+}
+
+// 0292_parseJsonPayloadLoose_宽松解析JSON载荷逻辑
+function parseJsonPayloadLoose(rawText, fallbackValue) {
+    const text = String(rawText == null ? '' : rawText).trim();
+    if (text.length > 0) {
+        try {
+            return JSON.parse(text);
+        } catch {
+            return fallbackValue;
+        }
+    }
+    return fallbackValue;
+}
+
+// 0293_normalizeNativeRawJson_规范化籍贯原始JSON逻辑
+function normalizeNativeRawJson(rawText, payload) {
+    const parsed = parseJsonPayloadLoose(rawText, payload);
+    if (parsed === undefined) {
+        return String(rawText == null ? '' : rawText);
+    }
+    return JSON.stringify(stableSortJsonValue(parsed), null, 2);
+}
+
+// 0294_formatNativeReadableValue_格式化籍贯可读值逻辑
+function formatNativeReadableValue(value) {
+    if (value === undefined) {
+        return 'null';
+    }
+    return JSON.stringify(stableSortJsonValue(value));
+}
+
+// 0295_buildNativeLookupReadableText_构建籍贯可读文本逻辑
+function buildNativeLookupReadableText(payload) {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        const sorted = stableSortJsonValue(payload);
+        const keys = Object.keys(sorted);
+        if (keys.length === 0) {
+            return '原文不可解析';
+        }
+        return keys.map((key) => {
+            const label = NATIVE_LOOKUP_READABLE_LABELS[key] || `原键名(${key})`;
+            return `${label}: ${formatNativeReadableValue(sorted[key])}`;
+        }).join('\n');
+    }
+    if (Array.isArray(payload)) {
+        return `原键名(root): ${JSON.stringify(stableSortJsonValue(payload))}`;
+    }
+    if (payload == null) {
+        return '原文不可解析';
+    }
+    return `原键名(root): ${JSON.stringify(payload)}`;
+}
+
 const NATIVE_LOOKUP_PROVIDER_CHAIN = ['ipapi.co', 'freeipapi'];
 const NATIVE_LOOKUP_PROVIDER_CHAIN_LABEL = NATIVE_LOOKUP_PROVIDER_CHAIN.join(',');
 
@@ -605,12 +713,14 @@ class ProxyHubEngine extends EventEmitter {
 
         const country = String(payload?.country_name || payload?.country || '').trim() || '未知';
         const city = String(payload?.city || '').trim() || '未知';
+        const normalizedRawJson = normalizeNativeRawJson(rawJson, payload);
         return {
             provider: 'ipapi.co',
             country,
             city,
             place: `${country}-${city}`,
-            rawJson: rawJson || JSON.stringify(payload),
+            rawJson: normalizedRawJson,
+            readableText: buildNativeLookupReadableText(payload),
         };
     }
 
@@ -645,12 +755,14 @@ class ProxyHubEngine extends EventEmitter {
 
         const country = String(payload?.countryName || payload?.country_name || payload?.country || '').trim() || '未知';
         const city = String(payload?.cityName || payload?.city || '').trim() || '未知';
+        const normalizedRawJson = normalizeNativeRawJson(rawJson, payload);
         return {
             provider: 'freeipapi',
             country,
             city,
             place: `${country}-${city}`,
-            rawJson: rawJson || JSON.stringify(payload),
+            rawJson: normalizedRawJson,
+            readableText: buildNativeLookupReadableText(payload),
         };
     }
 
@@ -715,6 +827,7 @@ class ProxyHubEngine extends EventEmitter {
                 native_lookup_status: 'resolved',
                 native_next_retry_at: null,
                 native_lookup_raw_json: resolved.rawJson,
+                native_lookup_readable_text: resolved.readableText,
                 updated_at: nowIso,
             });
             const updatedProxy = this.db.getProxyById(proxyId) || proxy;
@@ -1900,6 +2013,9 @@ module.exports = {
     readNativeLookupConfig,
     isNativeRetryDue,
     normalizeNativeLookupStatus,
+    stableSortJsonValue,
+    normalizeNativeRawJson,
+    buildNativeLookupReadableText,
     ProxyHubEngine,
 };
 

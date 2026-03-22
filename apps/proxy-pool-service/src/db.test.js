@@ -265,6 +265,7 @@ test('query list APIs should support filters and distributions', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'native_place'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'native_lookup_status'), true);
     assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'native_lookup_raw_json'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(all[0], 'native_lookup_readable_text'), true);
     assert.equal(all[0].service_branch, '陆军');
     assert.equal(all[0].branch_fail_streak, 0);
     assert.equal(all[0].native_place, '未知');
@@ -562,6 +563,7 @@ test('value board API should sort by value and parse breakdown and honor fields'
         native_provider: 'ipapi.co',
         native_lookup_status: 'resolved',
         native_lookup_raw_json: '{"status":"success","country":"中国","city":"北京"}',
+        native_lookup_readable_text: '国家(country): "中国"\n城市(city): "北京"',
         updated_at: now,
     });
 
@@ -661,6 +663,7 @@ test('value board API should sort by value and parse breakdown and honor fields'
     assert.equal(board[1].native_place, '中国-北京');
     assert.equal(board[1].native_lookup_status, 'resolved');
     assert.equal(board[1].native_lookup_raw_json.includes('"country":"中国"'), true);
+    assert.equal(board[1].native_lookup_readable_text.includes('国家(country)'), true);
 
     const filtered = h.db.getValueBoard(10, 'active');
     assert.equal(filtered.length, 1);
@@ -1176,6 +1179,7 @@ test('ensureProxyColumns should add missing columns in legacy schema', () => {
     ProxyHubDb.prototype.ensureProxyColumns.call(fake);
     assert.equal(execCalls.length > 0, true);
     assert.equal(execCalls.every((sql) => sql.includes('ALTER TABLE proxies ADD COLUMN')), true);
+    assert.equal(execCalls.some((sql) => sql.includes('native_lookup_readable_text')), true);
 });
 
 // 0217_createNameGenerator_创建迁移姓名生成器逻辑

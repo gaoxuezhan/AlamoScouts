@@ -41,6 +41,31 @@
     th, td { border-bottom: 1px solid var(--line); padding: 6px 4px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
     th[title] { cursor: help; text-decoration: underline dotted rgba(158, 177, 216, 0.7); text-underline-offset: 2px; }
+    .native-cell { position: relative; min-width: 110px; }
+    .native-place { border-bottom: 1px dotted rgba(158, 177, 216, 0.7); cursor: help; }
+    .native-tooltip {
+      display: none;
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 60;
+      width: min(460px, 70vw);
+      max-height: 320px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: linear-gradient(180deg, #111e36, #0b162b);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .native-cell:hover .native-tooltip { display: block; }
+    .native-tooltip-title { color: #c9d9f8; font-weight: 600; margin-bottom: 4px; }
+    .native-tooltip-section + .native-tooltip-section { margin-top: 8px; }
     .ok { color: var(--ok); }
     .warn { color: var(--warn); }
     .bad { color: var(--bad); }
@@ -96,6 +121,10 @@ function fmt(n) { return n == null ? '-' : n; }
 function esc(v) { return String(v == null ? '-' : v).replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]; }); }
 function fmtPercent(ratio) { return fmt(Number((Number(ratio || 0) * 100).toFixed(1))) + '%'; }
 function fmtScore(value) { return fmt(Number(value || 0).toFixed(2)); }
+function normalizeNativeTooltipText(value) {
+  const text = String(value == null ? '' : value).trim();
+  return text.length > 0 ? text : '未知';
+}
 function fmtSuccessTotalPercent(success, total) {
   const s = Number(success || 0);
   const t = Number(total || 0);
@@ -247,9 +276,13 @@ async function loadAll() {
     const displayName = x.display_name || '-';
     const serviceBranch = x.service_branch || '陆军';
     const nativePlace = x.native_place || '未知';
-    const nativeTip = nativePlace === '未知'
-      ? '未知'
-      : (x.native_lookup_raw_json || '未知');
+    const nativeReadable = normalizeNativeTooltipText(x.native_lookup_readable_text);
+    const nativeRaw = normalizeNativeTooltipText(x.native_lookup_raw_json);
+    const nativeTooltip = ''
+      + '<div class="native-tooltip">'
+      + '<div class="native-tooltip-section"><div class="native-tooltip-title">中文翻译</div><div>' + esc(nativeReadable) + '</div></div>'
+      + '<div class="native-tooltip-section"><div class="native-tooltip-title">原始JSON</div><div>' + esc(nativeRaw) + '</div></div>'
+      + '</div>';
     const l0Total = Number(x.l0_success_count || 0) + Number(x.l0_fail_count || 0);
     const l1Total = Number(x.l1_success_count || 0) + Number(x.l1_fail_count || 0);
     const l2Total = Number(x.l2_success_count || 0) + Number(x.l2_fail_count || 0);
@@ -260,7 +293,7 @@ async function loadAll() {
       + '<td>' + esc(displayName) + '</td>'
       + '<td>' + esc(serviceBranch) + '</td>'
       + '<td>' + esc(x.rank) + '</td>'
-      + '<td title="' + esc(nativeTip) + '">' + esc(nativePlace) + '</td>'
+      + '<td class="native-cell"><span class="native-place">' + esc(nativePlace) + '</span>' + nativeTooltip + '</td>'
       + '<td class="ok">' + fmtScore(x.ip_value_score) + '</td>'
       + '<td>' + esc(x.lifecycle) + '</td>'
       + '<td>' + fmtPercent(x.success_ratio) + '</td>'

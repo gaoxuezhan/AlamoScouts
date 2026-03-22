@@ -24,8 +24,13 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes(" + ' [' + serviceBranch + ']'"), false);
     assert.equal(html.includes("esc(displayName) + '</td>'"), true);
     assert.equal(html.includes("esc(serviceBranch) + '</td>'"), true);
-    assert.equal(html.includes("const nativeTip = nativePlace === '未知'"), true);
-    assert.equal(html.includes("'<td title=\"' + esc(nativeTip) + '\">' + esc(nativePlace) + '</td>'"), true);
+    assert.equal(html.includes("function normalizeNativeTooltipText(value)"), true);
+    assert.equal(html.includes("const nativeReadable = normalizeNativeTooltipText(x.native_lookup_readable_text);"), true);
+    assert.equal(html.includes("const nativeRaw = normalizeNativeTooltipText(x.native_lookup_raw_json);"), true);
+    assert.equal(html.includes("class=\"native-tooltip\""), true);
+    assert.equal(html.includes("中文翻译"), true);
+    assert.equal(html.includes("原始JSON"), true);
+    assert.equal(html.includes("'<td class=\"native-cell\"><span class=\"native-place\">' + esc(nativePlace) + '</span>' + nativeTooltip + '</td>'"), true);
     assert.equal(html.includes("label: 'L0'"), true);
     assert.equal(html.includes("label: 'L1'"), true);
     assert.equal(html.includes("label: 'L2'"), true);
