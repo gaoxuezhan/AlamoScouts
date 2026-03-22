@@ -74,6 +74,7 @@ class ProxyHubDb {
                 native_lookup_status TEXT NOT NULL DEFAULT 'pending',
                 native_next_retry_at TEXT,
                 native_lookup_raw_json TEXT,
+                native_lookup_readable_text TEXT,
                 service_hours REAL NOT NULL DEFAULT 0,
                 rank_service_hours REAL NOT NULL DEFAULT 0,
                 combat_points INTEGER NOT NULL DEFAULT 0,
@@ -333,6 +334,7 @@ class ProxyHubDb {
             { name: 'native_lookup_status', sql: "TEXT NOT NULL DEFAULT 'pending'" },
             { name: 'native_next_retry_at', sql: 'TEXT' },
             { name: 'native_lookup_raw_json', sql: 'TEXT' },
+            { name: 'native_lookup_readable_text', sql: 'TEXT' },
         ];
 
         for (const column of requiredColumns) {
@@ -1147,7 +1149,7 @@ class ProxyHubDb {
             SELECT id, display_name, ip, port, protocol, source, lifecycle, rank,
                 service_branch, branch_fail_streak,
                 native_place, native_country, native_city, native_provider, native_resolved_at,
-                native_lookup_status, native_next_retry_at, native_lookup_raw_json,
+                native_lookup_status, native_next_retry_at, native_lookup_raw_json, native_lookup_readable_text,
                 service_hours, rank_service_hours, combat_points, health_score, discipline_score,
                 success_count, block_count, timeout_count, network_error_count,
                 total_samples, retired_type, is_applied, updated_at, last_checked_at,
@@ -1212,7 +1214,7 @@ class ProxyHubDb {
                 p.service_branch,
                 p.native_place, p.native_country, p.native_city, p.native_provider,
                 p.native_resolved_at, p.native_lookup_status, p.native_next_retry_at,
-                p.native_lookup_raw_json,
+                p.native_lookup_raw_json, p.native_lookup_readable_text,
                 p.ip_value_score, p.ip_value_breakdown_json,
                 p.combat_points, p.health_score, p.discipline_score,
                 p.success_count, p.total_samples, p.battle_success_count, p.battle_fail_count,

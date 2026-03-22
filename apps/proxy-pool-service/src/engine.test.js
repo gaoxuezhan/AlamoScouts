@@ -21,6 +21,9 @@ const {
     readNativeLookupConfig,
     isNativeRetryDue,
     normalizeNativeLookupStatus,
+    stableSortJsonValue,
+    normalizeNativeRawJson,
+    buildNativeLookupReadableText,
     ProxyHubEngine,
 } = require('./engine');
 
@@ -274,6 +277,30 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(normalizeNativeLookupStatus('resolved'), 'resolved');
     assert.equal(normalizeNativeLookupStatus('bad-value'), 'pending');
     assert.equal(normalizeNativeLookupStatus(null), 'pending');
+    assert.deepEqual(stableSortJsonValue({
+        z: 1,
+        a: {
+            d: 4,
+            c: [3, { y: 2, x: 1 }],
+        },
+    }), {
+        a: {
+            c: [3, { x: 1, y: 2 }],
+            d: 4,
+        },
+        z: 1,
+    });
+    assert.equal(normalizeNativeRawJson('{"b":2,"a":1}', null), '{\n  "a": 1,\n  "b": 2\n}');
+    assert.equal(normalizeNativeRawJson('{bad-json', { b: 2, a: 1 }), '{\n  "a": 1,\n  "b": 2\n}');
+    assert.equal(normalizeNativeRawJson('', undefined), '');
+    assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('网络归属(isp): "ISP"'), true);
+    assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('组织(org): "ORG"'), true);
+    assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('原键名(custom): 1'), true);
+    assert.equal(buildNativeLookupReadableText({ missing: undefined }).includes('原键名(missing): null'), true);
+    assert.equal(buildNativeLookupReadableText({}), '原文不可解析');
+    assert.equal(buildNativeLookupReadableText(['x']), '原键名(root): ["x"]');
+    assert.equal(buildNativeLookupReadableText(null), '原文不可解析');
+    assert.equal(buildNativeLookupReadableText('x'), '原键名(root): "x"');
     const disabledPolicy = readBranchingConfig({ branching: { enabled: false } });
     assert.equal(disabledPolicy.enabled, false);
     const normalizedPolicy = readBranchingConfig({
@@ -1518,6 +1545,7 @@ test('applyCombatOutcome should resolve native place asynchronously for target b
         city: '北京',
         place: '中国-北京',
         rawJson: '{"status":"success","country":"中国","city":"北京"}',
+        readableText: '国家(country): "中国"\n城市(city): "北京"',
     });
 
     await engine.applyCombatOutcome({
@@ -1536,7 +1564,8 @@ test('applyCombatOutcome should resolve native place asynchronously for target b
     assert.equal(updated.service_branch, '海军');
     assert.equal(updated.native_place, '中国-北京');
     assert.equal(updated.native_provider, 'ipapi.co');
-    assert.equal(updated.native_lookup_raw_json.includes('"country":"中国"'), true);
+    assert.equal(JSON.parse(updated.native_lookup_raw_json).country, '中国');
+    assert.equal(updated.native_lookup_readable_text.includes('国家(country)'), true);
     assert.equal(h.db.getEvents(30).some((item) => item.event_type === 'native_lookup_resolved'), true);
     assert.equal(logger.entries.some((item) => item.event === '籍贯解析成功'), true);
 
@@ -1650,6 +1679,7 @@ test('applyCombatOutcome should skip non-target branch and honor native retry wi
             city: '广州',
             place: '中国-广州',
             rawJson: '{"status":"success","country":"中国","city":"广州"}',
+            readableText: '国家(country): "中国"\n城市(city): "广州"',
         };
     };
 
@@ -1933,10 +1963,8 @@ test('resolveNativePlaceByIp should use ipapi.co first and fallback to freeipapi
         });
         const ipapiRawFallback = await engine.resolveNativePlaceByIpapiCo('5.5.5.82', 900);
         assert.equal(ipapiRawFallback.place, '法国-巴黎');
-        assert.equal(
-            ipapiRawFallback.rawJson,
-            JSON.stringify({ country: '法国', city: '巴黎' }),
-        );
+        assert.deepEqual(JSON.parse(ipapiRawFallback.rawJson), { country: '法国', city: '巴黎' });
+        assert.equal(ipapiRawFallback.readableText.includes('国家(country)'), true);
 
         JSON.parse = oldJsonParse;
         global.fetch = async () => ({
@@ -1999,10 +2027,8 @@ test('resolveNativePlaceByIp should use ipapi.co first and fallback to freeipapi
         };
         const fallbackRawResolved = await engine.resolveNativePlaceByIp('5.5.5.10', 900);
         assert.equal(fallbackRawResolved.place, '墨西哥-蒙特雷');
-        assert.equal(
-            fallbackRawResolved.rawJson,
-            JSON.stringify({ country_name: '墨西哥', city: '蒙特雷' }),
-        );
+        assert.deepEqual(JSON.parse(fallbackRawResolved.rawJson), { country_name: '墨西哥', city: '蒙特雷' });
+        assert.equal(fallbackRawResolved.readableText.includes('国家(country_name)'), true);
 
         const oldResolveIpapiCo = engine.resolveNativePlaceByIpapiCo.bind(engine);
         const oldResolveFreeipapi = engine.resolveNativePlaceByFreeipapi.bind(engine);
@@ -2150,6 +2176,7 @@ test('native lookup decision/task/schedule helpers should cover edge branches', 
             city: '广州',
             place: '中国-广州',
             rawJson: '{"status":"success"}',
+            readableText: '原键名(status): "success"',
         };
     };
     await engine.runNativeLookupTask(proxy.id, 'src');
@@ -2274,6 +2301,7 @@ test('native lookup should fallback to cached proxy when db row disappears and d
                 city: '成都',
                 place: '中国-成都',
                 rawJson: '{"status":"success","country":"中国","city":"成都"}',
+                readableText: '国家(country): "中国"\n城市(city): "成都"',
             };
         }
         throw new Error(`unexpected-ip-${ip}`);

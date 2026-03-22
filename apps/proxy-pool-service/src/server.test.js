@@ -137,6 +137,7 @@ function createStubs() {
             service_branch: '陆军',
             native_place: '未知',
             native_lookup_raw_json: '',
+            native_lookup_readable_text: '',
             l0_success_count: 9,
             l0_fail_count: 1,
             l1_success_count: 4,
@@ -312,6 +313,7 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(typeof valueBoardPayload.items[0].l3_fail_count, 'number');
     assert.equal(typeof valueBoardPayload.items[0].native_place, 'string');
     assert.equal(typeof valueBoardPayload.items[0].native_lookup_raw_json, 'string');
+    assert.equal(typeof valueBoardPayload.items[0].native_lookup_readable_text, 'string');
 
     const patchOk = await fetch(baseUrl + '/v1/proxies/policy', {
         method: 'POST',
