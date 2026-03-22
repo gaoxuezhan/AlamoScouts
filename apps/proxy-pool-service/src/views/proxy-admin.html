@@ -37,6 +37,15 @@
     .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
     .stat .k { font-size: 12px; color: var(--muted); }
     .stat .v { font-size: 20px; margin-top: 4px; }
+    .table-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--muted); font-size: 12px; }
+    .table-toolbar select {
+      background: #0f1a31;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { border-bottom: 1px solid var(--line); padding: 6px 4px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
@@ -76,7 +85,19 @@
   <section class="wide-section">
     <section class="card wide-card">
       <h2>IP价值榜（前100）</h2>
-      <div class="content"><table id="valueBoardTable"></table></div>
+      <div class="content">
+        <div class="table-toolbar">
+          <label for="valueBoardBranchFilter">编制筛选</label>
+          <select id="valueBoardBranchFilter">
+            <option value="__all__">全部</option>
+          </select>
+          <label for="valueBoardLifecycleFilter">生命周期筛选</label>
+          <select id="valueBoardLifecycleFilter">
+            <option value="__all__">全部</option>
+          </select>
+        </div>
+        <table id="valueBoardTable"></table>
+      </div>
     </section>
   </section>
 
@@ -88,9 +109,15 @@ const poolStats = document.getElementById('poolStats');
 const distributions = document.getElementById('distributions');
 const honorTable = document.getElementById('honorTable');
 const valueBoardTable = document.getElementById('valueBoardTable');
+const valueBoardBranchFilter = document.getElementById('valueBoardBranchFilter');
+const valueBoardLifecycleFilter = document.getElementById('valueBoardLifecycleFilter');
 const eventTable = document.getElementById('eventTable');
 
 const FALLBACK_RANK_ORDER = ['新兵', '列兵', '士官', '尉官', '校官', '将官', '王牌'];
+let valueBoardBranchFilterValue = '__all__';
+let valueBoardLifecycleFilterValue = '__all__';
+let valueBoardRankHelpCache = '';
+let valueBoardEntriesCache = [];
 
 function fmt(n) { return n == null ? '-' : n; }
 function esc(v) { return String(v == null ? '-' : v).replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]; }); }
@@ -147,6 +174,120 @@ function getValueBoardHeaders(rankHelp) {
     { label: '纪律', help: '合规与可控评分，异常反馈或违规信号会拉低。' },
     { label: '样本', help: '参与统计的总次数，样本越多，评分越可信。' },
   ];
+}
+function normalizeServiceBranch(value) {
+  const text = String(value == null ? '' : value).trim();
+  return text.length > 0 ? text : '陆军';
+}
+function normalizeLifecycle(value) {
+  const text = String(value == null ? '' : value).trim();
+  return text.length > 0 ? text : '未知';
+}
+function updateValueBoardBranchFilter() {
+  if (!valueBoardBranchFilter) return;
+  const branchMap = {};
+  valueBoardEntriesCache.forEach(function(entry){
+    const branch = normalizeServiceBranch(entry && entry.item && entry.item.service_branch);
+    branchMap[branch] = true;
+  });
+  const branches = Object.keys(branchMap).sort(function(a, b){
+    return a.localeCompare(b, 'zh-CN');
+  });
+  if (valueBoardBranchFilterValue !== '__all__' && !branchMap[valueBoardBranchFilterValue]) {
+    branches.unshift(valueBoardBranchFilterValue);
+  }
+  const options = [{ value: '__all__', label: '全部' }].concat(branches.map(function(branch){
+    return { value: branch, label: branch };
+  }));
+  valueBoardBranchFilter.innerHTML = options.map(function(option){
+    return '<option value="' + esc(option.value) + '">' + esc(option.label) + '</option>';
+  }).join('');
+  const values = options.map(function(option){ return option.value; });
+  if (values.indexOf(valueBoardBranchFilterValue) >= 0) {
+    valueBoardBranchFilter.value = valueBoardBranchFilterValue;
+    return;
+  }
+  valueBoardBranchFilterValue = '__all__';
+  valueBoardBranchFilter.value = valueBoardBranchFilterValue;
+}
+function updateValueBoardLifecycleFilter() {
+  if (!valueBoardLifecycleFilter) return;
+  const lifecycleMap = {};
+  valueBoardEntriesCache.forEach(function(entry){
+    const lifecycle = normalizeLifecycle(entry && entry.item && entry.item.lifecycle);
+    lifecycleMap[lifecycle] = true;
+  });
+  const lifecycles = Object.keys(lifecycleMap).sort(function(a, b){
+    return a.localeCompare(b, 'zh-CN');
+  });
+  if (valueBoardLifecycleFilterValue !== '__all__' && !lifecycleMap[valueBoardLifecycleFilterValue]) {
+    lifecycles.unshift(valueBoardLifecycleFilterValue);
+  }
+  const options = [{ value: '__all__', label: '全部' }].concat(lifecycles.map(function(lifecycle){
+    return { value: lifecycle, label: lifecycle };
+  }));
+  valueBoardLifecycleFilter.innerHTML = options.map(function(option){
+    return '<option value="' + esc(option.value) + '">' + esc(option.label) + '</option>';
+  }).join('');
+  const values = options.map(function(option){ return option.value; });
+  if (values.indexOf(valueBoardLifecycleFilterValue) >= 0) {
+    valueBoardLifecycleFilter.value = valueBoardLifecycleFilterValue;
+    return;
+  }
+  valueBoardLifecycleFilterValue = '__all__';
+  valueBoardLifecycleFilter.value = valueBoardLifecycleFilterValue;
+}
+function renderValueBoardTable() {
+  const selectedBranch = valueBoardBranchFilterValue;
+  const selectedLifecycle = valueBoardLifecycleFilterValue;
+  const visibleEntries = valueBoardEntriesCache.filter(function(entry){
+    const branch = normalizeServiceBranch(entry && entry.item && entry.item.service_branch);
+    const lifecycle = normalizeLifecycle(entry && entry.item && entry.item.lifecycle);
+    if (selectedBranch !== '__all__' && branch !== selectedBranch) return false;
+    if (selectedLifecycle !== '__all__' && lifecycle !== selectedLifecycle) return false;
+    return true;
+  });
+  const rankHelp = valueBoardRankHelpCache || buildRankHelp(null);
+  renderSimpleTable(valueBoardTable, getValueBoardHeaders(rankHelp), visibleEntries.map(function(entry){
+    const x = entry.item || {};
+    const honorText = (x.honor_active || []).join('，') || '-';
+    const address = x.ip ? (x.ip + ':' + x.port + '/' + x.protocol) : '-';
+    const updatedUtc = x.updated_at || '-';
+    const displayName = x.display_name || '-';
+    const serviceBranch = normalizeServiceBranch(x.service_branch);
+    const nativePlace = x.native_place || '未知';
+    const nativeTip = nativePlace === '未知'
+      ? '未知'
+      : normalizeNativeTooltipText(sanitizeNativeReadableText(x.native_lookup_readable_text));
+    const l0Total = Number(x.l0_success_count || 0) + Number(x.l0_fail_count || 0);
+    const l1Total = Number(x.l1_success_count || 0) + Number(x.l1_fail_count || 0);
+    const l2Total = Number(x.l2_success_count || 0) + Number(x.l2_fail_count || 0);
+    const l3Total = Number(x.l3_success_count || 0) + Number(x.l3_fail_count || 0);
+    return ''
+      + '<tr>'
+      + '<td>' + entry.rank + '</td>'
+      + '<td>' + esc(displayName) + '</td>'
+      + '<td>' + esc(serviceBranch) + '</td>'
+      + '<td>' + esc(x.rank) + '</td>'
+      + '<td title="' + esc(nativeTip) + '">' + esc(nativePlace) + '</td>'
+      + '<td class="ok">' + fmtScore(x.ip_value_score) + '</td>'
+      + '<td>' + esc(x.lifecycle) + '</td>'
+      + '<td>' + fmtPercent(x.success_ratio) + '</td>'
+      + '<td>' + fmtPercent(x.battle_ratio) + '</td>'
+      + '<td class="mono">' + fmtSuccessTotalPercent(x.l0_success_count, l0Total) + '</td>'
+      + '<td class="mono">' + fmtSuccessTotalPercent(x.l1_success_count, l1Total) + '</td>'
+      + '<td class="mono">' + fmtSuccessTotalPercent(x.l2_success_count, l2Total) + '</td>'
+      + '<td class="mono">' + fmtSuccessTotalPercent(x.l3_success_count, l3Total) + '</td>'
+      + '<td>' + esc(honorText) + '</td>'
+      + '<td class="mono">' + esc(address) + '</td>'
+      + '<td>' + esc(x.source) + '</td>'
+      + '<td class="mono" title="UTC: ' + esc(updatedUtc) + '">' + esc(fmtLocalTime(x.updated_at)) + '</td>'
+      + '<td>' + fmt(x.combat_points) + '</td>'
+      + '<td>' + fmt(x.health_score) + '</td>'
+      + '<td>' + fmt(x.discipline_score) + '</td>'
+      + '<td>' + fmt(x.total_samples) + '</td>'
+      + '</tr>';
+  }));
 }
 
 function renderPool(status) {
@@ -248,46 +389,13 @@ async function loadAll() {
     return '<tr><td class="mono">' + esc(x.awarded_at) + '</td><td>' + esc(x.display_name) + '</td><td>' + esc(x.honor_type) + '</td><td class="' + (x.active ? 'ok' : 'warn') + '">' + (x.active ? '激活' : '历史') + '</td><td>' + esc(x.reason || '-') + '</td></tr>';
   }));
 
-  const rankHelp = buildRankHelp(policyPayload && policyPayload.policy && policyPayload.policy.ranks);
-  renderSimpleTable(valueBoardTable, getValueBoardHeaders(rankHelp), (values.items || []).map(function(x, index){
-    const honorText = (x.honor_active || []).join('，') || '-';
-    const address = x.ip ? (x.ip + ':' + x.port + '/' + x.protocol) : '-';
-    const updatedUtc = x.updated_at || '-';
-    const displayName = x.display_name || '-';
-    const serviceBranch = x.service_branch || '陆军';
-    const nativePlace = x.native_place || '未知';
-    const nativeTip = nativePlace === '未知'
-      ? '未知'
-      : normalizeNativeTooltipText(sanitizeNativeReadableText(x.native_lookup_readable_text));
-    const l0Total = Number(x.l0_success_count || 0) + Number(x.l0_fail_count || 0);
-    const l1Total = Number(x.l1_success_count || 0) + Number(x.l1_fail_count || 0);
-    const l2Total = Number(x.l2_success_count || 0) + Number(x.l2_fail_count || 0);
-    const l3Total = Number(x.l3_success_count || 0) + Number(x.l3_fail_count || 0);
-    return ''
-      + '<tr>'
-      + '<td>' + (index + 1) + '</td>'
-      + '<td>' + esc(displayName) + '</td>'
-      + '<td>' + esc(serviceBranch) + '</td>'
-      + '<td>' + esc(x.rank) + '</td>'
-      + '<td title="' + esc(nativeTip) + '">' + esc(nativePlace) + '</td>'
-      + '<td class="ok">' + fmtScore(x.ip_value_score) + '</td>'
-      + '<td>' + esc(x.lifecycle) + '</td>'
-      + '<td>' + fmtPercent(x.success_ratio) + '</td>'
-      + '<td>' + fmtPercent(x.battle_ratio) + '</td>'
-      + '<td class="mono">' + fmtSuccessTotalPercent(x.l0_success_count, l0Total) + '</td>'
-      + '<td class="mono">' + fmtSuccessTotalPercent(x.l1_success_count, l1Total) + '</td>'
-      + '<td class="mono">' + fmtSuccessTotalPercent(x.l2_success_count, l2Total) + '</td>'
-      + '<td class="mono">' + fmtSuccessTotalPercent(x.l3_success_count, l3Total) + '</td>'
-      + '<td>' + esc(honorText) + '</td>'
-      + '<td class="mono">' + esc(address) + '</td>'
-      + '<td>' + esc(x.source) + '</td>'
-      + '<td class="mono" title="UTC: ' + esc(updatedUtc) + '">' + esc(fmtLocalTime(x.updated_at)) + '</td>'
-      + '<td>' + fmt(x.combat_points) + '</td>'
-      + '<td>' + fmt(x.health_score) + '</td>'
-      + '<td>' + fmt(x.discipline_score) + '</td>'
-      + '<td>' + fmt(x.total_samples) + '</td>'
-      + '</tr>';
-  }));
+  valueBoardRankHelpCache = buildRankHelp(policyPayload && policyPayload.policy && policyPayload.policy.ranks);
+  valueBoardEntriesCache = (values.items || []).map(function(item, index){
+    return { rank: index + 1, item };
+  });
+  updateValueBoardBranchFilter();
+  updateValueBoardLifecycleFilter();
+  renderValueBoardTable();
 
   renderSimpleTable(eventTable, ['时间', '类型', '代理', '消息'], (events.items || []).map(function(x){
     return '<tr><td class="mono">' + esc(x.timestamp) + '</td><td>' + esc(x.event_type) + '</td><td>' + esc(x.display_name || '-') + '</td><td>' + esc(x.message) + '</td></tr>';
@@ -299,6 +407,18 @@ poolStream.onmessage = function(ev) {
   const payload = JSON.parse(ev.data);
   if (payload.poolStatus) renderPool(payload.poolStatus);
 };
+if (valueBoardBranchFilter) {
+  valueBoardBranchFilter.addEventListener('change', function(){
+    valueBoardBranchFilterValue = valueBoardBranchFilter.value || '__all__';
+    renderValueBoardTable();
+  });
+}
+if (valueBoardLifecycleFilter) {
+  valueBoardLifecycleFilter.addEventListener('change', function(){
+    valueBoardLifecycleFilterValue = valueBoardLifecycleFilter.value || '__all__';
+    renderValueBoardTable();
+  });
+}
 
 loadAll();
 setInterval(loadAll, __REFRESH_MS__);
