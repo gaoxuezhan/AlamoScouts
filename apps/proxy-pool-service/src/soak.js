@@ -46,6 +46,58 @@ function createSoakRuntime(options = {}) {
         nextPolicyActionIndex: 0,
     };
 
+    // 0137_resolvePositiveNumber_解析正数配置逻辑
+    function resolvePositiveNumber(value, fallback = 0) {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return parsed;
+        }
+        return Number(fallback) || 0;
+    }
+
+    // 0138_buildSoakChildEnv_构建soak子进程环境变量逻辑
+    function buildSoakChildEnv() {
+        const childEnv = { ...process.env };
+        if (!String(childEnv.PROXY_HUB_POLICY_PROFILE || '').trim()) {
+            childEnv.PROXY_HUB_POLICY_PROFILE = 'soak';
+        }
+        return childEnv;
+    }
+
+    // 0139_resolveEffectiveBattleL3SyncMs_解析L3生效调度间隔逻辑
+    function resolveEffectiveBattleL3SyncMs(childEnv) {
+        const envSyncMs = resolvePositiveNumber(childEnv.PROXY_HUB_BATTLE_L3_MS, 0);
+        if (envSyncMs > 0) {
+            return envSyncMs;
+        }
+
+        const profile = String(childEnv.PROXY_HUB_POLICY_PROFILE).trim().toLowerCase();
+        const profileDefaults = config?.battle?.l3?.syncMsByProfile || {};
+        const profileSyncMs = resolvePositiveNumber(profileDefaults[profile], 0);
+        if (profileSyncMs > 0) {
+            return profileSyncMs;
+        }
+
+        return resolvePositiveNumber(config?.battle?.l3?.syncMs, 0);
+    }
+
+    // 0141_resolveEffectiveBattleL2SyncMs_解析L2生效调度间隔逻辑
+    function resolveEffectiveBattleL2SyncMs(childEnv) {
+        const envSyncMs = resolvePositiveNumber(childEnv.PROXY_HUB_BATTLE_L2_MS, 0);
+        if (envSyncMs > 0) {
+            return envSyncMs;
+        }
+
+        const profile = String(childEnv.PROXY_HUB_POLICY_PROFILE).trim().toLowerCase();
+        const profileDefaults = config?.battle?.l2SyncMsByProfile || {};
+        const profileSyncMs = resolvePositiveNumber(profileDefaults[profile], 0);
+        if (profileSyncMs > 0) {
+            return profileSyncMs;
+        }
+
+        return resolvePositiveNumber(config?.battle?.l2SyncMs, 0);
+    }
+
     // 0118_appendTimeline_执行appendTimeline相关逻辑
     function appendTimeline(type, data) {
         const line = JSON.stringify({ timestamp: now().toISOString(), type, ...data });
@@ -235,10 +287,17 @@ function createSoakRuntime(options = {}) {
             // start child process
         }
 
-        appendTimeline('service_start', { message: '未检测到服务，启动 proxyhub 进程' });
+        const childEnv = buildSoakChildEnv();
+        appendTimeline('service_start', {
+            message: '未检测到服务，启动 proxyhub 进程',
+            policyProfile: childEnv.PROXY_HUB_POLICY_PROFILE,
+            battleL2SyncMs: resolveEffectiveBattleL2SyncMs(childEnv),
+            battleL3SyncMs: resolveEffectiveBattleL3SyncMs(childEnv),
+        });
         state.child = spawnImpl(process.execPath, [pathImpl.join(__dirname, 'server.js')], {
             cwd: process.cwd(),
             stdio: ['ignore', 'pipe', 'pipe'],
+            env: childEnv,
         });
         state.childManaged = true;
         state.startedBySoak = true;
@@ -346,6 +405,18 @@ function createSoakRuntime(options = {}) {
     // 0123_runSoak_执行逻辑
     async function runSoak() {
         loadPolicyActions();
+        const childEnv = buildSoakChildEnv();
+        const battleL1SyncMs = resolvePositiveNumber(
+            process.env.PROXY_HUB_BATTLE_L1_MS,
+            resolvePositiveNumber(config?.battle?.l1SyncMs, 0),
+        );
+        appendTimeline('effective_schedule', {
+            policyProfile: childEnv.PROXY_HUB_POLICY_PROFILE,
+            battleL1SyncMs,
+            battleL2SyncMs: resolveEffectiveBattleL2SyncMs(childEnv),
+            battleL3SyncMs: resolveEffectiveBattleL3SyncMs(childEnv),
+            battleL3SyncSource: String(childEnv.PROXY_HUB_BATTLE_L3_MS || '').trim() ? 'env' : 'profile_default',
+        });
         appendTimeline('soak_start', {
             durationHours,
             pollMs,

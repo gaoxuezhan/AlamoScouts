@@ -5,6 +5,8 @@ function loadConfigWithEnv(overrides = {}) {
     const managedKeys = new Set([
         'PROXY_HUB_BATTLE_L2_PRIMARY_URL',
         'PROXY_HUB_BATTLE_L3_PRIMARY_URL',
+        'PROXY_HUB_BATTLE_L3_SECONDARY_URL',
+        'PROXY_HUB_BATTLE_L2_FALLBACK_URL',
         'PROXY_HUB_BATTLE_L3_ENABLED',
         'PROXY_HUB_BATTLE_L3_MS',
         'PROXY_HUB_BATTLE_L3_MAX',
@@ -13,6 +15,7 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_BATTLE_L3_TIMEOUT_MS',
         'PROXY_HUB_BATTLE_L3_ALLOWED_PROTOCOLS',
         'PROXY_HUB_BATTLE_L3_TARGETS_JSON',
+        'PROXY_HUB_BATTLE_L2_MS',
         'PROXY_HUB_FEATURE_STAGE_WEIGHTING',
         'PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS',
         'PROXY_HUB_FEATURE_HONOR_PROMOTION_TUNING',
@@ -99,16 +102,21 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.branching.rules.length >= 4, true);
     assert.equal(config.battle.enabled, true);
     assert.equal(config.battle.l1SyncMs, 300000);
-    assert.equal(config.battle.l2SyncMs, 1800000);
+    assert.equal(config.battle.l2SyncMs, 900000);
+    assert.equal(config.battle.l2SyncMsByProfile.production, 900000);
+    assert.equal(config.battle.l2SyncMsByProfile.soak, 600000);
     assert.equal(config.battle.maxBattleL1PerCycle, 60);
     assert.equal(config.battle.maxBattleL2PerCycle, 20);
     assert.equal(config.battle.candidateQuota, 0.30);
     assert.equal(config.battle.l3.enabled, true);
-    assert.equal(config.battle.l3.syncMs, 2700000);
+    assert.equal(config.battle.l3.syncMs, 1200000);
+    assert.equal(config.battle.l3.syncMsByProfile.production, 1200000);
+    assert.equal(config.battle.l3.syncMsByProfile.soak, 600000);
     assert.equal(config.battle.l3.maxPerCycle, 12);
     assert.equal(config.battle.l3.concurrency, 3);
-    assert.equal(config.battle.l3.timeoutMs, 12000);
-    assert.equal(config.battle.l3.allowedProtocols.includes('socks5'), true);
+    assert.equal(config.battle.l3.timeoutMs, 18000);
+    assert.deepEqual(config.battle.l3.allowedProtocols, ['http', 'https', 'socks5']);
+    assert.equal(config.battle.l3.targets.length >= 2, true);
     assert.equal(config.battle.l3.targets[0].url, 'https://www.ly.com/flights/home');
     assert.equal(config.failureBackoff.enabled, true);
     assert.equal(config.failureBackoff.maxMs, 21600000);
@@ -163,6 +171,31 @@ test('config should support battle l3 env overrides', { concurrency: false }, ()
     assert.equal(config.battle.l3.targets[0].name, 'l3-one');
 });
 
+test('config should use soak l3 sync default when soak profile is enabled', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'soak',
+    });
+    assert.equal(config.rollout.activeProfile, 'soak');
+    assert.equal(config.battle.l2SyncMs, 600000);
+    assert.equal(config.battle.l3.syncMs, 600000);
+});
+
+test('config should keep l3 sync env override higher priority than soak profile default', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'soak',
+        PROXY_HUB_BATTLE_L3_MS: '1234567',
+    });
+    assert.equal(config.battle.l3.syncMs, 1234567);
+});
+
+test('config should keep l2 sync env override higher priority than soak profile default', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'soak',
+        PROXY_HUB_BATTLE_L2_MS: '765432',
+    });
+    assert.equal(config.battle.l2SyncMs, 765432);
+});
+
 test('config should normalize battle l3 target and protocol env fallbacks', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_BATTLE_L3_TARGETS_JSON: JSON.stringify([
@@ -175,6 +208,11 @@ test('config should normalize battle l3 target and protocol env fallbacks', { co
     assert.equal(config.battle.l3.targets.length, 2);
     assert.equal(config.battle.l3.targets[0].name, 'https://example.com/only-url');
     assert.deepEqual(config.battle.l3.allowedProtocols, ['https', 'socks5']);
+});
+
+test('config should include default l3 secondary browser target', { concurrency: false }, () => {
+    const config = loadConfigWithEnv();
+    assert.equal(config.battle.l3.targets.some((item) => item.name === 'baidu-browser' && item.url === 'https://www.baidu.com'), true);
 });
 
 test('config should support source override for line-based lists', { concurrency: false }, () => {
