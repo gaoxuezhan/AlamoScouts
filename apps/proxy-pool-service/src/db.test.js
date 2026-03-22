@@ -559,7 +559,7 @@ test('value board API should sort by value and parse breakdown and honor fields'
         native_place: '中国-北京',
         native_country: '中国',
         native_city: '北京',
-        native_provider: 'ip-api',
+        native_provider: 'ipapi.co',
         native_lookup_status: 'resolved',
         native_lookup_raw_json: '{"status":"success","country":"中国","city":"北京"}',
         updated_at: now,
