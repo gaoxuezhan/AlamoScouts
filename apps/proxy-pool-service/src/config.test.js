@@ -46,6 +46,7 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_SOURCE_FORMAT',
         'PROXY_HUB_SOURCE_PROFILE',
         'PROXY_HUB_SPEEDX_SOCKS4_ENABLED',
+        'PROXY_HUB_SPEEDX_SOCKS5_ENABLED',
         'PROXY_HUB_BRANCHING_ENABLED',
         'PROXY_HUB_BRANCHING_DEFAULT',
         'PROXY_HUB_BRANCHING_RULES_JSON',
@@ -95,6 +96,7 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.source.activeFeeds.length, 3);
     assert.equal(config.source.activeFeeds[0].url.includes('/http.txt'), true);
     assert.equal(config.source.activeFeeds.some((feed) => feed.name === 'TheSpeedX/socks4' && feed.enabled === false), true);
+    assert.equal(config.source.activeFeeds.some((feed) => feed.name === 'TheSpeedX/socks5' && feed.enabled === false), true);
     assert.equal(config.source.profiles.monosans_archive.enabled, false);
     assert.equal(config.storage.dbPath.includes('proxyhub-speedx-bundle.db'), true);
     assert.equal(config.validation.allowedProtocols.includes('socks4'), true);
@@ -253,6 +255,16 @@ test('config should allow re-enable speedx socks4 feed by env switch', { concurr
 
     assert.equal(config.source.activeProfile, 'speedx_bundle');
     assert.equal(config.source.activeFeeds.some((feed) => feed.name === 'TheSpeedX/socks4' && feed.enabled === true), true);
+});
+
+test('config should allow re-enable speedx socks5 feed by env switch', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_SOURCE_PROFILE: 'speedx_bundle',
+        PROXY_HUB_SPEEDX_SOCKS5_ENABLED: 'true',
+    });
+
+    assert.equal(config.source.activeProfile, 'speedx_bundle');
+    assert.equal(config.source.activeFeeds.some((feed) => feed.name === 'TheSpeedX/socks5' && feed.enabled === true), true);
 });
 
 test('config should support branching env overrides', { concurrency: false }, () => {

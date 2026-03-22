@@ -35,7 +35,7 @@ function createConfig(port = 0) {
             activeFeeds: [
                 { name: 'TheSpeedX/http', url: 'https://example.com/http.txt', enabled: true, defaultProtocol: 'http', sourceFormat: 'line' },
                 { name: 'TheSpeedX/socks4', url: 'https://example.com/socks4.txt', enabled: false, defaultProtocol: 'socks4', sourceFormat: 'line' },
-                { name: 'TheSpeedX/socks5', url: 'https://example.com/socks5.txt', enabled: true, defaultProtocol: 'socks5', sourceFormat: 'line' },
+                { name: 'TheSpeedX/socks5', url: 'https://example.com/socks5.txt', enabled: false, defaultProtocol: 'socks5', sourceFormat: 'line' },
             ],
             monosans: { name: 'monosans', url: 'https://x', enabled: true },
         },
@@ -110,6 +110,7 @@ function createStubs() {
         engineStopped: false,
         engineStopCalls: 0,
         socks4CleanupCalls: 0,
+        socks5CleanupCalls: 0,
         rolloutState: {
             id: 1,
             mode: 'SAFE',
@@ -195,6 +196,18 @@ function createStubs() {
                 deleted: 2,
                 beforeSource: 1,
                 beforeProtocol: 1,
+                afterSource: 0,
+                afterProtocol: 0,
+            };
+        },
+        purgeSocks5Data: () => {
+            state.socks5CleanupCalls += 1;
+            return {
+                sourceName: 'TheSpeedX/socks5',
+                protocol: 'socks5',
+                deleted: 3,
+                beforeSource: 2,
+                beforeProtocol: 2,
                 afterSource: 0,
                 afterProtocol: 0,
             };
@@ -434,6 +447,7 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
 
     await runtime.shutdown('TEST');
     assert.equal(stubs.state.socks4CleanupCalls, 1);
+    assert.equal(stubs.state.socks5CleanupCalls, 1);
     assert.equal(stubs.state.dbClosed, true);
     assert.equal(stubs.state.poolClosed, true);
     assert.equal(stubs.state.engineStopped, true);
@@ -443,13 +457,45 @@ test('startup socks4 cleanup should be skipped when socks4 feed is enabled', asy
     const stubs = createStubs();
     const config = createConfig(0);
     const socks4Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks4');
+    const socks5Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks5');
     socks4Feed.enabled = true;
+    socks5Feed.enabled = true;
 
     const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
     try {
         assert.equal(stubs.state.socks4CleanupCalls, 0);
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
     } finally {
         await runtime.shutdown('TEST-SOCKS4-CLEANUP-SKIP');
+    }
+});
+
+test('startup socks5 cleanup should be skipped when socks5 feed is enabled', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    const socks4Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks4');
+    const socks5Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks5');
+    socks4Feed.enabled = true;
+    socks5Feed.enabled = true;
+
+    const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
+    try {
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
+    } finally {
+        await runtime.shutdown('TEST-SOCKS5-CLEANUP-SKIP');
+    }
+});
+
+test('startup cleanup should skip feed when purge method is missing', async () => {
+    const stubs = createStubs();
+    delete stubs.db.purgeSocks5Data;
+
+    const { runtime } = await startRuntimeOnRandomPort(stubs);
+    try {
+        assert.equal(stubs.state.socks4CleanupCalls, 1);
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
+    } finally {
+        await runtime.shutdown('TEST-CLEANUP-METHOD-MISSING');
     }
 });
 
@@ -461,6 +507,7 @@ test('startup socks4 cleanup should be skipped when activeFeeds is not an array'
     const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
     try {
         assert.equal(stubs.state.socks4CleanupCalls, 0);
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
     } finally {
         await runtime.shutdown('TEST-SOCKS4-CLEANUP-NON-ARRAY');
     }

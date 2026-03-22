@@ -400,10 +400,15 @@ const activeSourceProfile = Object.prototype.hasOwnProperty.call(sourceProfiles,
     ? sourceProfileRaw
     : 'speedx_bundle';
 const speedxSocks4Enabled = toBool(process.env.PROXY_HUB_SPEEDX_SOCKS4_ENABLED, false);
+const speedxSocks5Enabled = toBool(process.env.PROXY_HUB_SPEEDX_SOCKS5_ENABLED, false);
 const selectedSourceProfile = deepClone(sourceProfiles[activeSourceProfile]);
 const speedxSocks4Feed = selectedSourceProfile.feeds.find((feed) => feed.name === 'TheSpeedX/socks4');
 if (speedxSocks4Feed) {
     speedxSocks4Feed.enabled = speedxSocks4Enabled;
+}
+const speedxSocks5Feed = selectedSourceProfile.feeds.find((feed) => feed.name === 'TheSpeedX/socks5');
+if (speedxSocks5Feed) {
+    speedxSocks5Feed.enabled = speedxSocks5Enabled;
 }
 
 const hasLegacySourceOverride = hasOwnEnv('PROXY_HUB_SOURCE_NAME')

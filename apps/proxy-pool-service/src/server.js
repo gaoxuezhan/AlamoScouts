@@ -477,19 +477,30 @@ function createRuntime(options = {}) {
             try {
                 server = app.listen(config.service.port, config.service.host, () => {
                     server.off('error', onError);
-                    const socks4Feed = Array.isArray(config.source?.activeFeeds)
-                        ? config.source.activeFeeds.find((feed) => feed && feed.name === 'TheSpeedX/socks4')
-                        : null;
-                    if (socks4Feed && socks4Feed.enabled === false && typeof db.purgeSocks4Data === 'function') {
-                        const cleanupSummary = db.purgeSocks4Data({
-                            sourceName: socks4Feed.name,
-                            protocol: 'socks4',
+                    const cleanupPlans = [
+                        { name: 'TheSpeedX/socks4', protocol: 'socks4', method: 'purgeSocks4Data' },
+                        { name: 'TheSpeedX/socks5', protocol: 'socks5', method: 'purgeSocks5Data' },
+                    ];
+                    const activeFeeds = Array.isArray(config.source?.activeFeeds)
+                        ? config.source.activeFeeds
+                        : [];
+                    for (const plan of cleanupPlans) {
+                        const feed = activeFeeds.find((item) => item && item.name === plan.name);
+                        if (!feed || feed.enabled !== false) {
+                            continue;
+                        }
+                        if (typeof db[plan.method] !== 'function') {
+                            continue;
+                        }
+                        const cleanupSummary = db[plan.method]({
+                            sourceName: feed.name,
+                            protocol: plan.protocol,
                         });
                         logger.write({
                             event: '数据清理',
                             stage: '服务',
-                            result: `socks4 清理 ${cleanupSummary.deleted}`,
-                            action: '临时停用 TheSpeedX/socks4',
+                            result: `${plan.protocol} 清理 ${cleanupSummary.deleted}`,
+                            action: `临时停用 ${feed.name}`,
                             details: cleanupSummary,
                         });
                     }
