@@ -414,6 +414,21 @@ function createAbortSignal(timeoutMs) {
     return undefined;
 }
 
+// 0290_normalizeNativeReason_规范化籍贯错误原因逻辑
+function normalizeNativeReason(value, fallback = 'request-failed') {
+    const text = String(value == null ? '' : value).trim().toLowerCase();
+    if (text.length === 0) {
+        return fallback;
+    }
+    const normalized = text
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    return normalized || fallback;
+}
+
+const NATIVE_LOOKUP_PROVIDER_CHAIN = ['ipapi.co', 'freeipapi'];
+const NATIVE_LOOKUP_PROVIDER_CHAIN_LABEL = NATIVE_LOOKUP_PROVIDER_CHAIN.join(',');
+
 // 0282_readNativeLookupConfig_读取籍贯解析配置逻辑
 function readNativeLookupConfig(config = {}) {
     const raw = config.native || {};
@@ -539,7 +554,7 @@ class ProxyHubEngine extends EventEmitter {
             details: {
                 ip: updatedProxy.ip,
                 service_branch: updatedProxy.service_branch,
-                provider: 'ip-api',
+                provider: NATIVE_LOOKUP_PROVIDER_CHAIN_LABEL,
                 status: 'skipped',
                 reason,
             },
@@ -555,25 +570,16 @@ class ProxyHubEngine extends EventEmitter {
             details: {
                 ip: updatedProxy.ip,
                 service_branch: updatedProxy.service_branch,
-                provider: 'ip-api',
+                provider: NATIVE_LOOKUP_PROVIDER_CHAIN_LABEL,
                 status: 'skipped',
                 reason,
             },
         });
     }
 
-    // 0287_resolveNativePlaceByIp_解析IP籍贯逻辑
-    async resolveNativePlaceByIp(ip, timeoutMs = 3000) {
-        if (typeof fetch !== 'function') {
-            throw new Error('ip-api-fetch-unavailable');
-        }
-
-        const safeIp = String(ip || '').trim();
-        if (safeIp.length === 0) {
-            throw new Error('ip-api-ip-missing');
-        }
-
-        const response = await fetch(`http://ip-api.com/json/${encodeURIComponent(safeIp)}?lang=zh-CN`, {
+    // 0287_resolveNativePlaceByIpapiCo_通过ipapi.co解析IP籍贯逻辑
+    async resolveNativePlaceByIpapiCo(ip, timeoutMs = 3000) {
+        const response = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, {
             signal: createAbortSignal(Math.max(500, Number(timeoutMs) || 3000)),
             headers: {
                 'user-agent': 'ProxyHub/1.0',
@@ -581,7 +587,7 @@ class ProxyHubEngine extends EventEmitter {
             },
         });
         if (!response.ok) {
-            throw new Error(`ip-api-http-${response.status}`);
+            throw new Error(`ipapi.co-http-${response.status}`);
         }
 
         const rawJson = await response.text();
@@ -589,18 +595,18 @@ class ProxyHubEngine extends EventEmitter {
         try {
             payload = JSON.parse(rawJson);
         } catch {
-            throw new Error('ip-api-invalid-json');
+            throw new Error('ipapi.co-invalid-json');
         }
 
-        if (String(payload?.status || '').toLowerCase() !== 'success') {
-            const reason = String(payload?.message || 'request-failed').trim();
-            throw new Error(`ip-api-${reason}`);
+        if (payload?.error === true) {
+            const reason = normalizeNativeReason(payload?.reason || payload?.message);
+            throw new Error(`ipapi.co-${reason}`);
         }
 
-        const country = String(payload?.country || '').trim() || '未知';
+        const country = String(payload?.country_name || payload?.country || '').trim() || '未知';
         const city = String(payload?.city || '').trim() || '未知';
         return {
-            provider: 'ip-api',
+            provider: 'ipapi.co',
             country,
             city,
             place: `${country}-${city}`,
@@ -608,7 +614,74 @@ class ProxyHubEngine extends EventEmitter {
         };
     }
 
-    // 0288_runNativeLookupTask_执行籍贯补全任务逻辑
+    // 0288_resolveNativePlaceByFreeipapi_通过freeipapi解析IP籍贯逻辑
+    async resolveNativePlaceByFreeipapi(ip, timeoutMs = 3000) {
+        const response = await fetch(`https://freeipapi.com/api/json/${encodeURIComponent(ip)}`, {
+            signal: createAbortSignal(Math.max(500, Number(timeoutMs) || 3000)),
+            headers: {
+                'user-agent': 'ProxyHub/1.0',
+                accept: 'application/json',
+            },
+        });
+        if (!response.ok) {
+            throw new Error(`freeipapi-http-${response.status}`);
+        }
+
+        const rawJson = await response.text();
+        let payload;
+        try {
+            payload = JSON.parse(rawJson);
+        } catch {
+            throw new Error('freeipapi-invalid-json');
+        }
+
+        if (payload?.error === true) {
+            const reason = normalizeNativeReason(payload?.reason || payload?.message);
+            throw new Error(`freeipapi-${reason}`);
+        }
+        if (typeof payload?.error === 'string' && payload.error.trim().length > 0) {
+            throw new Error(`freeipapi-${normalizeNativeReason(payload.error)}`);
+        }
+
+        const country = String(payload?.countryName || payload?.country_name || payload?.country || '').trim() || '未知';
+        const city = String(payload?.cityName || payload?.city || '').trim() || '未知';
+        return {
+            provider: 'freeipapi',
+            country,
+            city,
+            place: `${country}-${city}`,
+            rawJson: rawJson || JSON.stringify(payload),
+        };
+    }
+
+    // 0289_resolveNativePlaceByIp_按provider链路解析IP籍贯逻辑
+    async resolveNativePlaceByIp(ip, timeoutMs = 3000) {
+        if (typeof fetch !== 'function') {
+            throw new Error('native-fetch-unavailable');
+        }
+
+        const safeIp = String(ip || '').trim();
+        if (safeIp.length === 0) {
+            throw new Error('native-ip-missing');
+        }
+
+        const errors = [];
+        try {
+            return await this.resolveNativePlaceByIpapiCo(safeIp, timeoutMs);
+        } catch (error) {
+            errors.push(error?.message || 'ipapi.co-request-failed');
+        }
+
+        try {
+            return await this.resolveNativePlaceByFreeipapi(safeIp, timeoutMs);
+        } catch (error) {
+            errors.push(error?.message || 'freeipapi-request-failed');
+        }
+
+        throw new Error(`native-all-providers-failed:${errors.join('|')}`);
+    }
+
+    // 0290_runNativeLookupTask_执行籍贯补全任务逻辑
     async runNativeLookupTask(proxyId, sourceName) {
         const startedAtIso = this.now().toISOString();
         const proxy = this.db.getProxyById(proxyId);
@@ -657,7 +730,7 @@ class ProxyHubEngine extends EventEmitter {
                     service_branch: updatedProxy.service_branch,
                     provider: resolved.provider,
                     status: 'resolved',
-                    reason: 'ip-api-success',
+                    reason: `${resolved.provider}-success`,
                 },
             });
             this.logger.write({
@@ -700,7 +773,7 @@ class ProxyHubEngine extends EventEmitter {
                 details: {
                     ip: updatedProxy.ip,
                     service_branch: updatedProxy.service_branch,
-                    provider: 'ip-api',
+                    provider: NATIVE_LOOKUP_PROVIDER_CHAIN_LABEL,
                     status: 'failed',
                     reason,
                     retryAt,
@@ -717,7 +790,7 @@ class ProxyHubEngine extends EventEmitter {
                 details: {
                     ip: updatedProxy.ip,
                     service_branch: updatedProxy.service_branch,
-                    provider: 'ip-api',
+                    provider: NATIVE_LOOKUP_PROVIDER_CHAIN_LABEL,
                     status: 'failed',
                     reason,
                     retryAt,
@@ -754,7 +827,7 @@ class ProxyHubEngine extends EventEmitter {
                     details: {
                         ip: proxy.ip,
                         service_branch: proxy.service_branch,
-                        provider: 'ip-api',
+                        provider: NATIVE_LOOKUP_PROVIDER_CHAIN_LABEL,
                         status: 'failed',
                     },
                 });

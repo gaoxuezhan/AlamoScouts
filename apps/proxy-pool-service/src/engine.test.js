@@ -254,6 +254,12 @@ test('engine utility functions should cover helper branches', async () => {
     assert.deepEqual(readNativeLookupConfig({
         native: {
             enabled: true,
+            targetBranches: [null, '海军', ''],
+        },
+    }).targetBranches, ['海军']);
+    assert.deepEqual(readNativeLookupConfig({
+        native: {
+            enabled: true,
             targetBranches: [],
         },
     }).targetBranches, ['海军', '海豹突击队']);
@@ -261,6 +267,10 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(isNativeRetryDue('2026-03-13T23:59:59.000Z', '2026-03-14T00:00:00.000Z'), true);
     assert.equal(isNativeRetryDue('2026-03-14T00:10:00.000Z', '2026-03-14T00:00:00.000Z'), false);
     assert.equal(isNativeRetryDue('bad-date', '2026-03-14T00:00:00.000Z'), true);
+    const oldDateNow = Date.now;
+    Date.now = () => Date.parse('2026-03-14T00:00:00.000Z');
+    assert.equal(isNativeRetryDue('2026-03-14T00:10:00.000Z', 'bad-now'), false);
+    Date.now = oldDateNow;
     assert.equal(normalizeNativeLookupStatus('resolved'), 'resolved');
     assert.equal(normalizeNativeLookupStatus('bad-value'), 'pending');
     assert.equal(normalizeNativeLookupStatus(null), 'pending');
@@ -1503,7 +1513,7 @@ test('applyCombatOutcome should resolve native place asynchronously for target b
     });
     h.db.db.pragma('foreign_keys = OFF');
     engine.resolveNativePlaceByIp = async () => ({
-        provider: 'ip-api',
+        provider: 'ipapi.co',
         country: '中国',
         city: '北京',
         place: '中国-北京',
@@ -1525,7 +1535,7 @@ test('applyCombatOutcome should resolve native place asynchronously for target b
     const updated = h.db.getProxyById(proxy.id);
     assert.equal(updated.service_branch, '海军');
     assert.equal(updated.native_place, '中国-北京');
-    assert.equal(updated.native_provider, 'ip-api');
+    assert.equal(updated.native_provider, 'ipapi.co');
     assert.equal(updated.native_lookup_raw_json.includes('"country":"中国"'), true);
     assert.equal(h.db.getEvents(30).some((item) => item.event_type === 'native_lookup_resolved'), true);
     assert.equal(logger.entries.some((item) => item.event === '籍贯解析成功'), true);
@@ -1573,7 +1583,7 @@ test('applyCombatOutcome should mark native lookup failed with retry and keep ex
         now: () => new Date(nowIso),
     });
     engine.resolveNativePlaceByIp = async () => {
-        throw new Error('ip-api-timeout');
+        throw new Error('ipapi.co-timeout');
     };
 
     await engine.applyCombatOutcome({
@@ -1595,7 +1605,7 @@ test('applyCombatOutcome should mark native lookup failed with retry and keep ex
     assert.equal(typeof updated.native_next_retry_at, 'string');
     assert.equal(Date.parse(updated.native_next_retry_at) > Date.parse(nowIso), true);
     assert.equal(h.db.getEvents(30).some((item) => item.event_type === 'native_lookup_failed'), true);
-    assert.equal(logger.entries.some((item) => item.event === '籍贯解析失败' && item.reason === 'ip-api-timeout'), true);
+    assert.equal(logger.entries.some((item) => item.event === '籍贯解析失败' && item.reason === 'ipapi.co-timeout'), true);
 
     cleanupDb(h);
 });
@@ -1635,7 +1645,7 @@ test('applyCombatOutcome should skip non-target branch and honor native retry wi
     engine.resolveNativePlaceByIp = async () => {
         lookupCalls += 1;
         return {
-            provider: 'ip-api',
+            provider: 'ipapi.co',
             country: '中国',
             city: '广州',
             place: '中国-广州',
@@ -1697,7 +1707,7 @@ test('applyCombatOutcome should skip non-target branch and honor native retry wi
     cleanupDb(h);
 });
 
-test('resolveNativePlaceByIp should cover unavailable/http/json/status/success branches', async () => {
+test('resolveNativePlaceByIp should use ipapi.co first and fallback to freeipapi', async () => {
     const logger = createLogger();
     const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-native-resolve.db'));
     config.native.enabled = true;
@@ -1720,19 +1730,19 @@ test('resolveNativePlaceByIp should cover unavailable/http/json/status/success b
         global.fetch = undefined;
         await assert.rejects(
             () => engine.resolveNativePlaceByIp('1.1.1.1', 800),
-            /ip-api-fetch-unavailable/,
+            /native-fetch-unavailable/,
         );
 
         global.fetch = async () => ({
             ok: true,
             status: 200,
             async text() {
-                return '{"status":"success"}';
+                return '{}';
             },
         });
         await assert.rejects(
             () => engine.resolveNativePlaceByIp('', 800),
-            /ip-api-ip-missing/,
+            /native-ip-missing/,
         );
 
         global.AbortSignal = undefined;
@@ -1745,7 +1755,13 @@ test('resolveNativePlaceByIp should cover unavailable/http/json/status/success b
         });
         await assert.rejects(
             () => engine.resolveNativePlaceByIp('2.2.2.2', 900),
-            /ip-api-http-500/,
+            (error) => {
+                assert.equal(typeof error?.message, 'string');
+                assert.match(error.message, /native-all-providers-failed/);
+                assert.match(error.message, /ipapi\.co-http-500/);
+                assert.match(error.message, /freeipapi-http-500/);
+                return true;
+            },
         );
 
         global.AbortSignal = oldAbortSignal;
@@ -1758,57 +1774,153 @@ test('resolveNativePlaceByIp should cover unavailable/http/json/status/success b
         });
         await assert.rejects(
             () => engine.resolveNativePlaceByIp('3.3.3.3', 900),
-            /ip-api-invalid-json/,
-        );
-
-        global.fetch = async () => ({
-            ok: true,
-            status: 200,
-            async text() {
-                return JSON.stringify({ status: 'fail', message: 'quota' });
+            (error) => {
+                assert.equal(typeof error?.message, 'string');
+                assert.match(error.message, /native-all-providers-failed/);
+                assert.match(error.message, /ipapi\.co-invalid-json/);
+                assert.match(error.message, /freeipapi-invalid-json/);
+                return true;
             },
-        });
-        await assert.rejects(
-            () => engine.resolveNativePlaceByIp('4.4.4.4', 900),
-            /ip-api-quota/,
         );
 
+        global.fetch = async (url) => {
+            if (/^https:\/\/ipapi\.co\//.test(String(url))) {
+                return {
+                    ok: true,
+                    status: 200,
+                    async text() {
+                        return JSON.stringify({ error: true, reason: 'quota' });
+                    },
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                async text() {
+                    return JSON.stringify({ countryName: '美国', cityName: '纽约' });
+                },
+            };
+        };
+        const fallbackResolved = await engine.resolveNativePlaceByIp('4.4.4.4', 900);
+        assert.equal(fallbackResolved.provider, 'freeipapi');
+        assert.equal(fallbackResolved.place, '美国-纽约');
+
+        let primaryCalls = 0;
         global.fetch = async () => ({
             ok: true,
             status: 200,
             async text() {
-                return JSON.stringify({ country: '美国', city: '纽约' });
-            },
-        });
-        await assert.rejects(
-            () => engine.resolveNativePlaceByIp('4.4.4.5', 900),
-            /ip-api-request-failed/,
-        );
-
-        global.fetch = async () => ({
-            ok: true,
-            status: 200,
-            async text() {
-                return JSON.stringify({ status: 'success', country: '日本', city: '' });
+                primaryCalls += 1;
+                return JSON.stringify({ country_name: '日本', city: '' });
             },
         });
         const resolved = await engine.resolveNativePlaceByIp('5.5.5.5', 900);
-        assert.equal(resolved.provider, 'ip-api');
+        assert.equal(resolved.provider, 'ipapi.co');
         assert.equal(resolved.place, '日本-未知');
+        assert.equal(primaryCalls, 1);
+
+        global.fetch = async (url) => {
+            if (/^https:\/\/ipapi\.co\//.test(String(url))) {
+                return {
+                    ok: true,
+                    status: 200,
+                    async text() {
+                        return JSON.stringify({ error: true, reason: 'blocked' });
+                    },
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                async text() {
+                    return JSON.stringify({ countryName: '', cityName: '首尔' });
+                },
+            };
+        };
+        const fallbackCountry = await engine.resolveNativePlaceByIp('5.5.5.6', 0);
+        assert.equal(fallbackCountry.place, '未知-首尔');
+
+        global.fetch = async (url) => {
+            if (/^https:\/\/ipapi\.co\//.test(String(url))) {
+                return {
+                    ok: true,
+                    status: 200,
+                    async text() {
+                        return JSON.stringify({ error: true, reason: 'rate limit' });
+                    },
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                async text() {
+                    return JSON.stringify({ error: true, reason: '   ', message: '' });
+                },
+            };
+        };
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('5.5.5.7', 900),
+            /native-all-providers-failed:ipapi\.co-rate-limit\|freeipapi-request-failed/,
+        );
+
+        global.fetch = async (url) => {
+            if (/^https:\/\/ipapi\.co\//.test(String(url))) {
+                return {
+                    ok: true,
+                    status: 200,
+                    async text() {
+                        return JSON.stringify({ error: true, reason: 'blocked' });
+                    },
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                async text() {
+                    return JSON.stringify({ error: '***' });
+                },
+            };
+        };
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('5.5.5.8', 900),
+            /native-all-providers-failed:ipapi\.co-blocked\|freeipapi-request-failed/,
+        );
 
         global.fetch = async () => ({
             ok: true,
             status: 200,
             async text() {
-                return JSON.stringify({ status: 'success', country: '', city: '首尔' });
+                return JSON.stringify({ error: true, reason: '', message: 'Rate Limited' });
             },
         });
-        const fallbackCountry = await engine.resolveNativePlaceByIp('5.5.5.6', 0);
-        assert.equal(fallbackCountry.place, '未知-首尔');
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIpapiCo('5.5.5.80', 900),
+            /ipapi\.co-rate-limited/,
+        );
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({ country: '德国', city: '' });
+            },
+        });
+        const ipapiCountryFallback = await engine.resolveNativePlaceByIpapiCo('5.5.5.81', 900);
+        assert.equal(ipapiCountryFallback.place, '德国-未知');
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({});
+            },
+        });
+        const ipapiUnknownPlace = await engine.resolveNativePlaceByIpapiCo('5.5.5.811', 900);
+        assert.equal(ipapiUnknownPlace.place, '未知-未知');
 
         JSON.parse = (raw) => {
             if (raw === '') {
-                return { status: 'success', country: '中国', city: '厦门' };
+                return { country: '法国', city: '巴黎' };
             }
             return oldJsonParse(raw);
         };
@@ -1819,9 +1931,100 @@ test('resolveNativePlaceByIp should cover unavailable/http/json/status/success b
                 return '';
             },
         });
-        const fallbackRawJson = await engine.resolveNativePlaceByIp('5.5.5.7', 900);
-        assert.equal(fallbackRawJson.place, '中国-厦门');
-        assert.equal(fallbackRawJson.rawJson, JSON.stringify({ status: 'success', country: '中国', city: '厦门' }));
+        const ipapiRawFallback = await engine.resolveNativePlaceByIpapiCo('5.5.5.82', 900);
+        assert.equal(ipapiRawFallback.place, '法国-巴黎');
+        assert.equal(
+            ipapiRawFallback.rawJson,
+            JSON.stringify({ country: '法国', city: '巴黎' }),
+        );
+
+        JSON.parse = oldJsonParse;
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({ error: true, reason: '', message: 'Rate Limited' });
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByFreeipapi('5.5.5.83', 900),
+            /freeipapi-rate-limited/,
+        );
+
+        global.fetch = async (url) => {
+            if (/^https:\/\/ipapi\.co\//.test(String(url))) {
+                return {
+                    ok: true,
+                    status: 200,
+                    async text() {
+                        return JSON.stringify({ error: true, reason: 'blocked' });
+                    },
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                async text() {
+                    return JSON.stringify({ country: '加拿大', city: '' });
+                },
+            };
+        };
+        const fallbackFieldResolved = await engine.resolveNativePlaceByIp('5.5.5.9', 900);
+        assert.equal(fallbackFieldResolved.provider, 'freeipapi');
+        assert.equal(fallbackFieldResolved.place, '加拿大-未知');
+
+        JSON.parse = (raw) => {
+            if (raw === '') {
+                return { country_name: '墨西哥', city: '蒙特雷' };
+            }
+            return oldJsonParse(raw);
+        };
+        global.fetch = async (url) => {
+            if (/^https:\/\/ipapi\.co\//.test(String(url))) {
+                return {
+                    ok: true,
+                    status: 200,
+                    async text() {
+                        return JSON.stringify({ error: true, reason: 'blocked' });
+                    },
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                async text() {
+                    return '';
+                },
+            };
+        };
+        const fallbackRawResolved = await engine.resolveNativePlaceByIp('5.5.5.10', 900);
+        assert.equal(fallbackRawResolved.place, '墨西哥-蒙特雷');
+        assert.equal(
+            fallbackRawResolved.rawJson,
+            JSON.stringify({ country_name: '墨西哥', city: '蒙特雷' }),
+        );
+
+        const oldResolveIpapiCo = engine.resolveNativePlaceByIpapiCo.bind(engine);
+        const oldResolveFreeipapi = engine.resolveNativePlaceByFreeipapi.bind(engine);
+        engine.resolveNativePlaceByIpapiCo = async () => {
+            throw null;
+        };
+        engine.resolveNativePlaceByFreeipapi = async () => {
+            throw null;
+        };
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return '{}';
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIp('5.5.5.11', 900),
+            /native-all-providers-failed:ipapi\.co-request-failed\|freeipapi-request-failed/,
+        );
+        engine.resolveNativePlaceByIpapiCo = oldResolveIpapiCo;
+        engine.resolveNativePlaceByFreeipapi = oldResolveFreeipapi;
     } finally {
         global.fetch = oldFetch;
         global.AbortSignal = oldAbortSignal;
@@ -1898,6 +2101,14 @@ test('native lookup decision/task/schedule helpers should cover edge branches', 
     }, nowIso);
     assert.equal(emptyNativePlaceDecision.action, 'lookup');
     assert.equal(emptyNativePlaceDecision.reason, 'eligible');
+    const blankNativePlaceDecision = engine.resolveNativeLookupDecision({
+        id: proxy.id,
+        service_branch: '海军',
+        native_place: '   ',
+        native_lookup_status: 'pending',
+        native_next_retry_at: null,
+    }, nowIso);
+    assert.equal(blankNativePlaceDecision.action, 'lookup');
 
     await engine.runNativeLookupTask(99999, 'src');
 
@@ -1934,7 +2145,7 @@ test('native lookup decision/task/schedule helpers should cover edge branches', 
             updated_at: nowIso,
         });
         return {
-            provider: 'ip-api',
+            provider: 'ipapi.co',
             country: '中国',
             city: '广州',
             place: '中国-广州',
@@ -1956,7 +2167,7 @@ test('native lookup decision/task/schedule helpers should cover edge branches', 
             native_place: '中国-杭州',
             updated_at: nowIso,
         });
-        throw new Error('ip-api-recheck-fail');
+        throw new Error('ipapi.co-recheck-fail');
     };
     await engine.runNativeLookupTask(proxy.id, 'src');
     assert.equal(h.db.getProxyById(proxy.id).native_lookup_status, 'pending');
@@ -2058,7 +2269,7 @@ test('native lookup should fallback to cached proxy when db row disappears and d
         if (ip === proxySuccess.ip) {
             forceNullGetById = true;
             return {
-                provider: 'ip-api',
+                provider: 'ipapi.co',
                 country: '中国',
                 city: '成都',
                 place: '中国-成都',
