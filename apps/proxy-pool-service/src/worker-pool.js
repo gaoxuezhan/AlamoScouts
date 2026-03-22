@@ -1,4 +1,4 @@
-﻿const path = require('node:path');
+const path = require('node:path');
 const workerThreads = require('node:worker_threads');
 const { EventEmitter } = require('node:events');
 
@@ -12,6 +12,8 @@ class WorkerPool extends EventEmitter {
         this.WorkerClass = WorkerClass || workerThreads.Worker;
         this.now = now || (() => new Date().toISOString());
 
+        this.targetSize = Math.max(0, Number.isFinite(Number(size)) ? Math.floor(Number(size)) : 0);
+        this.nextWorkerId = 0;
         this.queue = [];
         this.workers = new Map();
         this.taskSeq = 1;
@@ -19,15 +21,120 @@ class WorkerPool extends EventEmitter {
         this.completedTasks = 0;
         this.failedTasks = 0;
         this.restartedWorkers = 0;
+        this.restartReasonCounts = {
+            timeout: 0,
+            connect_error: 0,
+            protocol_error: 0,
+            unknown: 0,
+        };
+        this.pendingRestartReasons = new Map();
+        this.retiringWorkers = new Set();
         this.disposed = false;
 
-        for (let i = 0; i < size; i += 1) {
-            this.spawnWorker(i + 1);
+        for (let i = 0; i < this.targetSize; i += 1) {
+            this.spawnWorker();
         }
     }
 
+    // 0150_allocateWorkerId_分配工作线程ID逻辑
+    allocateWorkerId() {
+        this.nextWorkerId += 1;
+        return this.nextWorkerId;
+    }
+
+    // 0151_classifyRestartReason_分类重启原因逻辑
+    classifyRestartReason(reason) {
+        const text = String(reason || '').toLowerCase();
+        if (!text) return 'unknown';
+        if (text.includes('timeout')) return 'timeout';
+        if (
+            text.includes('connect')
+            || text.includes('econn')
+            || text.includes('enotfound')
+            || text.includes('ehost')
+            || text.includes('network')
+            || text.includes('socket')
+            || text.includes('http-')
+        ) {
+            return 'connect_error';
+        }
+        if (
+            text.includes('protocol')
+            || text.includes('invalid')
+            || text.includes('parse')
+            || text.includes('unknown-task-type')
+        ) {
+            return 'protocol_error';
+        }
+        return 'unknown';
+    }
+
+    // 0152_recordRestartReason_记录重启原因逻辑
+    recordRestartReason(reason) {
+        const code = this.classifyRestartReason(reason);
+        this.restartReasonCounts[code] = (this.restartReasonCounts[code] || 0) + 1;
+        return code;
+    }
+
+    // 0153_setPendingRestartReason_设置待消费重启原因逻辑
+    setPendingRestartReason(workerId, reason) {
+        if (!this.workers.has(workerId)) return;
+        this.pendingRestartReasons.set(workerId, this.classifyRestartReason(reason));
+    }
+
+    // 0154_consumePendingRestartReason_消费待消费重启原因逻辑
+    consumePendingRestartReason(workerId, fallback = 'unknown') {
+        const pending = this.pendingRestartReasons.get(workerId);
+        this.pendingRestartReasons.delete(workerId);
+        return pending || this.classifyRestartReason(fallback);
+    }
+
+    // 0155_terminateWorkerMeta_终止工作线程元信息逻辑
+    terminateWorkerMeta(meta) {
+        if (!meta || !meta.worker) return;
+        meta.worker.terminate().catch(() => {});
+    }
+
+    // 0156_enforceTargetSize_保持目标并发逻辑
+    enforceTargetSize() {
+        if (this.disposed) return;
+
+        while (this.workers.size < this.targetSize) {
+            this.spawnWorker();
+        }
+
+        const needRetire = this.workers.size - this.targetSize;
+        if (needRetire <= 0) return;
+
+        let marked = 0;
+        const metas = Array.from(this.workers.values()).sort((a, b) => b.workerId - a.workerId);
+        for (const meta of metas) {
+            if (marked >= needRetire) break;
+            if (this.retiringWorkers.has(meta.workerId)) continue;
+            this.retiringWorkers.add(meta.workerId);
+            marked += 1;
+            if (meta.state === 'idle') {
+                this.terminateWorkerMeta(meta);
+            }
+        }
+    }
+
+    // 0157_setSize_动态调整并发逻辑
+    setSize(nextSize) {
+        const normalized = Math.max(
+            0,
+            Number.isFinite(Number(nextSize)) ? Math.floor(Number(nextSize)) : this.targetSize,
+        );
+        this.targetSize = normalized;
+        this.size = normalized;
+        this.enforceTargetSize();
+        this.emitStatus();
+        this.drain();
+        return this.getStatus();
+    }
+
     // 0134_spawnWorker_工作线程逻辑
-    spawnWorker(workerId) {
+    spawnWorker(workerId = this.allocateWorkerId()) {
         const worker = new this.WorkerClass(this.workerFile);
         const meta = {
             workerId,
@@ -43,6 +150,7 @@ class WorkerPool extends EventEmitter {
         };
 
         this.workers.set(workerId, meta);
+        this.nextWorkerId = Math.max(this.nextWorkerId, workerId);
 
         worker.on('message', (msg) => this.handleWorkerMessage(workerId, msg));
         worker.on('error', (err) => this.handleWorkerError(workerId, err));
@@ -79,6 +187,12 @@ class WorkerPool extends EventEmitter {
             entry.reject(new Error(message.error || 'worker-task-failed'));
         }
 
+        if (this.retiringWorkers.has(workerId)) {
+            this.terminateWorkerMeta(meta);
+            this.emitStatus();
+            return;
+        }
+
         this.emitStatus();
         this.drain();
     }
@@ -90,6 +204,7 @@ class WorkerPool extends EventEmitter {
         meta.lastError = err?.message || 'worker-error';
         meta.failed += 1;
         this.failedTasks += 1;
+        this.setPendingRestartReason(workerId, meta.lastError);
         this.emitStatus();
     }
 
@@ -103,19 +218,33 @@ class WorkerPool extends EventEmitter {
             meta.timer = null;
         }
 
+        let pendingTaskExitReason = null;
         if (meta.currentTaskId && this.running.has(meta.currentTaskId)) {
             const entry = this.running.get(meta.currentTaskId);
             this.running.delete(meta.currentTaskId);
-            entry.reject(new Error(`worker-exit-${code}`));
+            pendingTaskExitReason = `worker-exit-${code}`;
+            entry.reject(new Error(pendingTaskExitReason));
             this.failedTasks += 1;
         }
+
+        const isRetiring = this.retiringWorkers.delete(workerId);
+        const restartReason = this.consumePendingRestartReason(
+            workerId,
+            pendingTaskExitReason || (Number(code) !== 0 ? `worker-exit-${code}` : meta.lastError || 'unknown'),
+        );
 
         this.workers.delete(workerId);
         this.emitStatus();
 
-        if (!this.disposed) {
+        if (!this.disposed && !isRetiring && this.workers.size < this.targetSize) {
             this.restartedWorkers += 1;
+            this.recordRestartReason(restartReason);
             this.spawnWorker(workerId);
+            return;
+        }
+
+        if (!this.disposed) {
+            this.enforceTargetSize();
         }
     }
 
@@ -142,6 +271,11 @@ class WorkerPool extends EventEmitter {
         const idleWorkers = Array.from(this.workers.values()).filter((meta) => meta.state === 'idle');
 
         for (const meta of idleWorkers) {
+            if (this.retiringWorkers.has(meta.workerId)) {
+                this.terminateWorkerMeta(meta);
+                continue;
+            }
+
             if (this.queue.length === 0) {
                 break;
             }
@@ -159,6 +293,7 @@ class WorkerPool extends EventEmitter {
                 meta.currentTaskId = null;
                 meta.failed += 1;
                 meta.lastError = 'task-timeout';
+                this.setPendingRestartReason(meta.workerId, 'task-timeout');
                 this.failedTasks += 1;
                 task.reject(new Error('task-timeout'));
 
@@ -199,6 +334,13 @@ class WorkerPool extends EventEmitter {
             completedTasks: this.completedTasks,
             failedTasks: this.failedTasks,
             restartedWorkers: this.restartedWorkers,
+            targetWorkers: this.targetSize,
+            restartReasonCounts: {
+                timeout: this.restartReasonCounts.timeout || 0,
+                connect_error: this.restartReasonCounts.connect_error || 0,
+                protocol_error: this.restartReasonCounts.protocol_error || 0,
+                unknown: this.restartReasonCounts.unknown || 0,
+            },
             workers,
         };
     }
@@ -217,6 +359,9 @@ class WorkerPool extends EventEmitter {
     // 0143_close_关闭逻辑
     async close() {
         this.disposed = true;
+        this.targetSize = 0;
+        this.retiringWorkers.clear();
+        this.pendingRestartReasons.clear();
 
         for (const task of this.queue) {
             task.reject(new Error('worker-pool-closing'));

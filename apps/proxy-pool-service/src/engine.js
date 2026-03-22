@@ -613,6 +613,8 @@ class ProxyHubEngine extends EventEmitter {
         this.isCandidateSweepRunning = false;
         this.threadPoolAlerting = false;
         this.nativeLookupInFlight = new Set();
+        this.sourceCycleThrottleFactor = 1;
+        this.sourceCycleCounter = 0;
     }
 
     // 0210_isBattleEnabled_判断战场测试开关逻辑
@@ -623,6 +625,24 @@ class ProxyHubEngine extends EventEmitter {
     // 0278_isBattleL3Enabled_判断战场L3开关逻辑
     isBattleL3Enabled() {
         return this.isBattleEnabled() && this.config?.battle?.l3?.enabled === true;
+    }
+
+    // 0298_setSourceCycleThrottleFactor_设置抓源节流倍率逻辑
+    setSourceCycleThrottleFactor(factor = 1) {
+        const numeric = Number(factor);
+        const normalized = Number.isFinite(numeric)
+            ? Math.max(1, Math.min(12, Math.round(numeric)))
+            : 1;
+        this.sourceCycleThrottleFactor = normalized;
+        return this.sourceCycleThrottleFactor;
+    }
+
+    // 0299_getSourceCycleThrottleState_获取抓源节流状态逻辑
+    getSourceCycleThrottleState() {
+        return {
+            factor: this.sourceCycleThrottleFactor,
+            counter: this.sourceCycleCounter,
+        };
     }
 
     // 0285_resolveNativeLookupDecision_解析籍贯查询决策逻辑
@@ -1066,6 +1086,21 @@ class ProxyHubEngine extends EventEmitter {
     // 0031_runSourceCycle_执行来源轮次逻辑
     async runSourceCycle() {
         if (!this.started || this.isSourceCycleRunning) {
+            return;
+        }
+
+        this.sourceCycleCounter += 1;
+        const throttleFactor = Math.max(1, Number(this.sourceCycleThrottleFactor) || 1);
+        const shouldSkipByThrottle = throttleFactor > 1
+            && ((this.sourceCycleCounter - 1) % throttleFactor !== 0);
+        if (shouldSkipByThrottle) {
+            this.logger.write({
+                event: '等待下一轮',
+                stage: '抓源',
+                result: '限速跳过抓源轮次',
+                reason: `source-throttle-x${throttleFactor}`,
+                action: '等待下一个抓源窗口',
+            });
             return;
         }
 

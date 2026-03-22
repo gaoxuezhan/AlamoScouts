@@ -44,7 +44,23 @@ function createSoakRuntime(options = {}) {
         policyActionsApplied: 0,
         policyActionFailures: 0,
         nextPolicyActionIndex: 0,
+        lastTotalsSnapshot: null,
+        previousHourlyMetrics: null,
+        worseningStreakHours: 0,
+        restartBreachStreakHours: 0,
+        failRatioBreachStreakHours: 0,
+        restartRecoveryStreakHours: 0,
+        failRatioRecoveryStreakHours: 0,
+        restartGuardrailActive: false,
+        failRatioGuardrailActive: false,
+        guardrailTriggerCount: 0,
+        guardrailRecoverCount: 0,
+        validationThrottleFactor: 1,
+        sourceThrottleFactor: 1,
     };
+    const RESTART_GUARDRAIL_THRESHOLD_PER_HOUR = 40;
+    const FAIL_RATIO_GUARDRAIL_THRESHOLD = 0.01;
+    const GUARDRAIL_STREAK_HOURS = 2;
 
     // 0137_resolvePositiveNumber_解析正数配置逻辑
     function resolvePositiveNumber(value, fallback = 0) {
@@ -53,6 +69,51 @@ function createSoakRuntime(options = {}) {
             return parsed;
         }
         return Number(fallback) || 0;
+    }
+
+    // 0142_toSafeNumber_转换数值逻辑
+    function toSafeNumber(value, fallback = 0) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    // 0143_roundFixed_数值保留小数逻辑
+    function roundFixed(value, digits = 2) {
+        const normalized = toSafeNumber(value, 0);
+        return Number(normalized.toFixed(digits));
+    }
+
+    // 0144_normalizeRestartReasonCounts_规范化重启原因分布逻辑
+    function normalizeRestartReasonCounts(rawCounts) {
+        const counts = rawCounts && typeof rawCounts === 'object' ? rawCounts : {};
+        return {
+            timeout: Math.max(0, Math.floor(toSafeNumber(counts.timeout, 0))),
+            connect_error: Math.max(0, Math.floor(toSafeNumber(counts.connect_error, 0))),
+            protocol_error: Math.max(0, Math.floor(toSafeNumber(counts.protocol_error, 0))),
+            unknown: Math.max(0, Math.floor(toSafeNumber(counts.unknown, 0))),
+        };
+    }
+
+    // 0145_diffRestartReasonCounts_计算重启原因增量逻辑
+    function diffRestartReasonCounts(currentCounts, previousCounts) {
+        const current = normalizeRestartReasonCounts(currentCounts);
+        const previous = normalizeRestartReasonCounts(previousCounts);
+        return {
+            timeout: Math.max(0, current.timeout - previous.timeout),
+            connect_error: Math.max(0, current.connect_error - previous.connect_error),
+            protocol_error: Math.max(0, current.protocol_error - previous.protocol_error),
+            unknown: Math.max(0, current.unknown - previous.unknown),
+        };
+    }
+
+    // 0146_resolveTrendLabel_解析趋势标签逻辑
+    function resolveTrendLabel(current, previous, epsilon = 0.000001) {
+        const curr = toSafeNumber(current, 0);
+        if (previous == null) return 'flat';
+        const prev = toSafeNumber(previous, 0);
+        if (curr > prev + epsilon) return 'up';
+        if (curr < prev - epsilon) return 'down';
+        return 'flat';
     }
 
     // 0138_buildSoakChildEnv_构建soak子进程环境变量逻辑
@@ -351,6 +412,7 @@ function createSoakRuntime(options = {}) {
                 completedTasks: pool.poolStatus.completedTasks,
                 failedTasks: pool.poolStatus.failedTasks,
                 restartedWorkers: pool.poolStatus.restartedWorkers,
+                restartReasonCounts: normalizeRestartReasonCounts(pool.poolStatus.restartReasonCounts),
                 healthOk: health.ok,
             });
         } catch (error) {
@@ -359,6 +421,202 @@ function createSoakRuntime(options = {}) {
                 ok: false,
                 reason: error?.message || 'poll-failed',
             });
+        }
+    }
+
+    // 0147_buildHourlySummary_构建小时增量汇总逻辑
+    function buildHourlySummary(nowMs, loopStartedMs) {
+        const pool = state.lastPool || {};
+        const currentCompleted = Math.max(0, Math.floor(toSafeNumber(pool.completedTasks, 0)));
+        const currentFailed = Math.max(0, Math.floor(toSafeNumber(pool.failedTasks, 0)));
+        const currentRestarted = Math.max(0, Math.floor(toSafeNumber(pool.restartedWorkers, 0)));
+        const currentReasonCounts = normalizeRestartReasonCounts(pool.restartReasonCounts);
+
+        const baseline = state.lastTotalsSnapshot || {
+            timestampMs: loopStartedMs,
+            completedTasks: 0,
+            failedTasks: 0,
+            restartedWorkers: 0,
+            restartReasonCounts: normalizeRestartReasonCounts({}),
+        };
+
+        const elapsedHours = Math.max(
+            (nowMs - baseline.timestampMs) / 3_600_000,
+            summaryMs / 3_600_000,
+            1 / 3_600,
+        );
+        const completedDelta = Math.max(0, currentCompleted - baseline.completedTasks);
+        const failedDelta = Math.max(0, currentFailed - baseline.failedTasks);
+        const restartedDelta = Math.max(0, currentRestarted - baseline.restartedWorkers);
+        const hourlyFailRatio = failedDelta / Math.max(1, completedDelta + failedDelta);
+        const hourlyThroughput = completedDelta / elapsedHours;
+        const restartedPerHour = restartedDelta / elapsedHours;
+        const reasonCountsDelta = diffRestartReasonCounts(currentReasonCounts, baseline.restartReasonCounts);
+
+        const prev = state.previousHourlyMetrics;
+        const trendVsPrevHour = {
+            completed_delta: resolveTrendLabel(completedDelta, prev?.completed_delta),
+            failed_delta: resolveTrendLabel(failedDelta, prev?.failed_delta),
+            restarted_delta: resolveTrendLabel(restartedDelta, prev?.restarted_delta),
+            hourly_fail_ratio: resolveTrendLabel(hourlyFailRatio, prev?.hourly_fail_ratio),
+            hourly_throughput: resolveTrendLabel(hourlyThroughput, prev?.hourly_throughput),
+        };
+
+        const worsened = prev
+            ? (hourlyFailRatio > prev.hourly_fail_ratio + 0.000001
+                || restartedPerHour > prev.restarted_per_hour + 0.000001)
+            : false;
+        state.worseningStreakHours = worsened ? (state.worseningStreakHours + 1) : 0;
+
+        state.lastTotalsSnapshot = {
+            timestampMs: nowMs,
+            completedTasks: currentCompleted,
+            failedTasks: currentFailed,
+            restartedWorkers: currentRestarted,
+            restartReasonCounts: currentReasonCounts,
+        };
+        state.previousHourlyMetrics = {
+            completed_delta: completedDelta,
+            failed_delta: failedDelta,
+            restarted_delta: restartedDelta,
+            hourly_fail_ratio: hourlyFailRatio,
+            hourly_throughput: hourlyThroughput,
+            restarted_per_hour: restartedPerHour,
+        };
+
+        return {
+            samples: state.samples,
+            healthOkSamples: state.healthOkSamples,
+            maxQueue: state.maxQueue,
+            maxBusy: state.maxBusy,
+            maxFailedTasks: state.maxFailedTasks,
+            crashCount: state.crashCount,
+            outageCount: state.outageCount,
+            completed_delta: completedDelta,
+            failed_delta: failedDelta,
+            restarted_delta: restartedDelta,
+            hourly_fail_ratio: roundFixed(hourlyFailRatio, 6),
+            hourly_fail_ratio_pct: roundFixed(hourlyFailRatio * 100, 3),
+            hourly_throughput: roundFixed(hourlyThroughput, 2),
+            restarted_per_hour: roundFixed(restartedPerHour, 2),
+            restart_reason_counts_delta: reasonCountsDelta,
+            restart_reason_counts_total: currentReasonCounts,
+            trend_vs_prev_hour: trendVsPrevHour,
+            worsening_streak_hours: state.worseningStreakHours,
+        };
+    }
+
+    // 0148_applySoakGuardrail_应用soak护栏逻辑
+    async function applySoakGuardrail(payload) {
+        try {
+            return await httpPostJson(`${baseUrl}/v1/proxies/soak/guardrail`, payload);
+        } catch (error) {
+            appendTimeline('guardrail_action_failed', {
+                action: payload?.action || 'apply',
+                reason: payload?.reason || 'guardrail-action-failed',
+                detail: error?.message || 'guardrail-action-failed',
+            });
+            return null;
+        }
+    }
+
+    // 0149_evaluateHourlyGuardrails_评估小时护栏逻辑
+    async function evaluateHourlyGuardrails(hourlySummary) {
+        const restartBreached = toSafeNumber(hourlySummary.restarted_per_hour, 0) > RESTART_GUARDRAIL_THRESHOLD_PER_HOUR;
+        const failRatioBreached = toSafeNumber(hourlySummary.hourly_fail_ratio, 0) > FAIL_RATIO_GUARDRAIL_THRESHOLD;
+
+        state.restartBreachStreakHours = restartBreached ? (state.restartBreachStreakHours + 1) : 0;
+        state.failRatioBreachStreakHours = failRatioBreached ? (state.failRatioBreachStreakHours + 1) : 0;
+        state.restartRecoveryStreakHours = restartBreached ? 0 : (state.restartRecoveryStreakHours + 1);
+        state.failRatioRecoveryStreakHours = failRatioBreached ? 0 : (state.failRatioRecoveryStreakHours + 1);
+
+        if (!state.restartGuardrailActive && state.restartBreachStreakHours >= GUARDRAIL_STREAK_HOURS) {
+            const applied = await applySoakGuardrail({
+                action: 'apply',
+                reason: 'restart_rate_guardrail',
+                reduceWorkersBy: 1,
+                minWorkers: 3,
+            });
+            if (applied?.ok) {
+                state.restartGuardrailActive = true;
+                state.guardrailTriggerCount += 1;
+                appendTimeline('guardrail_triggered', {
+                    guardrail: 'restart_rate',
+                    threshold: RESTART_GUARDRAIL_THRESHOLD_PER_HOUR,
+                    sustainedHours: state.restartBreachStreakHours,
+                    restartedPerHour: hourlySummary.restarted_per_hour,
+                    effective: applied?.guardrail?.effective || null,
+                });
+            }
+        }
+
+        if (!state.failRatioGuardrailActive && state.failRatioBreachStreakHours >= GUARDRAIL_STREAK_HOURS) {
+            state.validationThrottleFactor = Math.min(4, roundFixed(state.validationThrottleFactor + 0.5, 2));
+            state.sourceThrottleFactor = Math.min(6, Math.floor(state.sourceThrottleFactor + 1));
+            const applied = await applySoakGuardrail({
+                action: 'apply',
+                reason: 'hourly_fail_ratio_guardrail',
+                minWorkers: 0,
+                validationThrottleFactor: state.validationThrottleFactor,
+                sourceThrottleFactor: state.sourceThrottleFactor,
+            });
+            if (applied?.ok) {
+                state.failRatioGuardrailActive = true;
+                state.guardrailTriggerCount += 1;
+                appendTimeline('guardrail_triggered', {
+                    guardrail: 'hourly_fail_ratio',
+                    threshold: FAIL_RATIO_GUARDRAIL_THRESHOLD,
+                    thresholdPct: roundFixed(FAIL_RATIO_GUARDRAIL_THRESHOLD * 100, 2),
+                    sustainedHours: state.failRatioBreachStreakHours,
+                    hourlyFailRatio: hourlySummary.hourly_fail_ratio,
+                    hourlyFailRatioPct: hourlySummary.hourly_fail_ratio_pct,
+                    effective: applied?.guardrail?.effective || null,
+                });
+            }
+        }
+
+        if (state.restartGuardrailActive && state.restartRecoveryStreakHours >= GUARDRAIL_STREAK_HOURS) {
+            const recovered = await applySoakGuardrail({
+                action: 'recover',
+                reason: 'restart_rate_guardrail_recovered',
+                recoverWorkers: true,
+                recoverValidation: false,
+                recoverSource: false,
+            });
+            if (recovered?.ok) {
+                state.restartGuardrailActive = false;
+                state.restartBreachStreakHours = 0;
+                state.restartRecoveryStreakHours = 0;
+                state.guardrailRecoverCount += 1;
+                appendTimeline('guardrail_recovered', {
+                    guardrail: 'restart_rate',
+                    recoveryStreakHours: GUARDRAIL_STREAK_HOURS,
+                    effective: recovered?.guardrail?.effective || null,
+                });
+            }
+        }
+
+        if (state.failRatioGuardrailActive && state.failRatioRecoveryStreakHours >= GUARDRAIL_STREAK_HOURS) {
+            const recovered = await applySoakGuardrail({
+                action: 'recover',
+                reason: 'hourly_fail_ratio_guardrail_recovered',
+                recoverWorkers: false,
+                recoverValidation: true,
+                recoverSource: true,
+            });
+            if (recovered?.ok) {
+                state.failRatioGuardrailActive = false;
+                state.failRatioBreachStreakHours = 0;
+                state.failRatioRecoveryStreakHours = 0;
+                state.validationThrottleFactor = 1;
+                state.sourceThrottleFactor = 1;
+                state.guardrailRecoverCount += 1;
+                appendTimeline('guardrail_recovered', {
+                    guardrail: 'hourly_fail_ratio',
+                    recoveryStreakHours: GUARDRAIL_STREAK_HOURS,
+                    effective: recovered?.guardrail?.effective || null,
+                });
+            }
         }
     }
 
@@ -384,6 +642,8 @@ function createSoakRuntime(options = {}) {
             `- 策略动作计划数: ${state.policyActionsPlanned}`,
             `- 策略动作成功: ${state.policyActionsApplied}`,
             `- 策略动作失败: ${state.policyActionFailures}`,
+            `- guardrail触发次数: ${state.guardrailTriggerCount}`,
+            `- guardrail恢复次数: ${state.guardrailRecoverCount}`,
             '',
             '## IP价值榜 Top 10',
             ...(Array.isArray(valueBoard) && valueBoard.length > 0
@@ -430,21 +690,27 @@ function createSoakRuntime(options = {}) {
         const loopStartedMs = Date.now();
         const endTime = Date.now() + durationHours * 3_600_000;
         let nextSummary = Date.now() + summaryMs;
+        state.lastTotalsSnapshot = {
+            timestampMs: loopStartedMs,
+            completedTasks: Math.max(0, Math.floor(toSafeNumber(state.lastPool?.completedTasks, 0))),
+            failedTasks: Math.max(0, Math.floor(toSafeNumber(state.lastPool?.failedTasks, 0))),
+            restartedWorkers: Math.max(0, Math.floor(toSafeNumber(state.lastPool?.restartedWorkers, 0))),
+            restartReasonCounts: normalizeRestartReasonCounts(state.lastPool?.restartReasonCounts),
+        };
+        state.previousHourlyMetrics = null;
+        state.worseningStreakHours = 0;
 
         while (Date.now() < endTime) {
             await applyPendingPolicyActions(Date.now() - loopStartedMs);
             await pollOnce();
 
             if (Date.now() >= nextSummary) {
-                appendTimeline('hourly_summary', {
-                    samples: state.samples,
-                    healthOkSamples: state.healthOkSamples,
-                    maxQueue: state.maxQueue,
-                    maxBusy: state.maxBusy,
-                    maxFailedTasks: state.maxFailedTasks,
-                    crashCount: state.crashCount,
-                    outageCount: state.outageCount,
-                });
+                const summaryNowMs = Date.now();
+                const hourlySummary = buildHourlySummary(summaryNowMs, loopStartedMs);
+                await evaluateHourlyGuardrails(hourlySummary);
+                hourlySummary.restart_guardrail_active = state.restartGuardrailActive;
+                hourlySummary.fail_ratio_guardrail_active = state.failRatioGuardrailActive;
+                appendTimeline('hourly_summary', hourlySummary);
                 nextSummary += summaryMs;
             }
 
@@ -517,6 +783,8 @@ function createSoakRuntime(options = {}) {
         applyPendingPolicyActions,
         ensureService,
         pollOnce,
+        buildHourlySummary,
+        evaluateHourlyGuardrails,
         writeFinalReport,
         runSoak,
         runCli,

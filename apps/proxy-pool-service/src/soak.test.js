@@ -652,6 +652,321 @@ test('applyPendingPolicyActions should record failure and continue', async () =>
     });
 });
 
+test('buildHourlySummary should include increment and trend fields', async () => {
+    await withTempCwd(async () => {
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async () => ({ ok: true, status: 200, async json() { return {}; } }),
+        });
+
+        runtime.state.lastPool = {
+            completedTasks: 210,
+            failedTasks: 12,
+            restartedWorkers: 8,
+            restartReasonCounts: {
+                timeout: 5,
+                connect_error: 2,
+                protocol_error: 1,
+                unknown: 0,
+            },
+        };
+        runtime.state.lastTotalsSnapshot = {
+            timestampMs: 0,
+            completedTasks: 200,
+            failedTasks: 10,
+            restartedWorkers: 7,
+            restartReasonCounts: {
+                timeout: 4,
+                connect_error: 2,
+                protocol_error: 1,
+                unknown: 0,
+            },
+        };
+        runtime.state.previousHourlyMetrics = {
+            completed_delta: 8,
+            failed_delta: 1,
+            restarted_delta: 0,
+            hourly_fail_ratio: 0.2,
+            hourly_throughput: 8,
+            restarted_per_hour: 0.5,
+        };
+
+        const summary = runtime.buildHourlySummary(3_600_000, 0);
+        assert.equal(summary.completed_delta, 10);
+        assert.equal(summary.failed_delta, 2);
+        assert.equal(summary.restarted_delta, 1);
+        assert.equal(summary.restart_reason_counts_delta.timeout, 1);
+        assert.equal(summary.trend_vs_prev_hour.completed_delta, 'up');
+        assert.equal(summary.trend_vs_prev_hour.failed_delta, 'up');
+        assert.equal(summary.trend_vs_prev_hour.hourly_fail_ratio, 'down');
+        assert.equal(summary.worsening_streak_hours >= 0, true);
+    });
+});
+
+test('buildHourlySummary should fallback baseline when previous snapshot is missing', async () => {
+    await withTempCwd(async () => {
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async () => ({ ok: true, status: 200, async json() { return {}; } }),
+        });
+        runtime.state.lastTotalsSnapshot = null;
+        runtime.state.lastPool = {
+            completedTasks: 5,
+            failedTasks: 1,
+            restartedWorkers: 2,
+            restartReasonCounts: {
+                timeout: 1,
+                connect_error: 0,
+                protocol_error: 0,
+                unknown: 1,
+            },
+        };
+
+        const summary = runtime.buildHourlySummary(3_600_000, 0);
+        assert.equal(summary.completed_delta, 5);
+        assert.equal(summary.failed_delta, 1);
+        assert.equal(summary.restarted_delta, 2);
+        assert.equal(summary.trend_vs_prev_hour.completed_delta, 'flat');
+    });
+});
+
+test('buildHourlySummary should cover empty lastPool fallback and worsening streak increment', async () => {
+    await withTempCwd(async () => {
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async () => ({ ok: true, status: 200, async json() { return {}; } }),
+        });
+
+        runtime.state.lastPool = null;
+        runtime.state.lastTotalsSnapshot = null;
+        const emptySummary = runtime.buildHourlySummary(3_600_000, 0);
+        assert.equal(emptySummary.completed_delta, 0);
+        assert.equal(emptySummary.failed_delta, 0);
+        assert.equal(emptySummary.restarted_delta, 0);
+
+        runtime.state.lastPool = {
+            completedTasks: 10,
+            failedTasks: 6,
+            restartedWorkers: 5,
+            restartReasonCounts: {
+                timeout: 5,
+                connect_error: 0,
+                protocol_error: 0,
+                unknown: 0,
+            },
+        };
+        runtime.state.lastTotalsSnapshot = {
+            timestampMs: 3_600_000,
+            completedTasks: 0,
+            failedTasks: 0,
+            restartedWorkers: 0,
+            restartReasonCounts: {
+                timeout: 0,
+                connect_error: 0,
+                protocol_error: 0,
+                unknown: 0,
+            },
+        };
+        runtime.state.previousHourlyMetrics = {
+            completed_delta: 1,
+            failed_delta: 0,
+            restarted_delta: 0,
+            hourly_fail_ratio: 0.01,
+            hourly_throughput: 1,
+            restarted_per_hour: 0.2,
+        };
+        runtime.state.worseningStreakHours = 1;
+
+        const worsenedSummary = runtime.buildHourlySummary(7_200_000, 3_600_000);
+        assert.equal(worsenedSummary.worsening_streak_hours, 2);
+    });
+});
+
+test('evaluateHourlyGuardrails should trigger and recover with timeline events', async () => {
+    await withTempCwd(async () => {
+        const calls = [];
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async (url, options = {}) => {
+                if (url.endsWith('/v1/proxies/soak/guardrail')) {
+                    calls.push({
+                        url,
+                        body: options?.body ? JSON.parse(options.body) : null,
+                    });
+                    return {
+                        ok: true,
+                        status: 200,
+                        async json() {
+                            return {
+                                ok: true,
+                                guardrail: {
+                                    effective: {
+                                        workers: 5,
+                                        validationThrottleFactor: 2,
+                                        sourceThrottleFactor: 2,
+                                    },
+                                },
+                            };
+                        },
+                    };
+                }
+                return { ok: true, status: 200, async json() { return {}; } };
+            },
+        });
+
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 45,
+            hourly_fail_ratio: 0.02,
+            hourly_fail_ratio_pct: 2,
+        });
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 46,
+            hourly_fail_ratio: 0.03,
+            hourly_fail_ratio_pct: 3,
+        });
+
+        assert.equal(runtime.state.restartGuardrailActive, true);
+        assert.equal(runtime.state.failRatioGuardrailActive, true);
+
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 10,
+            hourly_fail_ratio: 0.002,
+            hourly_fail_ratio_pct: 0.2,
+        });
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 9,
+            hourly_fail_ratio: 0.001,
+            hourly_fail_ratio_pct: 0.1,
+        });
+
+        assert.equal(runtime.state.restartGuardrailActive, false);
+        assert.equal(runtime.state.failRatioGuardrailActive, false);
+        assert.equal(calls.length >= 4, true);
+
+        const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
+        assert.equal(timeline.includes('"type":"guardrail_triggered"'), true);
+        assert.equal(timeline.includes('"type":"guardrail_recovered"'), true);
+    });
+});
+
+test('evaluateHourlyGuardrails should record null effective payload when guardrail response omits details', async () => {
+    await withTempCwd(async () => {
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async (url) => {
+                if (url.endsWith('/v1/proxies/soak/guardrail')) {
+                    return {
+                        ok: true,
+                        status: 200,
+                        async json() {
+                            return { ok: true };
+                        },
+                    };
+                }
+                return { ok: true, status: 200, async json() { return {}; } };
+            },
+        });
+
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 45,
+            hourly_fail_ratio: 0.03,
+            hourly_fail_ratio_pct: 3,
+        });
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 46,
+            hourly_fail_ratio: 0.04,
+            hourly_fail_ratio_pct: 4,
+        });
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 10,
+            hourly_fail_ratio: 0.002,
+            hourly_fail_ratio_pct: 0.2,
+        });
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 9,
+            hourly_fail_ratio: 0.001,
+            hourly_fail_ratio_pct: 0.1,
+        });
+
+        const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
+        assert.equal(timeline.includes('"type":"guardrail_triggered"'), true);
+        assert.equal(timeline.includes('"type":"guardrail_recovered"'), true);
+        assert.equal(timeline.includes('"effective":null'), true);
+    });
+});
+
+test('evaluateHourlyGuardrails should record guardrail_action_failed when guardrail request fails', async () => {
+    await withTempCwd(async () => {
+        const runtime = createSoakRuntime({
+            config: makeConfig(),
+            fetchImpl: async (url) => {
+                if (url.endsWith('/v1/proxies/soak/guardrail')) {
+                    throw new Error('guardrail-post-failed');
+                }
+                return { ok: true, status: 200, async json() { return {}; } };
+            },
+        });
+
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 45,
+            hourly_fail_ratio: 0.03,
+            hourly_fail_ratio_pct: 3,
+        });
+        await runtime.evaluateHourlyGuardrails({
+            restarted_per_hour: 46,
+            hourly_fail_ratio: 0.04,
+            hourly_fail_ratio_pct: 4,
+        });
+
+        const timeline = fs.readFileSync(runtime.timelineFile, 'utf8');
+        assert.equal(timeline.includes('"type":"guardrail_action_failed"'), true);
+        assert.equal(timeline.includes('guardrail-post-failed'), true);
+    });
+});
+
+test('runSoak should initialize hourly baseline from empty pool state when duration is zero', async () => {
+    await withTempCwd(async () => {
+        const child = makeChild();
+        const oldEnv = {
+            SOAK_HOURS: process.env.SOAK_HOURS,
+            SOAK_POLL_MS: process.env.SOAK_POLL_MS,
+            SOAK_SUMMARY_MS: process.env.SOAK_SUMMARY_MS,
+            SOAK_POLICY_ACTIONS_FILE: process.env.SOAK_POLICY_ACTIONS_FILE,
+        };
+        try {
+            process.env.SOAK_HOURS = '0';
+            process.env.SOAK_POLL_MS = '1';
+            process.env.SOAK_SUMMARY_MS = '1';
+            process.env.SOAK_POLICY_ACTIONS_FILE = '';
+
+            const runtime = createSoakRuntime({
+                config: makeConfig(),
+                fetchImpl: async (url) => {
+                    if (url.endsWith('/health')) {
+                        return { ok: true, status: 200, async json() { return { ok: true }; } };
+                    }
+                    if (url.includes('/v1/proxies/value-board')) {
+                        return { ok: true, status: 200, async json() { return { items: [] }; } };
+                    }
+                    return { ok: true, status: 200, async json() { return { poolStatus: { queueSize: 0, workersBusy: 0, workersTotal: 0, failedTasks: 0, restartedWorkers: 0, completedTasks: 0 } }; } };
+                },
+                spawnImpl: () => child,
+            });
+
+            await runtime.runSoak();
+            assert.equal(runtime.state.lastTotalsSnapshot.completedTasks, 0);
+            assert.equal(runtime.state.lastTotalsSnapshot.failedTasks, 0);
+            assert.equal(runtime.state.lastTotalsSnapshot.restartedWorkers, 0);
+            assert.equal(runtime.state.lastTotalsSnapshot.restartReasonCounts.timeout, 0);
+        } finally {
+            process.env.SOAK_HOURS = oldEnv.SOAK_HOURS;
+            process.env.SOAK_POLL_MS = oldEnv.SOAK_POLL_MS;
+            process.env.SOAK_SUMMARY_MS = oldEnv.SOAK_SUMMARY_MS;
+            process.env.SOAK_POLICY_ACTIONS_FILE = oldEnv.SOAK_POLICY_ACTIONS_FILE;
+        }
+    });
+});
+
 test('runSoak should record value-board fetch failure branch', async () => {
     await withTempCwd(async () => {
         const child = makeChild();
