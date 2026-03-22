@@ -296,6 +296,20 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('网络归属(isp): "ISP"'), true);
     assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('组织(org): "ORG"'), true);
     assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('原键名(custom): 1'), true);
+    const freeipapiReadable = buildNativeLookupReadableText({
+        ipAddress: '1.1.1.1',
+        ipVersion: 4,
+        continentCode: 'AS',
+        asnOrganization: 'ExampleNet',
+        timeZones: ['Asia/Shanghai'],
+        currencies: ['CNY'],
+    });
+    assert.equal(freeipapiReadable.includes('IP地址(ipAddress): "1.1.1.1"'), true);
+    assert.equal(freeipapiReadable.includes('IP版本(ipVersion): 4'), true);
+    assert.equal(freeipapiReadable.includes('洲代码(continentCode): "AS"'), true);
+    assert.equal(freeipapiReadable.includes('ASN组织(asnOrganization): "ExampleNet"'), true);
+    assert.equal(freeipapiReadable.includes('时区列表(timeZones): ["Asia/Shanghai"]'), true);
+    assert.equal(freeipapiReadable.includes('货币列表(currencies): ["CNY"]'), true);
     assert.equal(buildNativeLookupReadableText({ missing: undefined }).includes('原键名(missing): null'), true);
     assert.equal(buildNativeLookupReadableText({}), '原文不可解析');
     assert.equal(buildNativeLookupReadableText(['x']), '原键名(root): ["x"]');
