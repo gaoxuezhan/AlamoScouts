@@ -442,7 +442,7 @@ module.exports = {
     },
     threadPool: {
         workers: Number(process.env.PROXY_HUB_WORKERS || 6),
-        taskTimeoutMs: 90_000,
+        taskTimeoutMs: 120_000,
     },
     scheduler: {
         sourceSyncMs: Number(process.env.PROXY_HUB_SOURCE_SYNC_MS || 120_000),
@@ -515,7 +515,7 @@ module.exports = {
             maxPerCycle: Number(process.env.PROXY_HUB_BATTLE_L3_MAX || 12),
             concurrency: Number(process.env.PROXY_HUB_BATTLE_L3_CONCURRENCY || 3),
             lookbackMinutes: Number(process.env.PROXY_HUB_BATTLE_L3_LOOKBACK_MINUTES || l2LookbackByProfile[activeProfile]),
-            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 30_000),
+            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 40_000),
             allowedProtocols: deepClone(resolvedBattleL3Protocols),
             targets: deepClone(resolvedBattleL3Targets),
             syncMsByProfile: deepClone(battleL3SyncMsByProfile),

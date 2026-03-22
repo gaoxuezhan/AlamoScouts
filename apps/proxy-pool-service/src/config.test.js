@@ -87,7 +87,7 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.service.port, 5070);
     assert.equal(config.service.timezone, 'Asia/Shanghai');
     assert.equal(config.threadPool.workers > 0, true);
-    assert.equal(config.threadPool.taskTimeoutMs, 90000);
+    assert.equal(config.threadPool.taskTimeoutMs, 120000);
     assert.equal(Array.isArray(config.validation.allowedProtocols), true);
     assert.equal(config.source.activeProfile, 'speedx_bundle');
     assert.equal(config.source.legacySingleOverride, false);
@@ -115,7 +115,7 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.battle.l3.syncMsByProfile.soak, 600000);
     assert.equal(config.battle.l3.maxPerCycle, 12);
     assert.equal(config.battle.l3.concurrency, 3);
-    assert.equal(config.battle.l3.timeoutMs, 30000);
+    assert.equal(config.battle.l3.timeoutMs, 40000);
     assert.deepEqual(config.battle.l3.allowedProtocols, ['http', 'https', 'socks5']);
     assert.equal(config.battle.l3.targets.length >= 2, true);
     assert.equal(config.battle.l3.targets[0].url, 'https://www.ly.com/flights/home');
