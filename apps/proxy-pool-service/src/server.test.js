@@ -35,7 +35,7 @@ function createConfig(port = 0) {
             activeFeeds: [
                 { name: 'TheSpeedX/http', url: 'https://example.com/http.txt', enabled: true, defaultProtocol: 'http', sourceFormat: 'line' },
                 { name: 'TheSpeedX/socks4', url: 'https://example.com/socks4.txt', enabled: false, defaultProtocol: 'socks4', sourceFormat: 'line' },
-                { name: 'TheSpeedX/socks5', url: 'https://example.com/socks5.txt', enabled: true, defaultProtocol: 'socks5', sourceFormat: 'line' },
+                { name: 'TheSpeedX/socks5', url: 'https://example.com/socks5.txt', enabled: false, defaultProtocol: 'socks5', sourceFormat: 'line' },
             ],
             monosans: { name: 'monosans', url: 'https://x', enabled: true },
         },
@@ -110,6 +110,7 @@ function createStubs() {
         engineStopped: false,
         engineStopCalls: 0,
         socks4CleanupCalls: 0,
+        socks5CleanupCalls: 0,
         rolloutState: {
             id: 1,
             mode: 'SAFE',
@@ -195,6 +196,18 @@ function createStubs() {
                 deleted: 2,
                 beforeSource: 1,
                 beforeProtocol: 1,
+                afterSource: 0,
+                afterProtocol: 0,
+            };
+        },
+        purgeSocks5Data: () => {
+            state.socks5CleanupCalls += 1;
+            return {
+                sourceName: 'TheSpeedX/socks5',
+                protocol: 'socks5',
+                deleted: 3,
+                beforeSource: 2,
+                beforeProtocol: 2,
                 afterSource: 0,
                 afterProtocol: 0,
             };
@@ -434,22 +447,296 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
 
     await runtime.shutdown('TEST');
     assert.equal(stubs.state.socks4CleanupCalls, 1);
+    assert.equal(stubs.state.socks5CleanupCalls, 1);
     assert.equal(stubs.state.dbClosed, true);
     assert.equal(stubs.state.poolClosed, true);
     assert.equal(stubs.state.engineStopped, true);
+});
+
+test('soak guardrail endpoints should apply and recover runtime controls', async () => {
+    const stubs = createStubs();
+    let workersTotal = 6;
+    let sourceThrottleFactor = 1;
+    stubs.workerPool.getStatus = () => ({
+        workersTotal,
+        workersBusy: 0,
+        queueSize: 0,
+        runningTasks: 0,
+        completedTasks: 0,
+        failedTasks: 0,
+        restartedWorkers: 0,
+        workers: [],
+    });
+    stubs.workerPool.setSize = (nextWorkers) => {
+        workersTotal = Number(nextWorkers);
+        return {
+            ...stubs.workerPool.getStatus(),
+            targetWorkers: workersTotal,
+        };
+    };
+    stubs.engine.setSourceCycleThrottleFactor = (factor) => {
+        sourceThrottleFactor = Number(factor);
+        return sourceThrottleFactor;
+    };
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+    try {
+        const applyRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                action: 'apply',
+                reason: 'test-trigger',
+                reduceWorkersBy: 1,
+                minWorkers: 3,
+                validationThrottleFactor: 2,
+                sourceThrottleFactor: 3,
+            }),
+        });
+        assert.equal(applyRes.status, 200);
+        const applyBody = await applyRes.json();
+        assert.equal(applyBody.ok, true);
+        assert.equal(applyBody.guardrail.effective.workers, 5);
+        assert.equal(applyBody.guardrail.effective.maxValidationPerCycle, 5);
+        assert.equal(applyBody.guardrail.effective.validationThrottleFactor, 2);
+        assert.equal(applyBody.guardrail.effective.sourceThrottleFactor, 3);
+        assert.equal(sourceThrottleFactor, 3);
+
+        const getRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail');
+        assert.equal(getRes.status, 200);
+        const getBody = await getRes.json();
+        assert.equal(getBody.guardrail.effective.workers, 5);
+
+        const recoverRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                action: 'recover',
+                reason: 'test-recover',
+            }),
+        });
+        assert.equal(recoverRes.status, 200);
+        const recoverBody = await recoverRes.json();
+        assert.equal(recoverBody.ok, true);
+        assert.equal(recoverBody.guardrail.effective.workers, 2);
+        assert.equal(recoverBody.guardrail.effective.validationThrottleFactor, 1);
+        assert.equal(recoverBody.guardrail.effective.sourceThrottleFactor, 1);
+        assert.equal(sourceThrottleFactor, 1);
+    } finally {
+        await runtime.shutdown('TEST-SOAK-GUARDRAIL');
+    }
+});
+
+test('soak guardrail endpoint should validate payload/action and cover workers patch branch', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    config.threadPool = null;
+    config.battle.l3 = {
+        enabled: true,
+        syncMs: 2700000,
+        maxPerCycle: 12,
+    };
+
+    let workersTotal = 4;
+    stubs.workerPool.getStatus = () => ({
+        workersTotal,
+        workersBusy: 0,
+        queueSize: 0,
+        runningTasks: 0,
+        completedTasks: 0,
+        failedTasks: 0,
+        restartedWorkers: 0,
+        workers: [],
+    });
+    stubs.workerPool.setSize = (nextWorkers) => {
+        workersTotal = Number(nextWorkers);
+        return {
+            ...stubs.workerPool.getStatus(),
+            targetWorkers: workersTotal,
+        };
+    };
+    stubs.engine.setSourceCycleThrottleFactor = () => 1;
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort({ ...stubs, config });
+    try {
+        const invalidBodyRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify([]),
+        });
+        assert.equal(invalidBodyRes.status, 400);
+        const invalidBody = await invalidBodyRes.json();
+        assert.equal(invalidBody.error, 'invalid-soak-guardrail-payload');
+
+        const invalidActionRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'bad-action' }),
+        });
+        assert.equal(invalidActionRes.status, 400);
+        const invalidAction = await invalidActionRes.json();
+        assert.equal(invalidAction.error, 'invalid-soak-guardrail-action');
+
+        const workersRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                action: 'apply',
+                workers: 2,
+                minWorkers: 0,
+                validationThrottleFactor: 2,
+            }),
+        });
+        assert.equal(workersRes.status, 200);
+        const workersBody = await workersRes.json();
+        assert.equal(workersBody.ok, true);
+        assert.equal(workersBody.guardrail.effective.workers, 2);
+        assert.equal(workersBody.guardrail.effective.maxBattleL3PerCycle, 6);
+    } finally {
+        await runtime.shutdown('TEST-SOAK-GUARDRAIL-VALIDATION');
+    }
+});
+
+test('soak guardrail endpoint should cover default action and fallback normalization branches', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    config.threadPool.workers = 0;
+    config.scheduler.maxValidationPerCycle = 0;
+    config.battle.maxBattleL1PerCycle = 0;
+    config.battle.maxBattleL2PerCycle = 0;
+    config.battle.l3 = config.battle.l3 || {
+        enabled: true,
+        syncMs: 2700000,
+        maxPerCycle: 12,
+    };
+    config.battle.l3.maxPerCycle = 0;
+
+    let workersTotal = 5;
+    let setSizeCalls = 0;
+    stubs.workerPool.getStatus = () => ({
+        workersTotal,
+        workersBusy: 0,
+        queueSize: 0,
+        runningTasks: 0,
+        completedTasks: 0,
+        failedTasks: 0,
+        restartedWorkers: 0,
+        workers: [],
+    });
+    stubs.workerPool.setSize = (nextWorkers) => {
+        setSizeCalls += 1;
+        const numericNext = Number(nextWorkers);
+        workersTotal = Number.isFinite(numericNext) ? numericNext : workersTotal;
+        if (setSizeCalls === 1) {
+            return { workersTotal: 7 };
+        }
+        if (setSizeCalls === 2) {
+            return { targetWorkers: 'not-a-number' };
+        }
+        return undefined;
+    };
+    stubs.engine.setSourceCycleThrottleFactor = () => 1;
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort({ ...stubs, config });
+    try {
+        const initialGetRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail');
+        assert.equal(initialGetRes.status, 200);
+        const initialGet = await initialGetRes.json();
+        assert.equal(initialGet.guardrail.baseline.workers, 5);
+        assert.equal(initialGet.guardrail.baseline.maxValidationPerCycle, 1);
+        assert.equal(initialGet.guardrail.baseline.maxBattleL1PerCycle, 1);
+        assert.equal(initialGet.guardrail.baseline.maxBattleL2PerCycle, 1);
+
+        const defaultApplyRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        assert.equal(defaultApplyRes.status, 200);
+        const defaultApply = await defaultApplyRes.json();
+        assert.equal(defaultApply.ok, true);
+        assert.equal(defaultApply.guardrail.effective.workers, 7);
+
+        const invalidApplyRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                action: 'apply',
+                workers: 'bad-workers',
+                minWorkers: 'bad-min',
+                validationThrottleFactor: 'bad-factor',
+                sourceThrottleFactor: 'bad-source',
+            }),
+        });
+        assert.equal(invalidApplyRes.status, 200);
+        const invalidApply = await invalidApplyRes.json();
+        assert.equal(invalidApply.ok, true);
+        assert.equal(invalidApply.guardrail.effective.workers, 5);
+        assert.equal(invalidApply.guardrail.effective.validationThrottleFactor, 1);
+        assert.equal(invalidApply.guardrail.effective.sourceThrottleFactor, 1);
+
+        workersTotal = 0;
+        const reduceRes = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                action: 'apply',
+                reduceWorkersBy: 1,
+                minWorkers: 0,
+            }),
+        });
+        assert.equal(reduceRes.status, 200);
+        const reduceBody = await reduceRes.json();
+        assert.equal(reduceBody.ok, true);
+        assert.equal(reduceBody.guardrail.effective.workers, 4);
+    } finally {
+        await runtime.shutdown('TEST-SOAK-GUARDRAIL-FALLBACK');
+    }
 });
 
 test('startup socks4 cleanup should be skipped when socks4 feed is enabled', async () => {
     const stubs = createStubs();
     const config = createConfig(0);
     const socks4Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks4');
+    const socks5Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks5');
     socks4Feed.enabled = true;
+    socks5Feed.enabled = true;
 
     const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
     try {
         assert.equal(stubs.state.socks4CleanupCalls, 0);
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
     } finally {
         await runtime.shutdown('TEST-SOCKS4-CLEANUP-SKIP');
+    }
+});
+
+test('startup socks5 cleanup should be skipped when socks5 feed is enabled', async () => {
+    const stubs = createStubs();
+    const config = createConfig(0);
+    const socks4Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks4');
+    const socks5Feed = config.source.activeFeeds.find((feed) => feed.name === 'TheSpeedX/socks5');
+    socks4Feed.enabled = true;
+    socks5Feed.enabled = true;
+
+    const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
+    try {
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
+    } finally {
+        await runtime.shutdown('TEST-SOCKS5-CLEANUP-SKIP');
+    }
+});
+
+test('startup cleanup should skip feed when purge method is missing', async () => {
+    const stubs = createStubs();
+    delete stubs.db.purgeSocks5Data;
+
+    const { runtime } = await startRuntimeOnRandomPort(stubs);
+    try {
+        assert.equal(stubs.state.socks4CleanupCalls, 1);
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
+    } finally {
+        await runtime.shutdown('TEST-CLEANUP-METHOD-MISSING');
     }
 });
 
@@ -461,6 +748,7 @@ test('startup socks4 cleanup should be skipped when activeFeeds is not an array'
     const { runtime } = await startRuntimeOnRandomPort({ ...stubs, config });
     try {
         assert.equal(stubs.state.socks4CleanupCalls, 0);
+        assert.equal(stubs.state.socks5CleanupCalls, 0);
     } finally {
         await runtime.shutdown('TEST-SOCKS4-CLEANUP-NON-ARRAY');
     }

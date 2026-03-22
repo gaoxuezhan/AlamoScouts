@@ -487,6 +487,75 @@ test('purgeSocks4Data should support default source/protocol options', () => {
     cleanup(h);
 });
 
+test('purgeSocks5Data should delete socks5 source/protocol rows and keep others', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+    let seq = 0;
+    const nextName = () => `清理5-${++seq}`;
+
+    h.db.upsertSourceBatch(
+        [{ ip: '43.0.0.1', port: 80, protocol: 'http' }],
+        nextName,
+        'TheSpeedX/http',
+        'batch-clean5-1',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '43.0.0.2', port: 1080, protocol: 'socks5' }],
+        nextName,
+        'TheSpeedX/socks5',
+        'batch-clean5-2',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '43.0.0.3', port: 1080, protocol: 'socks5' }],
+        nextName,
+        'legacy-socks5-feed',
+        'batch-clean5-3',
+        now,
+    );
+    h.db.upsertSourceBatch(
+        [{ ip: '43.0.0.4', port: 80, protocol: 'http' }],
+        nextName,
+        'TheSpeedX/socks5',
+        'batch-clean5-4',
+        now,
+    );
+
+    const summary = h.db.purgeSocks5Data();
+    assert.equal(summary.sourceName, 'TheSpeedX/socks5');
+    assert.equal(summary.protocol, 'socks5');
+    assert.equal(summary.beforeSource, 2);
+    assert.equal(summary.beforeProtocol, 2);
+    assert.equal(summary.deleted, 3);
+    assert.equal(summary.afterSource, 0);
+    assert.equal(summary.afterProtocol, 0);
+
+    const remaining = h.db.getProxyList({ limit: 20 });
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].source, 'TheSpeedX/http');
+
+    cleanup(h);
+});
+
+test('purgeSourceProtocolData should return zero summary when source/protocol missing', () => {
+    const h = createDb();
+    const summary = h.db.purgeSourceProtocolData({
+        sourceName: '   ',
+        protocol: '   ',
+    });
+
+    assert.equal(summary.sourceName, '');
+    assert.equal(summary.protocol, '');
+    assert.equal(summary.deleted, 0);
+    assert.equal(summary.beforeSource, 0);
+    assert.equal(summary.beforeProtocol, 0);
+    assert.equal(summary.afterSource, 0);
+    assert.equal(summary.afterProtocol, 0);
+
+    cleanup(h);
+});
+
 test('getRecruitCampBoard should fallback invalid lifecycle counts to zero', () => {
     const h = createDb();
     const originalPrepare = h.db.db.prepare.bind(h.db.db);

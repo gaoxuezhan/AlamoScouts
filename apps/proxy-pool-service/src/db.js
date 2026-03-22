@@ -1296,11 +1296,21 @@ class ProxyHubDb {
         ];
     }
 
-    // 0270_purgeSocks4Data_清理socks4来源数据逻辑
-    purgeSocks4Data(options = {}) {
-        const sourceName = options.sourceName || 'TheSpeedX/socks4';
-        const protocol = options.protocol || 'socks4';
-
+    // 0270_purgeSourceProtocolData_按来源与协议清理数据逻辑
+    purgeSourceProtocolData(options = {}) {
+        const sourceName = String(options.sourceName || '').trim();
+        const protocol = String(options.protocol || '').trim().toLowerCase();
+        if (!sourceName || !protocol) {
+            return {
+                sourceName,
+                protocol,
+                deleted: 0,
+                beforeSource: 0,
+                beforeProtocol: 0,
+                afterSource: 0,
+                afterProtocol: 0,
+            };
+        }
         const beforeSource = Number(this.db.prepare(`
             SELECT COUNT(*) AS count
             FROM proxies
@@ -1338,6 +1348,22 @@ class ProxyHubDb {
             afterSource,
             afterProtocol,
         };
+    }
+
+    // 0270_purgeSocks4Data_清理socks4来源数据逻辑
+    purgeSocks4Data(options = {}) {
+        return this.purgeSourceProtocolData({
+            sourceName: options.sourceName || 'TheSpeedX/socks4',
+            protocol: options.protocol || 'socks4',
+        });
+    }
+
+    // 0300_purgeSocks5Data_清理socks5来源数据逻辑
+    purgeSocks5Data(options = {}) {
+        return this.purgeSourceProtocolData({
+            sourceName: options.sourceName || 'TheSpeedX/socks5',
+            protocol: options.protocol || 'socks5',
+        });
     }
 
     // 0188_getHonors_获取荣誉逻辑

@@ -235,6 +235,33 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(branchPolicy.defaultBranch, '陆军');
     assert.equal(Array.isArray(branchPolicy.rules), true);
     assert.equal(branchPolicy.rules.length >= 4, true);
+    const fallbackFieldPolicy = readBranchingConfig({
+        branching: {
+            fieldName: '',
+            failStreakField: '',
+            defaultBranch: '',
+            rules: ['bad-rule'],
+        },
+    });
+    assert.equal(fallbackFieldPolicy.fieldName, 'service_branch');
+    assert.equal(fallbackFieldPolicy.failStreakField, 'branch_fail_streak');
+    assert.equal(fallbackFieldPolicy.defaultBranch, '陆军');
+    assert.deepEqual(fallbackFieldPolicy.rules[0].stages, ['*']);
+    assert.deepEqual(fallbackFieldPolicy.rules[0].outcomes, ['*']);
+    assert.deepEqual(fallbackFieldPolicy.rules[0].from, ['*']);
+    const normalizeListPolicy = readBranchingConfig({
+        branching: {
+            rules: [{
+                id: 'normalize-list',
+                stages: [null, 'l2'],
+                outcomes: [null, 'success'],
+                from: [null, '陆军'],
+            }],
+        },
+    });
+    assert.deepEqual(normalizeListPolicy.rules[0].stages, ['l2']);
+    assert.deepEqual(normalizeListPolicy.rules[0].outcomes, ['success']);
+    assert.deepEqual(normalizeListPolicy.rules[0].from, ['陆军']);
     assert.deepEqual(readNativeLookupConfig({}), {
         enabled: false,
         timeoutMs: 3000,
@@ -293,6 +320,7 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(normalizeNativeRawJson('{"b":2,"a":1}', null), '{\n  "a": 1,\n  "b": 2\n}');
     assert.equal(normalizeNativeRawJson('{bad-json', { b: 2, a: 1 }), '{\n  "a": 1,\n  "b": 2\n}');
     assert.equal(normalizeNativeRawJson('', undefined), '');
+    assert.equal(normalizeNativeRawJson(null, undefined), '');
     assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('网络归属(isp): "ISP"'), true);
     assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('组织(org): "ORG"'), true);
     assert.equal(buildNativeLookupReadableText({ org: 'ORG', isp: 'ISP', custom: 1 }).includes('原键名(custom): 1'), true);
@@ -494,6 +522,11 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(fallbackFeed.url, 'https://example.com/fallback-feed');
     assert.equal(fallbackFeed.sourceFormat, 'auto');
     assert.equal(fallbackFeed.defaultProtocol, 'http');
+    assert.deepEqual(resolveSourceFeeds({
+        source: {
+            activeFeeds: [{ name: 'missing-url', enabled: true }],
+        },
+    }), []);
     const backoff = resolveFailureBackoff({
         config: {
             failureBackoff: {
@@ -3317,4 +3350,75 @@ test('persistSnapshot should not throw after db closed during shutdown race', ()
     assert.equal(logger.entries.some((e) => e.event === '线程池告警' && e.stage === '快照'), true);
 
     fs.rmSync(h.dir, { recursive: true, force: true });
+});
+
+test('source cycle throttle helpers should clamp values and skip cycles', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-throttle.db'));
+    config.source = {};
+    const db = {
+        listProxiesForValidation() {
+            return [];
+        },
+    };
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger });
+    engine.started = true;
+
+    assert.equal(engine.setSourceCycleThrottleFactor('nan'), 1);
+    assert.equal(engine.setSourceCycleThrottleFactor(99), 12);
+    assert.equal(engine.setSourceCycleThrottleFactor(2), 2);
+
+    await engine.runSourceCycle();
+    await engine.runSourceCycle();
+
+    const throttleState = engine.getSourceCycleThrottleState();
+    assert.equal(throttleState.factor, 2);
+    assert.equal(throttleState.counter, 2);
+    assert.equal(logger.entries.some((entry) => entry.stage === '抓源' && entry.result === '限速跳过抓源轮次'), true);
+});
+
+test('runSourceCycle should fallback to throttle factor 1 when internal value is invalid', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-throttle-fallback.db'));
+    config.source = {};
+    const db = {};
+    const workerPool = {
+        getStatus() {
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger });
+    engine.started = true;
+    engine.sourceCycleThrottleFactor = 'invalid-factor';
+
+    await engine.runSourceCycle();
+    assert.equal(engine.sourceCycleCounter, 1);
 });

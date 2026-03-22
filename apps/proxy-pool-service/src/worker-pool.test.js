@@ -114,8 +114,95 @@ test('worker-pool should timeout long task and restart worker', async () => {
     const status = pool.getStatus();
     assert.equal(status.restartedWorkers >= 1, true);
     assert.equal(FakeWorker.instances.length > beforeCount, true);
+    assert.equal(status.restartReasonCounts.timeout >= 1, true);
 
     await pool.close();
+});
+
+test('worker-pool should resize workers and expose target workers', async () => {
+    const pool = makePool(3, 20);
+    assert.equal(pool.getStatus().targetWorkers, 3);
+
+    pool.setSize(1);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(pool.getStatus().targetWorkers, 1);
+    assert.equal(pool.getStatus().workersTotal, 1);
+
+    pool.setSize(2);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(pool.getStatus().targetWorkers, 2);
+    assert.equal(pool.getStatus().workersTotal, 2);
+
+    await pool.close();
+});
+
+test('worker-pool restart reason classifier should cover protocol and unknown branches', async () => {
+    const pool = makePool(1, 20);
+    assert.equal(pool.classifyRestartReason('protocol-broken'), 'protocol_error');
+    assert.equal(pool.classifyRestartReason('random-other-error'), 'unknown');
+    assert.equal(pool.recordRestartReason('protocol-broken'), 'protocol_error');
+    assert.equal(pool.getStatus().restartReasonCounts.protocol_error, 1);
+    await pool.close();
+});
+
+test('worker-pool should cover constructor and guard fallback branches', async () => {
+    class SilentWorker extends EventEmitter {
+        postMessage() {}
+        terminate() { return Promise.resolve(0); }
+    }
+
+    const pool = new WorkerPool({
+        size: 'invalid-size',
+        taskTimeoutMs: 30,
+        workerFile: 'silent-worker.js',
+        WorkerClass: SilentWorker,
+        now: () => '2026-03-14T00:00:00.000Z',
+    });
+    assert.equal(pool.getStatus().workersTotal, 0);
+
+    assert.equal(pool.classifyRestartReason(), 'unknown');
+    assert.equal(pool.classifyRestartReason('socket hang up'), 'connect_error');
+
+    pool.setPendingRestartReason(999, 'timeout');
+    assert.equal(pool.consumePendingRestartReason(999, 'fallback-text'), 'unknown');
+
+    pool.terminateWorkerMeta(null);
+    pool.terminateWorkerMeta({});
+
+    pool.disposed = true;
+    pool.enforceTargetSize();
+    pool.disposed = false;
+
+    pool.setSize(2);
+    await new Promise((r) => setTimeout(r, 5));
+    pool.retiringWorkers.add(2);
+    pool.targetSize = 0;
+    pool.enforceTargetSize();
+    pool.setSize('still-invalid');
+
+    await pool.close();
+});
+
+test('worker-pool should terminate retiring worker after task callback and drain skip branch', async () => {
+    const pool = makePool(1, 50);
+    const w1 = FakeWorker.instances[0];
+
+    const task = pool.runTask('retire-after-task', {});
+    pool.setSize(0);
+    w1.emit('message', { taskId: w1.lastMessage.taskId, ok: true, result: { ok: true } });
+    await task;
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(w1.terminated, true);
+
+    const pool2 = makePool(1, 50);
+    const w2 = FakeWorker.instances[0];
+    pool2.retiringWorkers.add(1);
+    pool2.drain();
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(w2.terminated, true);
+
+    await pool.close();
+    await pool2.close();
 });
 
 test('worker-pool timeout callback should no-op when task already finished', async () => {

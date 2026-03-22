@@ -37,6 +37,13 @@ function normalizeBooleanFlag(value, fallback = false) {
     return fallback;
 }
 
+// 0296_normalizeIntegerInRange_规范化区间整数逻辑
+function normalizeIntegerInRange(value, fallback, min, max) {
+    const parsed = Number.parseInt(String(value ?? fallback), 10);
+    const normalized = Number.isFinite(parsed) ? parsed : fallback;
+    return Math.max(min, Math.min(max, normalized));
+}
+
 // 0093_createRuntime_创建运行时逻辑
 function createRuntime(options = {}) {
     const config = options.config || defaultConfig;
@@ -59,6 +66,77 @@ function createRuntime(options = {}) {
         db,
         logger,
     });
+    const guardrailBaseline = {
+        workers: Math.max(1, Number(config?.threadPool?.workers || workerPool.getStatus().workersTotal || 1)),
+        maxValidationPerCycle: Math.max(1, Number(config?.scheduler?.maxValidationPerCycle || 1)),
+        maxBattleL1PerCycle: Math.max(1, Number(config?.battle?.maxBattleL1PerCycle || 1)),
+        maxBattleL2PerCycle: Math.max(1, Number(config?.battle?.maxBattleL2PerCycle || 1)),
+        maxBattleL3PerCycle: Math.max(1, Number(config?.battle?.l3?.maxPerCycle || 1)),
+    };
+    const guardrailState = {
+        validationThrottleFactor: 1,
+        sourceThrottleFactor: 1,
+    };
+
+    // 0297_applyWorkerTarget_应用目标并发逻辑
+    function applyWorkerTarget(targetWorkers) {
+        const currentWorkers = Number(workerPool.getStatus().workersTotal || config?.threadPool?.workers || 0);
+        const safeTarget = normalizeIntegerInRange(targetWorkers, currentWorkers, 0, 256);
+
+        let appliedWorkers = safeTarget;
+        if (typeof workerPool.setSize === 'function') {
+            const status = workerPool.setSize(safeTarget);
+            const nextWorkers = Number(status?.targetWorkers ?? status?.workersTotal ?? safeTarget);
+            appliedWorkers = Number.isFinite(nextWorkers) ? nextWorkers : safeTarget;
+        }
+
+        if (!config.threadPool || typeof config.threadPool !== 'object') {
+            config.threadPool = {};
+        }
+        config.threadPool.workers = appliedWorkers;
+        return appliedWorkers;
+    }
+
+    // 0298_applyValidationThrottle_应用校验限速逻辑
+    function applyValidationThrottle(factor = 1) {
+        const normalizedFactor = Math.max(1, Math.min(4, Number(factor) || 1));
+        const reduceByFactor = (base) => Math.max(1, Math.floor(base / normalizedFactor));
+
+        guardrailState.validationThrottleFactor = normalizedFactor;
+        config.scheduler.maxValidationPerCycle = reduceByFactor(guardrailBaseline.maxValidationPerCycle);
+        config.battle.maxBattleL1PerCycle = reduceByFactor(guardrailBaseline.maxBattleL1PerCycle);
+        config.battle.maxBattleL2PerCycle = reduceByFactor(guardrailBaseline.maxBattleL2PerCycle);
+        if (config?.battle?.l3) {
+            config.battle.l3.maxPerCycle = reduceByFactor(guardrailBaseline.maxBattleL3PerCycle);
+        }
+        return normalizedFactor;
+    }
+
+    // 0299_applySourceThrottle_应用抓源限速逻辑
+    function applySourceThrottle(factor = 1) {
+        const normalizedFactor = Math.max(1, Math.min(6, Number(factor) || 1));
+        guardrailState.sourceThrottleFactor = normalizedFactor;
+        if (typeof engine.setSourceCycleThrottleFactor === 'function') {
+            engine.setSourceCycleThrottleFactor(normalizedFactor);
+        }
+        return normalizedFactor;
+    }
+
+    // 0300_getSoakGuardrailState_获取soak护栏状态逻辑
+    function getSoakGuardrailState() {
+        return {
+            baseline: guardrailBaseline,
+            effective: {
+                workers: Number(config?.threadPool?.workers || workerPool.getStatus().workersTotal || 0),
+                maxValidationPerCycle: Number(config?.scheduler?.maxValidationPerCycle || 0),
+                maxBattleL1PerCycle: Number(config?.battle?.maxBattleL1PerCycle || 0),
+                maxBattleL2PerCycle: Number(config?.battle?.maxBattleL2PerCycle || 0),
+                maxBattleL3PerCycle: Number(config?.battle?.l3?.maxPerCycle || 0),
+                validationThrottleFactor: guardrailState.validationThrottleFactor,
+                sourceThrottleFactor: guardrailState.sourceThrottleFactor,
+            },
+        };
+    }
 
     const logClients = new Set();
     const poolClients = new Set();
@@ -384,6 +462,89 @@ function createRuntime(options = {}) {
         });
     });
 
+    app.get('/v1/proxies/soak/guardrail', (_req, res) => {
+        res.json({
+            guardrail: getSoakGuardrailState(),
+            poolStatus: workerPool.getStatus(),
+        });
+    });
+
+    app.post('/v1/proxies/soak/guardrail', (req, res) => {
+        const payload = req.body;
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            res.status(400).json({
+                ok: false,
+                error: 'invalid-soak-guardrail-payload',
+            });
+            return;
+        }
+
+        const action = String(payload.action || 'apply').trim().toLowerCase();
+        if (!['apply', 'recover'].includes(action)) {
+            res.status(400).json({
+                ok: false,
+                error: 'invalid-soak-guardrail-action',
+            });
+            return;
+        }
+
+        const reason = String(payload.reason || 'manual-guardrail');
+        const currentWorkers = Number(workerPool.getStatus().workersTotal || config?.threadPool?.workers || 0);
+        const minWorkers = normalizeIntegerInRange(payload.minWorkers, 3, 0, 256);
+        let targetWorkers = currentWorkers;
+
+        if (action === 'recover') {
+            if (payload.recoverWorkers !== false) {
+                targetWorkers = guardrailBaseline.workers;
+            }
+            if (payload.recoverValidation !== false) {
+                applyValidationThrottle(1);
+            }
+            if (payload.recoverSource !== false) {
+                applySourceThrottle(1);
+            }
+        } else {
+            if (Object.prototype.hasOwnProperty.call(payload, 'workers')) {
+                targetWorkers = normalizeIntegerInRange(payload.workers, currentWorkers, 0, 256);
+            } else if (Object.prototype.hasOwnProperty.call(payload, 'reduceWorkersBy')) {
+                const reduceBy = normalizeIntegerInRange(payload.reduceWorkersBy, 1, 0, 64);
+                targetWorkers = Math.max(0, currentWorkers - reduceBy);
+            }
+            targetWorkers = Math.max(minWorkers, targetWorkers);
+
+            const validationFactor = Object.prototype.hasOwnProperty.call(payload, 'validationThrottleFactor')
+                ? Number(payload.validationThrottleFactor)
+                : guardrailState.validationThrottleFactor;
+            const sourceFactor = Object.prototype.hasOwnProperty.call(payload, 'sourceThrottleFactor')
+                ? Number(payload.sourceThrottleFactor)
+                : guardrailState.sourceThrottleFactor;
+            applyValidationThrottle(validationFactor);
+            applySourceThrottle(sourceFactor);
+        }
+
+        const appliedWorkers = applyWorkerTarget(targetWorkers);
+        const guardrail = getSoakGuardrailState();
+        logger.write({
+            event: '策略调整',
+            stage: 'soak-guardrail',
+            result: action === 'recover' ? 'guardrail_recovered' : 'guardrail_triggered',
+            reason,
+            action: `workers=${appliedWorkers}, validationThrottle=x${guardrail.effective.validationThrottleFactor}, sourceThrottle=x${guardrail.effective.sourceThrottleFactor}`,
+            details: {
+                request: payload,
+                guardrail,
+            },
+        });
+
+        res.json({
+            ok: true,
+            action,
+            reason,
+            guardrail,
+            poolStatus: workerPool.getStatus(),
+        });
+    });
+
     app.get('/v1/proxies/ranks/board', (req, res) => {
         const excludeRetired = normalizeBooleanFlag(req.query.excludeRetired, false);
         res.json({
@@ -477,19 +638,30 @@ function createRuntime(options = {}) {
             try {
                 server = app.listen(config.service.port, config.service.host, () => {
                     server.off('error', onError);
-                    const socks4Feed = Array.isArray(config.source?.activeFeeds)
-                        ? config.source.activeFeeds.find((feed) => feed && feed.name === 'TheSpeedX/socks4')
-                        : null;
-                    if (socks4Feed && socks4Feed.enabled === false && typeof db.purgeSocks4Data === 'function') {
-                        const cleanupSummary = db.purgeSocks4Data({
-                            sourceName: socks4Feed.name,
-                            protocol: 'socks4',
+                    const cleanupPlans = [
+                        { name: 'TheSpeedX/socks4', protocol: 'socks4', method: 'purgeSocks4Data' },
+                        { name: 'TheSpeedX/socks5', protocol: 'socks5', method: 'purgeSocks5Data' },
+                    ];
+                    const activeFeeds = Array.isArray(config.source?.activeFeeds)
+                        ? config.source.activeFeeds
+                        : [];
+                    for (const plan of cleanupPlans) {
+                        const feed = activeFeeds.find((item) => item && item.name === plan.name);
+                        if (!feed || feed.enabled !== false) {
+                            continue;
+                        }
+                        if (typeof db[plan.method] !== 'function') {
+                            continue;
+                        }
+                        const cleanupSummary = db[plan.method]({
+                            sourceName: feed.name,
+                            protocol: plan.protocol,
                         });
                         logger.write({
                             event: '数据清理',
                             stage: '服务',
-                            result: `socks4 清理 ${cleanupSummary.deleted}`,
-                            action: '临时停用 TheSpeedX/socks4',
+                            result: `${plan.protocol} 清理 ${cleanupSummary.deleted}`,
+                            action: `临时停用 ${feed.name}`,
                             details: cleanupSummary,
                         });
                     }
