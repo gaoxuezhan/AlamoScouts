@@ -918,6 +918,51 @@ test('candidate selectors should skip proxies in failure backoff window', () => 
     cleanup(h);
 });
 
+test('state review selector should keep active and reserve coverage under candidate pressure', () => {
+    const h = createDb();
+    const now = '2026-03-16T12:00:00.000Z';
+
+    h.db.upsertSourceBatch(
+        Array.from({ length: 25 }, (_, index) => ({
+            ip: `27.7.7.${index + 1}`,
+            port: 80,
+            protocol: 'http',
+        })),
+        (() => {
+            let i = 0;
+            return () => `状态巡检-${++i}`;
+        })(),
+        'src-state-review',
+        'batch-state-review',
+        now,
+    );
+
+    const all = h.db.getProxyList({ limit: 40 });
+    for (let i = 0; i < all.length; i += 1) {
+        let lifecycle = 'candidate';
+        if (i < 2) lifecycle = 'active';
+        else if (i < 5) lifecycle = 'reserve';
+        h.db.updateProxyById(all[i].id, {
+            lifecycle,
+            updated_at: new Date(Date.parse(now) + i * 1000).toISOString(),
+        });
+    }
+
+    const selected = h.db.listProxiesForStateReview(10, { active: 0.4, reserve: 0.4, candidate: 0.2 });
+    const counts = selected.reduce((acc, item) => {
+        const key = String(item.lifecycle || '');
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+    }, {});
+
+    assert.equal(selected.length, 10);
+    assert.equal(counts.active, 2);
+    assert.equal(counts.reserve, 3);
+    assert.equal(counts.candidate, 5);
+
+    cleanup(h);
+});
+
 test('retirement stats APIs should return count and daily series', () => {
     const h = createDb();
     const now = '2026-03-16T12:00:00.000Z';
