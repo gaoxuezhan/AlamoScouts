@@ -462,6 +462,8 @@ module.exports = {
     },
     candidateControl: {
         max: Number(process.env.PROXY_HUB_CANDIDATE_MAX || 1500),
+        low: Number(process.env.PROXY_HUB_CANDIDATE_LOW || 800),
+        refillStop: Number(process.env.PROXY_HUB_CANDIDATE_REFILL_STOP || 1350),
         gateOverride: toBool(process.env.PROXY_HUB_CANDIDATE_GATE_OVERRIDE, false),
         sweepMs: Number(process.env.PROXY_HUB_CANDIDATE_SWEEP_MS || 900_000),
         staleHours: Number(process.env.PROXY_HUB_CANDIDATE_STALE_HOURS || 18),
@@ -508,7 +510,7 @@ module.exports = {
     battle: {
         enabled: String(process.env.PROXY_HUB_BATTLE_ENABLED || 'true') === 'true',
         l1SyncMs: Number(process.env.PROXY_HUB_BATTLE_L1_MS || 300_000),
-        l2SyncMs: Number(process.env.PROXY_HUB_BATTLE_L2_MS || battleL2SyncMsByProfile[activeProfile] || 1_800_000),
+        l2SyncMs: Number(process.env.PROXY_HUB_BATTLE_L2_MS || battleL2SyncMsByProfile[activeProfile]),
         l2SyncMsByProfile: deepClone(battleL2SyncMsByProfile),
         maxBattleL1PerCycle: Number(process.env.PROXY_HUB_BATTLE_L1_MAX || 60),
         maxBattleL2PerCycle: Number(process.env.PROXY_HUB_BATTLE_L2_MAX || 20),
@@ -521,7 +523,7 @@ module.exports = {
         },
         l3: {
             enabled: toBool(process.env.PROXY_HUB_BATTLE_L3_ENABLED, true),
-            syncMs: Number(process.env.PROXY_HUB_BATTLE_L3_MS || battleL3SyncMsByProfile[activeProfile] || 2_700_000),
+            syncMs: Number(process.env.PROXY_HUB_BATTLE_L3_MS || battleL3SyncMsByProfile[activeProfile]),
             maxPerCycle: Number(process.env.PROXY_HUB_BATTLE_L3_MAX || 12),
             concurrency: Number(process.env.PROXY_HUB_BATTLE_L3_CONCURRENCY || 3),
             lookbackMinutes: Number(process.env.PROXY_HUB_BATTLE_L3_LOOKBACK_MINUTES || l2LookbackByProfile[activeProfile]),

@@ -91,8 +91,24 @@ function buildBattleCounterUpdates(proxy, nowIso, outcome, stage) {
 // 0258_readCandidateControl_读取新兵治理配置逻辑
 function readCandidateControl(config = {}) {
     const raw = config.candidateControl || {};
+    const max = Math.max(0, Number(raw.max) || 0);
+    const lowRaw = Number(raw.low);
+    const refillStopRaw = Number(raw.refillStop);
+    const lowDefault = max > 0 ? Math.min(800, max) : 0;
+    const refillStopDefault = max > 0 ? Math.min(1350, max) : 0;
+    const normalizedLow = max > 0
+        ? Math.max(0, Math.min(max, Math.floor(Number.isFinite(lowRaw) ? lowRaw : lowDefault)))
+        : 0;
+    const normalizedRefillStop = max > 0
+        ? Math.max(
+            normalizedLow,
+            Math.min(max, Math.floor(Number.isFinite(refillStopRaw) ? refillStopRaw : refillStopDefault)),
+        )
+        : 0;
     return {
-        max: Math.max(0, Number(raw.max) || 0),
+        max,
+        low: normalizedLow,
+        refillStop: normalizedRefillStop,
         gateOverride: raw.gateOverride === true,
         sweepMs: Math.max(60_000, Number(raw.sweepMs) || 900_000),
         staleHours: Math.max(1, Number(raw.staleHours) || 24),
@@ -103,14 +119,44 @@ function readCandidateControl(config = {}) {
 }
 
 // 0259_buildCandidateGateState_构建新兵闸门状态逻辑
-function buildCandidateGateState(config = {}, candidateCount = 0) {
+function buildCandidateGateState(config = {}, candidateCount = 0, refillWindowOpen = false) {
     const control = readCandidateControl(config);
-    const gatedByThreshold = control.max > 0 && candidateCount >= control.max;
+    const normalizedCount = Math.max(0, Number(candidateCount) || 0);
+    const refillWindowOpenBefore = refillWindowOpen === true;
+    const hasHighWatermark = control.max > 0;
+    const lowWatermarkReached = hasHighWatermark && normalizedCount <= control.low;
+    const refillStopReached = hasHighWatermark && normalizedCount >= control.refillStop;
+    const highWatermarkReached = hasHighWatermark && normalizedCount >= control.max;
+
+    let nextRefillWindowOpen = refillWindowOpenBefore;
+    if (!control.gateOverride && hasHighWatermark) {
+        if (!nextRefillWindowOpen && lowWatermarkReached) {
+            nextRefillWindowOpen = true;
+        }
+        if (nextRefillWindowOpen && refillStopReached) {
+            nextRefillWindowOpen = false;
+        }
+    }
+
+    const gatedByThreshold = highWatermarkReached;
+    const gatedByHysteresis = hasHighWatermark
+        && !control.gateOverride
+        && !nextRefillWindowOpen
+        && normalizedCount > control.low
+        && normalizedCount < control.max;
+
     return {
         ...control,
-        candidateCount: Math.max(0, Number(candidateCount) || 0),
+        candidateCount: normalizedCount,
+        lowWatermarkReached,
+        refillStopReached,
+        highWatermarkReached,
+        refillWindowOpenBefore,
+        refillWindowOpen: nextRefillWindowOpen,
+        refillWindowStateChanged: nextRefillWindowOpen !== refillWindowOpenBefore,
         gatedByThreshold,
-        gateActive: gatedByThreshold && !control.gateOverride,
+        gatedByHysteresis,
+        gateActive: !control.gateOverride && (gatedByThreshold || gatedByHysteresis),
     };
 }
 
@@ -615,6 +661,7 @@ class ProxyHubEngine extends EventEmitter {
         this.nativeLookupInFlight = new Set();
         this.sourceCycleThrottleFactor = 1;
         this.sourceCycleCounter = 0;
+        this.candidateRefillWindowOpen = false;
     }
 
     // 0210_isBattleEnabled_判断战场测试开关逻辑
@@ -1076,6 +1123,7 @@ class ProxyHubEngine extends EventEmitter {
             clearInterval(this.candidateSweepTimer);
             this.candidateSweepTimer = null;
         }
+        this.candidateRefillWindowOpen = false;
     }
 
     // 0030_createRecruitName_创建新兵名称逻辑
@@ -1144,10 +1192,23 @@ class ProxyHubEngine extends EventEmitter {
                     const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                     const nowIso = this.now().toISOString();
                     const candidateCount = Number(this.db.getLifecycleCount?.('candidate') || 0);
-                    const gateState = buildCandidateGateState(this.config, candidateCount);
+                    const gateState = buildCandidateGateState(
+                        this.config,
+                        candidateCount,
+                        this.candidateRefillWindowOpen,
+                    );
+                    this.candidateRefillWindowOpen = gateState.refillWindowOpen;
                     const hasInsertCap = gateState.max > 0 && !gateState.gateOverride;
                     const remainingInsertSlots = hasInsertCap
-                        ? Math.max(0, gateState.max - gateState.candidateCount)
+                        ? (gateState.refillWindowOpen
+                            ? Math.max(
+                                0,
+                                Math.min(
+                                    gateState.max - gateState.candidateCount,
+                                    gateState.refillStop - gateState.candidateCount,
+                                ),
+                            )
+                            : 0)
                         : Number.POSITIVE_INFINITY;
                     const upsertOptions = {
                         allowInsert: !gateState.gateActive,
@@ -1164,12 +1225,17 @@ class ProxyHubEngine extends EventEmitter {
                         upsertOptions,
                     );
                     const gateLimitedBySlots = !gateState.gateActive
+                        && gateState.refillWindowOpen
                         && hasInsertCap
                         && Number(upsertStats.skipped || 0) > 0;
                     const sourceAction = gateState.gateActive
-                        ? 'candidate闸门生效，仅更新存量代理'
-                        : (gateLimitedBySlots
-                            ? `candidate闸门限量生效，本轮最多新增 ${Math.max(0, Math.floor(remainingInsertSlots))}`
+                        ? (gateState.gatedByThreshold
+                            ? 'candidate闸门生效，仅更新存量代理'
+                            : `candidate补给窗口关闭，等待降至低水位 ${gateState.low}`)
+                        : (gateState.refillWindowOpen
+                            ? (gateLimitedBySlots
+                                ? `candidate补给窗口开启，本轮最多新增 ${Math.max(0, Math.floor(remainingInsertSlots))}`
+                                : 'candidate补给窗口开启，进入校验队列')
                             : '进入校验队列');
 
                     summary.fetched += Number(fetchResult.fetched || 0);
@@ -1187,12 +1253,21 @@ class ProxyHubEngine extends EventEmitter {
                         action: sourceAction,
                     });
 
-                    if (gateState.gateActive || (gateState.gatedByThreshold && gateState.gateOverride) || gateLimitedBySlots) {
+                    if (
+                        gateState.gateActive
+                        || (gateState.gatedByThreshold && gateState.gateOverride)
+                        || gateLimitedBySlots
+                        || gateState.refillWindowStateChanged
+                    ) {
                         const gateMessage = gateState.gateActive
-                            ? `candidate 闸门生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
+                            ? (gateState.gatedByThreshold
+                                ? `candidate 闸门生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
+                                : `candidate 补给窗口关闭：当前 ${gateState.candidateCount}，低水位 ${gateState.low}`)
                             : (gateState.gatedByThreshold && gateState.gateOverride
                                 ? `candidate 闸门已手工 override：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
-                                : `candidate 闸门限量生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`);
+                                : (gateState.refillWindowStateChanged
+                                    ? `candidate 补给窗口开启：当前 ${gateState.candidateCount}，补给至 ${gateState.refillStop}`
+                                    : `candidate 补给窗口限量生效：当前 ${gateState.candidateCount}，补给目标 ${gateState.refillStop}`));
                         this.db.insertProxyEvent({
                             timestamp: nowIso,
                             proxy_id: null,
@@ -1204,8 +1279,14 @@ class ProxyHubEngine extends EventEmitter {
                                 sourceName,
                                 candidateCount: gateState.candidateCount,
                                 candidateMax: gateState.max,
+                                candidateLow: gateState.low,
+                                candidateRefillStop: gateState.refillStop,
                                 gateActive: gateState.gateActive,
                                 gateOverride: gateState.gateOverride,
+                                gatedByHysteresis: gateState.gatedByHysteresis,
+                                refillWindowOpenBefore: gateState.refillWindowOpenBefore,
+                                refillWindowOpen: gateState.refillWindowOpen,
+                                refillWindowStateChanged: gateState.refillWindowStateChanged,
                                 gateLimitedBySlots,
                                 remainingInsertSlots: Number.isFinite(remainingInsertSlots)
                                     ? Math.max(0, Math.floor(remainingInsertSlots))

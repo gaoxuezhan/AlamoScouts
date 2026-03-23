@@ -27,6 +27,8 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_ROLLOUT_LEASE_TTL_MS',
         'PROXY_HUB_POLICY_PROFILE',
         'PROXY_HUB_CANDIDATE_MAX',
+        'PROXY_HUB_CANDIDATE_LOW',
+        'PROXY_HUB_CANDIDATE_REFILL_STOP',
         'PROXY_HUB_CANDIDATE_GATE_OVERRIDE',
         'PROXY_HUB_CANDIDATE_SWEEP_MS',
         'PROXY_HUB_CANDIDATE_STALE_HOURS',
@@ -113,6 +115,8 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.battle.candidateQuota, 0.15);
     assert.deepEqual(config.scheduler.stateReviewLifecycleQuota, { active: 0.45, reserve: 0.35, candidate: 0.20 });
     assert.equal(config.candidateControl.max, 1500);
+    assert.equal(config.candidateControl.low, 800);
+    assert.equal(config.candidateControl.refillStop, 1350);
     assert.equal(config.candidateControl.staleHours, 18);
     assert.equal(config.candidateControl.timeoutHours, 48);
     assert.equal(config.battle.l3.enabled, true);
@@ -373,6 +377,8 @@ test('config should parse rollout orchestrator env values', { concurrency: false
 test('config should parse candidate control env values', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_CANDIDATE_MAX: '4321',
+        PROXY_HUB_CANDIDATE_LOW: '1234',
+        PROXY_HUB_CANDIDATE_REFILL_STOP: '3456',
         PROXY_HUB_CANDIDATE_GATE_OVERRIDE: 'true',
         PROXY_HUB_CANDIDATE_SWEEP_MS: '600000',
         PROXY_HUB_CANDIDATE_STALE_HOURS: '18',
@@ -381,6 +387,8 @@ test('config should parse candidate control env values', { concurrency: false },
         PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE: '333',
     });
     assert.equal(config.candidateControl.max, 4321);
+    assert.equal(config.candidateControl.low, 1234);
+    assert.equal(config.candidateControl.refillStop, 3456);
     assert.equal(config.candidateControl.gateOverride, true);
     assert.equal(config.candidateControl.sweepMs, 600000);
     assert.equal(config.candidateControl.staleHours, 18);

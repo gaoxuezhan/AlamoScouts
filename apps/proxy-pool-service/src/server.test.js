@@ -41,6 +41,8 @@ function createConfig(port = 0) {
         },
         candidateControl: {
             max: 3000,
+            low: 800,
+            refillStop: 1350,
             gateOverride: false,
             sweepMs: 900000,
             staleHours: 24,
@@ -397,6 +399,8 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
             max: 1234,
+            low: 600,
+            refillStop: 1100,
             gateOverride: true,
         }),
     });
@@ -404,6 +408,8 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     const candidateControlBody = await candidateControlPatch.json();
     assert.equal(candidateControlBody.ok, true);
     assert.equal(candidateControlBody.candidateControl.max, 1234);
+    assert.equal(candidateControlBody.candidateControl.low, 600);
+    assert.equal(candidateControlBody.candidateControl.refillStop, 1100);
     assert.equal(candidateControlBody.candidateControl.gateOverride, true);
 
     const candidateControlInvalid = await fetch(baseUrl + '/v1/proxies/candidate-control', {
@@ -430,6 +436,54 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
         }),
     });
     assert.equal(candidateControlInvalidMax.status, 400);
+
+    const candidateControlInvalidLow = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            low: -1,
+        }),
+    });
+    assert.equal(candidateControlInvalidLow.status, 400);
+
+    const candidateControlInvalidRefillStop = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            refillStop: 'bad',
+        }),
+    });
+    assert.equal(candidateControlInvalidRefillStop.status, 400);
+
+    const candidateControlNormalize = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            max: 100,
+            low: 200,
+            refillStop: 50,
+        }),
+    });
+    assert.equal(candidateControlNormalize.status, 200);
+    const candidateControlNormalizeBody = await candidateControlNormalize.json();
+    assert.equal(candidateControlNormalizeBody.candidateControl.max, 100);
+    assert.equal(candidateControlNormalizeBody.candidateControl.low, 100);
+    assert.equal(candidateControlNormalizeBody.candidateControl.refillStop, 100);
+
+    const candidateControlZeroWatermark = await fetch(baseUrl + '/v1/proxies/candidate-control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            max: 100,
+            low: 0,
+            refillStop: 0,
+        }),
+    });
+    assert.equal(candidateControlZeroWatermark.status, 200);
+    const candidateControlZeroWatermarkBody = await candidateControlZeroWatermark.json();
+    assert.equal(candidateControlZeroWatermarkBody.candidateControl.max, 100);
+    assert.equal(candidateControlZeroWatermarkBody.candidateControl.low, 0);
+    assert.equal(candidateControlZeroWatermarkBody.candidateControl.refillStop, 0);
 
     const sseLogs = await fetch(baseUrl + '/api/runtime/logs/stream', {
         headers: { Accept: 'text/event-stream' },
@@ -594,6 +648,48 @@ test('soak guardrail endpoint should validate payload/action and cover workers p
         assert.equal(workersBody.guardrail.effective.maxBattleL3PerCycle, 6);
     } finally {
         await runtime.shutdown('TEST-SOAK-GUARDRAIL-VALIDATION');
+    }
+});
+
+test('soak guardrail should fallback current workers to config baseline when pool reports zero', async () => {
+    const stubs = createStubs();
+    let workersTotal = 0;
+    stubs.workerPool.getStatus = () => ({
+        workersTotal,
+        workersBusy: 0,
+        queueSize: 0,
+        runningTasks: 0,
+        completedTasks: 0,
+        failedTasks: 0,
+        restartedWorkers: 0,
+        workers: [],
+    });
+    stubs.workerPool.setSize = (nextWorkers) => {
+        workersTotal = Number(nextWorkers);
+        return {
+            ...stubs.workerPool.getStatus(),
+            targetWorkers: workersTotal,
+        };
+    };
+    stubs.engine.setSourceCycleThrottleFactor = () => 1;
+
+    const { runtime, baseUrl } = await startRuntimeOnRandomPort(stubs);
+    try {
+        const res = await fetch(baseUrl + '/v1/proxies/soak/guardrail', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                action: 'apply',
+                reason: 'workers-fallback',
+                minWorkers: 0,
+            }),
+        });
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.ok, true);
+        assert.equal(body.guardrail.effective.workers, 2);
+    } finally {
+        await runtime.shutdown('TEST-SOAK-GUARDRAIL-WORKER-FALLBACK');
     }
 });
 
@@ -882,11 +978,15 @@ test('candidate control endpoint should initialize control object when missing',
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
+                max: 1200,
                 gateOverride: true,
             }),
         });
         assert.equal(res.status, 200);
         const body = await res.json();
+        assert.equal(body.candidateControl.max, 1200);
+        assert.equal(body.candidateControl.low, 800);
+        assert.equal(body.candidateControl.refillStop, 1200);
         assert.equal(body.candidateControl.gateOverride, true);
     } finally {
         await runtime.shutdown('TEST-CANDIDATE-CONTROL-MISSING');

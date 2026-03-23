@@ -421,6 +421,9 @@ function createRuntime(options = {}) {
         if (!config.candidateControl || typeof config.candidateControl !== 'object') {
             config.candidateControl = {};
         }
+        const nextControl = {
+            ...config.candidateControl,
+        };
 
         if (Object.prototype.hasOwnProperty.call(payload, 'max')) {
             const max = Number(payload.max);
@@ -431,7 +434,31 @@ function createRuntime(options = {}) {
                 });
                 return;
             }
-            config.candidateControl.max = max;
+            nextControl.max = max;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(payload, 'low')) {
+            const low = Number(payload.low);
+            if (!Number.isFinite(low) || low < 0) {
+                res.status(400).json({
+                    ok: false,
+                    error: 'invalid-candidate-low',
+                });
+                return;
+            }
+            nextControl.low = low;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(payload, 'refillStop')) {
+            const refillStop = Number(payload.refillStop);
+            if (!Number.isFinite(refillStop) || refillStop < 0) {
+                res.status(400).json({
+                    ok: false,
+                    error: 'invalid-candidate-refill-stop',
+                });
+                return;
+            }
+            nextControl.refillStop = refillStop;
         }
 
         if (Object.prototype.hasOwnProperty.call(payload, 'gateOverride')) {
@@ -442,8 +469,37 @@ function createRuntime(options = {}) {
                 });
                 return;
             }
-            config.candidateControl.gateOverride = payload.gateOverride;
+            nextControl.gateOverride = payload.gateOverride;
         }
+        const normalizedMax = Math.max(0, Number(nextControl.max) || 0);
+        const rawLow = Number(nextControl.low);
+        const rawRefillStop = Number(nextControl.refillStop);
+        const normalizedLow = normalizedMax > 0
+            ? Math.max(
+                0,
+                Math.min(
+                    normalizedMax,
+                    Math.floor(Number.isFinite(rawLow) ? rawLow : Math.min(800, normalizedMax)),
+                ),
+            )
+            : 0;
+        const normalizedRefillStop = normalizedMax > 0
+            ? Math.max(
+                normalizedLow,
+                Math.min(
+                    normalizedMax,
+                    Math.floor(Number.isFinite(rawRefillStop) ? rawRefillStop : Math.min(1350, normalizedMax)),
+                ),
+            )
+            : 0;
+
+        config.candidateControl = {
+            ...nextControl,
+            max: normalizedMax,
+            low: normalizedLow,
+            refillStop: normalizedRefillStop,
+            gateOverride: nextControl.gateOverride === true,
+        };
 
         logger.write({
             event: '策略调整',
