@@ -64,6 +64,8 @@ function createConfig(dbPath) {
         source: { monosans: { name: 'monosans/proxy-list', url: 'https://example.com', enabled: true } },
         candidateControl: {
             max: 3000,
+            low: 800,
+            refillStop: 1350,
             gateOverride: false,
             sweepMs: 900000,
             staleHours: 24,
@@ -207,6 +209,8 @@ test('engine utility functions should cover helper branches', async () => {
 
     assert.deepEqual(readCandidateControl({}), {
         max: 0,
+        low: 0,
+        refillStop: 0,
         gateOverride: false,
         sweepMs: 900000,
         staleHours: 24,
@@ -215,12 +219,41 @@ test('engine utility functions should cover helper branches', async () => {
         maxRetirePerCycle: 2000,
     });
     const gate = buildCandidateGateState({
-        candidateControl: { max: 10, gateOverride: false },
-    }, 12);
+        candidateControl: { max: 10, low: 4, refillStop: 8, gateOverride: false },
+    }, 12, false);
     assert.equal(gate.gateActive, true);
+    assert.equal(gate.gatedByThreshold, true);
+    assert.equal(gate.refillWindowOpen, false);
+
+    const gateOpenWindow = buildCandidateGateState({
+        candidateControl: { max: 10, low: 4, refillStop: 8, gateOverride: false },
+    }, 4, false);
+    assert.equal(gateOpenWindow.refillWindowOpen, true);
+    assert.equal(gateOpenWindow.refillWindowStateChanged, true);
+    assert.equal(gateOpenWindow.gateActive, false);
+
+    const gateCloseWindow = buildCandidateGateState({
+        candidateControl: { max: 10, low: 4, refillStop: 8, gateOverride: false },
+    }, 8, true);
+    assert.equal(gateCloseWindow.refillWindowOpen, false);
+    assert.equal(gateCloseWindow.refillWindowStateChanged, true);
+    assert.equal(gateCloseWindow.gatedByHysteresis, true);
+    assert.equal(gateCloseWindow.gateActive, true);
+
+    const normalizedControl = readCandidateControl({
+        candidateControl: { max: 10, low: 20, refillStop: 2 },
+    });
+    assert.equal(normalizedControl.low, 10);
+    assert.equal(normalizedControl.refillStop, 10);
+    const normalizedFallbackControl = readCandidateControl({
+        candidateControl: { max: 1500, low: 'bad', refillStop: 'bad' },
+    });
+    assert.equal(normalizedFallbackControl.low, 800);
+    assert.equal(normalizedFallbackControl.refillStop, 1350);
+
     const gateOverride = buildCandidateGateState({
-        candidateControl: { max: 10, gateOverride: true },
-    }, 12);
+        candidateControl: { max: 10, low: 4, refillStop: 8, gateOverride: true },
+    }, 12, false);
     assert.equal(gateOverride.gateActive, false);
     assert.deepEqual(readFailureBackoff({}), {
         enabled: true,
@@ -237,9 +270,9 @@ test('engine utility functions should cover helper branches', async () => {
     assert.equal(branchPolicy.rules.length >= 4, true);
     const fallbackFieldPolicy = readBranchingConfig({
         branching: {
-            fieldName: '',
-            failStreakField: '',
-            defaultBranch: '',
+            fieldName: '   ',
+            failStreakField: '   ',
+            defaultBranch: '   ',
             rules: ['bad-rule'],
         },
     });
@@ -1032,7 +1065,172 @@ test('runSourceCycle should cap new candidates by remaining gate slots', async (
     assert.equal(h.db.getProxyByKey('10.0.2.11:8081:http') !== undefined, true);
     assert.equal(h.db.getProxyByKey('10.0.2.12:8082:http'), undefined);
     const gateEvents = h.db.getEvents(20).filter((item) => item.event_type === 'candidate_gate');
-    assert.equal(gateEvents.some((item) => String(item.message || '').includes('限量生效')), true);
+    assert.equal(gateEvents.length > 0, true);
+    assert.equal(gateEvents.some((item) => {
+        const details = JSON.parse(item.details_json || '{}');
+        return details.gateLimitedBySlots === true;
+    }), true);
+    cleanupDb(h);
+});
+
+test('runSourceCycle should reopen refill window at low watermark and stop at refillStop', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const nowIso = '2026-03-14T02:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [
+            { ip: '10.0.3.10', port: 8080, protocol: 'http' },
+            { ip: '10.0.3.11', port: 8081, protocol: 'http' },
+            { ip: '10.0.3.12', port: 8082, protocol: 'http' },
+        ],
+        (() => {
+            let idx = 0;
+            return () => `滞回-存量-${++idx}`;
+        })(),
+        'seed',
+        'seed-batch',
+        nowIso,
+    );
+
+    h.config.candidateControl.max = 5;
+    h.config.candidateControl.low = 2;
+    h.config.candidateControl.refillStop = 4;
+    h.config.candidateControl.gateOverride = false;
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'fetch-source') {
+                return {
+                    normalized: 4,
+                    proxies: [
+                        { ip: '10.0.3.10', port: 8080, protocol: 'http' },
+                        { ip: '10.0.3.20', port: 8090, protocol: 'http' },
+                        { ip: '10.0.3.21', port: 8091, protocol: 'http' },
+                        { ip: '10.0.3.22', port: 8092, protocol: 'http' },
+                    ],
+                };
+            }
+            if (type === 'validate-proxy') {
+                return { ok: true, reason: 'connect_ok', latencyMs: 10 };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date('2026-03-14T02:30:00.000Z'),
+    });
+    engine.started = true;
+    engine.runValidationCycle = async () => {};
+
+    await engine.runSourceCycle();
+    assert.equal(h.db.getLifecycleCount('candidate'), 3);
+
+    const candidates = h.db.getProxyList({ lifecycle: 'candidate', limit: 10 });
+    h.db.updateProxyById(candidates[0].id, {
+        lifecycle: 'retired',
+        retired_type: 'manual_drop',
+        lifecycle_changed_at: '2026-03-14T02:31:00.000Z',
+        updated_at: '2026-03-14T02:31:00.000Z',
+    });
+    assert.equal(h.db.getLifecycleCount('candidate'), 2);
+
+    await engine.runSourceCycle();
+    assert.equal(h.db.getLifecycleCount('candidate'), 4);
+    assert.equal(h.db.getProxyByKey('10.0.3.20:8090:http') !== undefined, true);
+    assert.equal(h.db.getProxyByKey('10.0.3.21:8091:http') !== undefined, true);
+
+    await engine.runSourceCycle();
+    assert.equal(h.db.getLifecycleCount('candidate'), 4);
+    assert.equal(h.db.getProxyByKey('10.0.3.22:8092:http'), undefined);
+    const gateEvents = h.db.getEvents(50).filter((item) => item.event_type === 'candidate_gate');
+    assert.equal(gateEvents.some((item) => String(item.message || '').includes('补给窗口开启')), true);
+    assert.equal(gateEvents.some((item) => String(item.message || '').includes('补给窗口关闭')), true);
+
+    cleanupDb(h);
+});
+
+test('runSourceCycle should audit limited refill when window stays open', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const nowIso = '2026-03-14T03:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [
+            { ip: '10.0.4.10', port: 8080, protocol: 'http' },
+            { ip: '10.0.4.11', port: 8081, protocol: 'http' },
+            { ip: '10.0.4.12', port: 8082, protocol: 'http' },
+        ],
+        (() => {
+            let idx = 0;
+            return () => `限量-存量-${++idx}`;
+        })(),
+        'seed',
+        'seed-batch',
+        nowIso,
+    );
+
+    h.config.candidateControl.max = 5;
+    h.config.candidateControl.low = 2;
+    h.config.candidateControl.refillStop = 4;
+    h.config.candidateControl.gateOverride = false;
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'fetch-source') {
+                return {
+                    normalized: 3,
+                    proxies: [
+                        { ip: '10.0.4.10', port: 8080, protocol: 'http' },
+                        { ip: '10.0.4.20', port: 8090, protocol: 'http' },
+                        { ip: '10.0.4.21', port: 8091, protocol: 'http' },
+                    ],
+                };
+            }
+            return { ok: true, reason: 'connect_ok', latencyMs: 10 };
+        },
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date('2026-03-14T03:30:00.000Z'),
+    });
+    engine.started = true;
+    engine.runValidationCycle = async () => {};
+    engine.candidateRefillWindowOpen = true;
+
+    await engine.runSourceCycle();
+    assert.equal(h.db.getLifecycleCount('candidate'), 4);
+    const gateEvent = h.db.getEvents(20).find((item) => item.event_type === 'candidate_gate');
+    assert.equal(String(gateEvent?.message || '').includes('限量生效'), true);
     cleanupDb(h);
 });
 
@@ -2037,6 +2235,18 @@ test('resolveNativePlaceByIp should use ipapi.co first and fallback to freeipapi
         await assert.rejects(
             () => engine.resolveNativePlaceByIpapiCo('5.5.5.80', 900),
             /ipapi\.co-rate-limited/,
+        );
+
+        global.fetch = async () => ({
+            ok: true,
+            status: 200,
+            async text() {
+                return JSON.stringify({ error: true });
+            },
+        });
+        await assert.rejects(
+            () => engine.resolveNativePlaceByIpapiCo('5.5.5.801', 900),
+            /ipapi\.co-request-failed/,
         );
 
         global.fetch = async () => ({
