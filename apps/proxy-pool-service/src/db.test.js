@@ -1888,6 +1888,38 @@ test('upsertSourceBatch should support gate mode that only touches existing rows
     cleanup(h);
 });
 
+test('upsertSourceBatch should cap inserts by maxInsert while keeping touches', () => {
+    const h = createDb();
+    const now = new Date().toISOString();
+
+    h.db.upsertSourceBatch(
+        [{ ip: '1.1.1.1', port: 80, protocol: 'http' }],
+        () => '上限-存量',
+        'srcA',
+        'batchA',
+        now,
+    );
+
+    let nameCounter = 0;
+    const capped = h.db.upsertSourceBatch(
+        [
+            { ip: '1.1.1.1', port: 80, protocol: 'http' },
+            { ip: '2.2.2.2', port: 81, protocol: 'http' },
+            { ip: '3.3.3.3', port: 82, protocol: 'http' },
+        ],
+        () => `上限-新增-${++nameCounter}`,
+        'srcB',
+        'batchB',
+        now,
+        { maxInsert: 1 },
+    );
+
+    assert.deepEqual(capped, { inserted: 1, touched: 1, skipped: 1 });
+    assert.equal(h.db.getProxyByKey('2.2.2.2:81:http')?.source, 'srcB');
+    assert.equal(h.db.getProxyByKey('3.3.3.3:82:http'), undefined);
+    cleanup(h);
+});
+
 test('rollout switch state and events APIs should work', () => {
     const h = createDb();
     const nowIso = '2026-03-16T12:00:00.000Z';

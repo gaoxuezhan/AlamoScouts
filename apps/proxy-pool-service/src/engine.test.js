@@ -972,6 +972,70 @@ test('runSourceCycle should gate candidate inflow and support override switch', 
     cleanupDb(h);
 });
 
+test('runSourceCycle should cap new candidates by remaining gate slots', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    const nowIso = '2026-03-14T01:00:00.000Z';
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.2.10', port: 8080, protocol: 'http' }],
+        () => '限量-存量-10',
+        'seed',
+        'seed-batch',
+        nowIso,
+    );
+
+    h.config.candidateControl.max = 2;
+    h.config.candidateControl.gateOverride = false;
+    const workerPool = {
+        async runTask(type) {
+            if (type === 'fetch-source') {
+                return {
+                    normalized: 3,
+                    proxies: [
+                        { ip: '10.0.2.10', port: 8080, protocol: 'http' },
+                        { ip: '10.0.2.11', port: 8081, protocol: 'http' },
+                        { ip: '10.0.2.12', port: 8082, protocol: 'http' },
+                    ],
+                };
+            }
+            if (type === 'validate-proxy') {
+                return { ok: true, reason: 'connect_ok', latencyMs: 10 };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 2,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const engine = new ProxyHubEngine({
+        config: h.config,
+        db: h.db,
+        workerPool,
+        logger,
+        now: () => new Date('2026-03-14T01:35:00.000Z'),
+    });
+    engine.started = true;
+    await engine.runSourceCycle();
+
+    const list = h.db.getProxyList({ limit: 10 });
+    assert.equal(list.length, 2);
+    assert.equal(h.db.getProxyByKey('10.0.2.11:8081:http') !== undefined, true);
+    assert.equal(h.db.getProxyByKey('10.0.2.12:8082:http'), undefined);
+    const gateEvents = h.db.getEvents(20).filter((item) => item.event_type === 'candidate_gate');
+    assert.equal(gateEvents.some((item) => String(item.message || '').includes('限量生效')), true);
+    cleanupDb(h);
+});
+
 test('runCandidateSweepCycle should retire stale candidates with audit events', async () => {
     const h = createDbHandle();
     const logger = createLogger();

@@ -1145,16 +1145,30 @@ class ProxyHubEngine extends EventEmitter {
                     const nowIso = this.now().toISOString();
                     const candidateCount = Number(this.db.getLifecycleCount?.('candidate') || 0);
                     const gateState = buildCandidateGateState(this.config, candidateCount);
+                    const hasInsertCap = gateState.max > 0 && !gateState.gateOverride;
+                    const remainingInsertSlots = hasInsertCap
+                        ? Math.max(0, gateState.max - gateState.candidateCount)
+                        : Number.POSITIVE_INFINITY;
+                    const upsertOptions = {
+                        allowInsert: !gateState.gateActive,
+                    };
+                    if (hasInsertCap) {
+                        upsertOptions.maxInsert = remainingInsertSlots;
+                    }
                     const upsertStats = this.db.upsertSourceBatch(
                         fetchResult.proxies,
                         () => this.createRecruitName(),
                         sourceName,
                         batchId,
                         nowIso,
-                        {
-                            allowInsert: !gateState.gateActive,
-                        },
+                        upsertOptions,
                     );
+                    const gateLimitedBySlots = hasInsertCap && Number(upsertStats.skipped || 0) > 0;
+                    const sourceAction = gateState.gateActive
+                        ? 'candidate闸门生效，仅更新存量代理'
+                        : (gateLimitedBySlots
+                            ? `candidate闸门限量生效，本轮最多新增 ${Math.max(0, Math.floor(remainingInsertSlots))}`
+                            : '进入校验队列');
 
                     summary.fetched += Number(fetchResult.fetched || 0);
                     summary.normalized += Number(fetchResult.normalized || 0);
@@ -1168,13 +1182,15 @@ class ProxyHubEngine extends EventEmitter {
                         ipSource: sourceName,
                         result: `总 ${fetchResult.normalized}，新增 ${upsertStats.inserted}，更新 ${upsertStats.touched}，跳过 ${upsertStats.skipped || 0}`,
                         durationMs: Date.now() - startedAt,
-                        action: gateState.gateActive ? 'candidate闸门生效，仅更新存量代理' : '进入校验队列',
+                        action: sourceAction,
                     });
 
-                    if (gateState.gateActive || (gateState.gatedByThreshold && gateState.gateOverride)) {
+                    if (gateState.gateActive || (gateState.gatedByThreshold && gateState.gateOverride) || gateLimitedBySlots) {
                         const gateMessage = gateState.gateActive
                             ? `candidate 闸门生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
-                            : `candidate 闸门已手工 override：当前 ${gateState.candidateCount}，上限 ${gateState.max}`;
+                            : (gateState.gatedByThreshold && gateState.gateOverride
+                                ? `candidate 闸门已手工 override：当前 ${gateState.candidateCount}，上限 ${gateState.max}`
+                                : `candidate 闸门限量生效：当前 ${gateState.candidateCount}，上限 ${gateState.max}`);
                         this.db.insertProxyEvent({
                             timestamp: nowIso,
                             proxy_id: null,
@@ -1188,6 +1204,10 @@ class ProxyHubEngine extends EventEmitter {
                                 candidateMax: gateState.max,
                                 gateActive: gateState.gateActive,
                                 gateOverride: gateState.gateOverride,
+                                gateLimitedBySlots,
+                                remainingInsertSlots: Number.isFinite(remainingInsertSlots)
+                                    ? Math.max(0, Math.floor(remainingInsertSlots))
+                                    : null,
                                 inserted: upsertStats.inserted,
                                 touched: upsertStats.touched,
                                 skipped: upsertStats.skipped || 0,

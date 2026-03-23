@@ -368,10 +368,16 @@ class ProxyHubDb {
     // 0007_upsertSourceBatch_插入更新来源批次逻辑
     upsertSourceBatch(normalizedProxies, createName, source, batchId, nowIso, options = {}) {
         const allowInsert = options.allowInsert !== false;
+        const maxInsertRaw = Number(options.maxInsert);
+        const hasInsertCap = Number.isFinite(maxInsertRaw);
+        const initialRemainingInsert = hasInsertCap
+            ? Math.max(0, Math.floor(maxInsertRaw))
+            : Number.POSITIVE_INFINITY;
         const tx = this.db.transaction((items) => {
             let inserted = 0;
             let touched = 0;
             let skipped = 0;
+            let remainingInsert = initialRemainingInsert;
             for (const item of items) {
                 const uniqueKey = `${item.ip}:${item.port}:${item.protocol}`;
                 const existing = this.getProxyByKey(uniqueKey);
@@ -386,7 +392,7 @@ class ProxyHubDb {
                     continue;
                 }
 
-                if (!allowInsert) {
+                if (!allowInsert || remainingInsert <= 0) {
                     skipped += 1;
                     continue;
                 }
@@ -402,6 +408,9 @@ class ProxyHubDb {
                     now: nowIso,
                 });
                 inserted += 1;
+                if (Number.isFinite(remainingInsert)) {
+                    remainingInsert -= 1;
+                }
             }
             return { inserted, touched, skipped };
         });
