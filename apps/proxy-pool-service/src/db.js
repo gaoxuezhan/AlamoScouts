@@ -785,13 +785,50 @@ class ProxyHubDb {
     }
 
     // 0009_listProxiesForStateReview_列出状态巡检逻辑
-    listProxiesForStateReview(limit) {
-        return this.db.prepare(`
+    listProxiesForStateReview(limit, lifecycleQuota = { active: 0.45, reserve: 0.35, candidate: 0.20 }) {
+        const safeLimit = Math.max(0, Number(limit) || 0);
+        if (safeLimit === 0) return [];
+
+        const normalizedQuota = this.normalizeLifecycleQuota(lifecycleQuota);
+        const quotaCounts = this.pickQuotaCounts(safeLimit, normalizedQuota);
+
+        const actives = this.db.prepare(`
             SELECT * FROM proxies
-            WHERE lifecycle IN ('active', 'reserve', 'candidate')
+            WHERE lifecycle = 'active'
             ORDER BY updated_at ASC
             LIMIT ?
-        `).all(limit);
+        `).all(quotaCounts.active);
+
+        const reserves = this.db.prepare(`
+            SELECT * FROM proxies
+            WHERE lifecycle = 'reserve'
+            ORDER BY updated_at ASC
+            LIMIT ?
+        `).all(quotaCounts.reserve);
+
+        const candidates = this.db.prepare(`
+            SELECT * FROM proxies
+            WHERE lifecycle = 'candidate'
+            ORDER BY updated_at ASC
+            LIMIT ?
+        `).all(quotaCounts.candidate);
+
+        const merged = [...actives, ...reserves, ...candidates];
+        if (merged.length >= safeLimit) {
+            return merged.slice(0, safeLimit);
+        }
+
+        const filled = this.db.prepare(`
+            SELECT * FROM proxies
+            WHERE lifecycle IN ('active', 'reserve', 'candidate')
+              AND id NOT IN (${merged.length > 0 ? merged.map(() => '?').join(',') : '-1'})
+            ORDER BY
+                CASE lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC,
+                updated_at ASC
+            LIMIT ?
+        `).all(...merged.map((item) => item.id), safeLimit - merged.length);
+
+        return [...merged, ...filled];
     }
 
     // 0010_updateProxyById_更新代理标识逻辑

@@ -1911,7 +1911,9 @@ class ProxyHubEngine extends EventEmitter {
         this.isStateReviewRunning = true;
 
         try {
-            const list = this.db.listProxiesForStateReview(Math.max(30, this.config.threadPool.workers * 20));
+            const stateReviewLimit = Math.max(30, this.config.threadPool.workers * 20);
+            const stateReviewQuota = this.config.scheduler?.stateReviewLifecycleQuota;
+            const list = this.db.listProxiesForStateReview(stateReviewLimit, stateReviewQuota);
             const nowIso = this.now().toISOString();
 
             await runWithConcurrency(list, Math.max(2, this.config.threadPool.workers), async (proxy) => {

@@ -97,16 +97,16 @@ const basePolicyTemplate = {
     },
     lifecycle: {
         transitionWindowSize: 20,
-        minSamplesForTransition: 20,
+        minSamplesForTransition: 16,
         minStateStayMinutes: 30,
-        activeToReserveHealthThreshold: 50,
-        activeToReserveFailRatio: 0.80,
-        activeToReserveConsecutiveFail: 6,
-        reserveToActiveHealthThreshold: 60,
-        reserveToActiveSuccessRatio: 0.35,
-        reserveToActiveSuccessCount: 4,
-        reserveToActiveRecentL1SuccessWindowMin: 60,
-        reserveToActiveRecentL1BypassSuccessCount: 6,
+        activeToReserveHealthThreshold: 48,
+        activeToReserveFailRatio: 0.82,
+        activeToReserveConsecutiveFail: 7,
+        reserveToActiveHealthThreshold: 55,
+        reserveToActiveSuccessRatio: 0.30,
+        reserveToActiveSuccessCount: 3,
+        reserveToActiveRecentL1SuccessWindowMin: 120,
+        reserveToActiveRecentL1BypassSuccessCount: 5,
     },
     valueModel: {
         combatPointCap: 1200,
@@ -213,8 +213,8 @@ const activeProfile = ['production', 'soak'].includes(policyProfileRaw)
     : 'production';
 
 const battleL1LifecycleQuotaByProfile = {
-    production: { active: 0.50, reserve: 0.20, candidate: 0.30 },
-    soak: { active: 0.50, reserve: 0.20, candidate: 0.30 },
+    production: { active: 0.50, reserve: 0.35, candidate: 0.15 },
+    soak: { active: 0.50, reserve: 0.35, candidate: 0.15 },
 };
 
 const l2LookbackByProfile = {
@@ -287,6 +287,10 @@ const lifecycleQuotaFromEnv = parseLifecycleQuota(
 const resolvedLifecycleQuota = hasLifecycleQuotaEnv
     ? lifecycleQuotaFromEnv
     : (hasCandidateQuotaEnv ? undefined : defaultLifecycleQuota);
+const resolvedStateReviewLifecycleQuota = parseLifecycleQuota(
+    process.env.PROXY_HUB_STATE_REVIEW_LIFECYCLE_QUOTA,
+    { active: 0.45, reserve: 0.35, candidate: 0.20 },
+);
 
 const defaultBranchingRules = [
     {
@@ -452,16 +456,17 @@ module.exports = {
     scheduler: {
         sourceSyncMs: Number(process.env.PROXY_HUB_SOURCE_SYNC_MS || 120_000),
         stateReviewMs: Number(process.env.PROXY_HUB_STATE_REVIEW_MS || 30_000),
+        stateReviewLifecycleQuota: deepClone(resolvedStateReviewLifecycleQuota),
         snapshotPersistMs: Number(process.env.PROXY_HUB_SNAPSHOT_MS || 60_000),
         maxValidationPerCycle: Number(process.env.PROXY_HUB_MAX_VALIDATE || 180),
     },
     candidateControl: {
-        max: Number(process.env.PROXY_HUB_CANDIDATE_MAX || 3000),
+        max: Number(process.env.PROXY_HUB_CANDIDATE_MAX || 1500),
         gateOverride: toBool(process.env.PROXY_HUB_CANDIDATE_GATE_OVERRIDE, false),
         sweepMs: Number(process.env.PROXY_HUB_CANDIDATE_SWEEP_MS || 900_000),
-        staleHours: Number(process.env.PROXY_HUB_CANDIDATE_STALE_HOURS || 24),
+        staleHours: Number(process.env.PROXY_HUB_CANDIDATE_STALE_HOURS || 18),
         staleMinSamples: Number(process.env.PROXY_HUB_CANDIDATE_STALE_MIN_SAMPLES || 3),
-        timeoutHours: Number(process.env.PROXY_HUB_CANDIDATE_TIMEOUT_HOURS || 72),
+        timeoutHours: Number(process.env.PROXY_HUB_CANDIDATE_TIMEOUT_HOURS || 48),
         maxRetirePerCycle: Number(process.env.PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE || 2000),
     },
     failureBackoff: {
