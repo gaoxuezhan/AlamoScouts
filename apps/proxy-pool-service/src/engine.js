@@ -1163,7 +1163,9 @@ class ProxyHubEngine extends EventEmitter {
                         nowIso,
                         upsertOptions,
                     );
-                    const gateLimitedBySlots = hasInsertCap && Number(upsertStats.skipped || 0) > 0;
+                    const gateLimitedBySlots = !gateState.gateActive
+                        && hasInsertCap
+                        && Number(upsertStats.skipped || 0) > 0;
                     const sourceAction = gateState.gateActive
                         ? 'candidate闸门生效，仅更新存量代理'
                         : (gateLimitedBySlots
