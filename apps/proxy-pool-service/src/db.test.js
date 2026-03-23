@@ -963,6 +963,51 @@ test('state review selector should keep active and reserve coverage under candid
     cleanup(h);
 });
 
+test('state review selector should return merged slice when quota buckets already satisfy limit', () => {
+    const h = createDb();
+    const now = '2026-03-16T12:00:00.000Z';
+
+    h.db.upsertSourceBatch(
+        Array.from({ length: 24 }, (_, index) => ({
+            ip: `28.8.8.${index + 1}`,
+            port: 80,
+            protocol: 'http',
+        })),
+        (() => {
+            let i = 0;
+            return () => `状态巡检-命中分支-${++i}`;
+        })(),
+        'src-state-review-merged',
+        'batch-state-review-merged',
+        now,
+    );
+
+    const all = h.db.getProxyList({ limit: 40 });
+    for (let i = 0; i < all.length; i += 1) {
+        let lifecycle = 'candidate';
+        if (i < 10) lifecycle = 'active';
+        else if (i < 20) lifecycle = 'reserve';
+        h.db.updateProxyById(all[i].id, {
+            lifecycle,
+            updated_at: new Date(Date.parse(now) + i * 1000).toISOString(),
+        });
+    }
+
+    const selected = h.db.listProxiesForStateReview(10, { active: 0.4, reserve: 0.4, candidate: 0.2 });
+    const counts = selected.reduce((acc, item) => {
+        const key = String(item.lifecycle || '');
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+    }, {});
+
+    assert.equal(selected.length, 10);
+    assert.equal(counts.active, 4);
+    assert.equal(counts.reserve, 4);
+    assert.equal(counts.candidate, 2);
+
+    cleanup(h);
+});
+
 test('retirement stats APIs should return count and daily series', () => {
     const h = createDb();
     const now = '2026-03-16T12:00:00.000Z';
