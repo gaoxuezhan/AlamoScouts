@@ -158,7 +158,7 @@ function buildEventDetails(trigger, metrics, extra = {}) {
 }
 
 // 0093_evaluateCombat_执行evaluateCombat相关逻辑
-function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1' }) {
+function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1', retirementStage = stage }) {
     const nowMs = Date.parse(nowIso);
     const policy = config.policy;
     const scoring = policy.scoring || {};
@@ -172,6 +172,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     const updates = {};
     const events = [];
     const awards = [];
+    const retirementStageText = String(retirementStage || stage || '').toLowerCase();
 
     const windowRecords = safeParseJson(proxy.recent_window_json, []);
     const honorHistory = safeParseJson(proxy.honor_history_json, []);
@@ -217,7 +218,7 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     let nextRiskySuccess = proxy.risky_success_count || 0;
     let nextBattleSuccess = proxy.battle_success_count || 0;
     let nextBattleFail = proxy.battle_fail_count || 0;
-    const isBattleStage = stage === 'l1' || stage === 'l2';
+    const isBattleStage = stage === 'l1' || stage === 'l2' || stage === 'l3';
 
     if (outcome === 'success') {
         nextSuccess += 1;
@@ -356,6 +357,13 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     const technicalEligible = Array.isArray(retirement.technicalEligibleLifecycles)
         ? retirement.technicalEligibleLifecycles
         : ['active', 'reserve'];
+    const l3FailFastEligible = Array.isArray(retirement.l3FailFastEligibleLifecycles)
+        ? retirement.l3FailFastEligibleLifecycles
+        : ['candidate'];
+    const l3FailFastThresholdRaw = Number(retirement.l3ConsecutiveFailThreshold);
+    const l3FailFastThreshold = Number.isFinite(l3FailFastThresholdRaw)
+        ? Math.max(0, Math.round(l3FailFastThresholdRaw))
+        : 0;
     const overallSuccessRatio = nextTotalSamples > 0 ? nextSuccess / nextTotalSamples : 0;
     const applyReserveGuard = (retireType) => {
         if (preferReserveBeforeRetire && nextLifecycle === 'active') {
@@ -382,7 +390,15 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
     };
 
     if (nextLifecycle !== 'retired') {
-        if (nextDiscipline < Number(retirement.disciplineThreshold || 40) || nextInvalid >= Number(retirement.disciplineInvalidCount || 5)) {
+        if (
+            retirementStageText === 'l3'
+            && outcome !== 'success'
+            && l3FailFastThreshold > 0
+            && l3FailFastEligible.includes(proxy.lifecycle || 'candidate')
+            && nextConsecutiveFail >= l3FailFastThreshold
+        ) {
+            applyReserveGuard(RETIREMENT_TYPES.L3_FAIL_FAST);
+        } else if (nextDiscipline < Number(retirement.disciplineThreshold || 40) || nextInvalid >= Number(retirement.disciplineInvalidCount || 5)) {
             applyReserveGuard(RETIREMENT_TYPES.DISCIPLINE);
         } else if (
             ratios.regular.samples >= Number(retirement.battleDamageMinSamples || 20)
@@ -413,7 +429,9 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
                 ? 'retire_battle_damage'
                 : retiredType === RETIREMENT_TYPES.TECHNICAL
                     ? 'retire_technical'
-                    : 'retire_honor';
+                    : retiredType === RETIREMENT_TYPES.L3_FAIL_FAST
+                        ? 'retire_l3_fail_fast'
+                        : 'retire_honor';
         events.push({
             event_type: 'retirement',
             message: `退伍：${proxy.display_name} (${retiredType})`,
@@ -425,6 +443,9 @@ function evaluateCombat({ proxy, outcome, latencyMs, nowIso, config, stage = 'l1
                 totalSamples: nextTotalSamples,
                 overallSuccessRatio: Number(overallSuccessRatio.toFixed(4)),
                 healthScore: Number(nextHealth.toFixed(2)),
+                retirementStage: retirementStageText,
+                consecutiveFail: nextConsecutiveFail,
+                l3FailFastThreshold,
             }, {
                 type: retiredType,
             }),

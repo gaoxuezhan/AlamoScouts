@@ -46,6 +46,8 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_FAILURE_BACKOFF_L2_MS',
         'PROXY_HUB_FAILURE_BACKOFF_MULTIPLIER',
         'PROXY_HUB_FAILURE_BACKOFF_MAX_MS',
+        'PROXY_HUB_RETIRE_L3_CONSECUTIVE_FAIL',
+        'PROXY_HUB_RETIRE_L3_FAST_LIFECYCLES',
         'PROXY_HUB_SOURCE_NAME',
         'PROXY_HUB_SOURCE_URL',
         'PROXY_HUB_SOURCE_ENABLED',
@@ -465,6 +467,18 @@ test('config should accept soak policy profile from env', { concurrency: false }
     });
     assert.equal(config.rollout.activeProfile, 'soak');
     assert.equal(config.battle.l1LifecycleQuota.candidate, 0.15);
+    assert.equal(config.policy.retirement.l3ConsecutiveFailThreshold, 5);
+    assert.deepEqual(config.policy.retirement.l3FailFastEligibleLifecycles, ['candidate']);
+});
+
+test('config should parse l3 fast-retire env overrides', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_POLICY_PROFILE: 'SOAK',
+        PROXY_HUB_RETIRE_L3_CONSECUTIVE_FAIL: '4',
+        PROXY_HUB_RETIRE_L3_FAST_LIFECYCLES: 'candidate,reserve',
+    });
+    assert.equal(config.policy.retirement.l3ConsecutiveFailThreshold, 4);
+    assert.deepEqual(config.policy.retirement.l3FailFastEligibleLifecycles, ['candidate', 'reserve']);
 });
 
 test('config should keep production profile when profile env is explicitly production', { concurrency: false }, () => {
