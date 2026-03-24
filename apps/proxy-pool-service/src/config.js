@@ -90,6 +90,11 @@ const basePolicyTemplate = {
         technicalMinSamples: 80,
         technicalSuccessRatio: 0.08,
         technicalEligibleLifecycles: ['active', 'reserve'],
+        l3ConsecutiveFailThreshold: Number(process.env.PROXY_HUB_RETIRE_L3_CONSECUTIVE_FAIL || 0),
+        l3FailFastEligibleLifecycles: parseCsvListEnv(
+            process.env.PROXY_HUB_RETIRE_L3_FAST_LIFECYCLES,
+            ['candidate'],
+        ),
         battleDamageFailRatio: 0.85,
         battleDamageMinSamples: 20,
         honorMinServiceHours: 720,
@@ -213,6 +218,11 @@ const policyProfiles = {
             technicalMinSamples: 12,
             technicalSuccessRatio: 0.20,
             technicalEligibleLifecycles: ['active', 'reserve', 'candidate'],
+            l3ConsecutiveFailThreshold: Number(process.env.PROXY_HUB_RETIRE_L3_CONSECUTIVE_FAIL || 5),
+            l3FailFastEligibleLifecycles: parseCsvListEnv(
+                process.env.PROXY_HUB_RETIRE_L3_FAST_LIFECYCLES,
+                ['candidate'],
+            ),
             battleDamageFailRatio: 0.72,
             battleDamageMinSamples: 8,
         },

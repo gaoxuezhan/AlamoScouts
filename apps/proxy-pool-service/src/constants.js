@@ -6,6 +6,7 @@ const RETIREMENT_TYPES = {
     BATTLE_DAMAGE: '战损退伍',
     DISCIPLINE: '纪律退伍',
     TECHNICAL: '技术退伍',
+    L3_FAIL_FAST: '筛选退伍',
 };
 
 const HONOR_TYPES = {

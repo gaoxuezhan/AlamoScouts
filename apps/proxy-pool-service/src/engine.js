@@ -1491,6 +1491,7 @@ class ProxyHubEngine extends EventEmitter {
             nowIso,
             config: this.config,
             stage: combatStage,
+            retirementStage: branchingStage,
         });
         const branchTransition = resolveBranchingTransition({
             proxy: currentProxy,

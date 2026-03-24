@@ -372,6 +372,113 @@ test('technical retirement should trigger on low success ratio', () => {
     assert.equal(result.updates.retired_type, '技术退伍');
 });
 
+test('l3 fail-fast retirement should trigger on configured consecutive failures', () => {
+    const cfg = baseConfig();
+    cfg.policy.retirement.l3ConsecutiveFailThreshold = 3;
+    cfg.policy.retirement.l3FailFastEligibleLifecycles = ['candidate'];
+    const now = new Date().toISOString();
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'candidate',
+        consecutive_fail: 2,
+        total_samples: 2,
+        success_count: 0,
+    };
+
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'network_error',
+        latencyMs: 1200,
+        nowIso: now,
+        config: cfg,
+        stage: 'l2',
+        retirementStage: 'l3',
+    });
+
+    assert.equal(result.updates.lifecycle, 'retired');
+    assert.equal(result.updates.retired_type, '筛选退伍');
+    assert.equal(result.events.some((item) => item.event_type === 'retirement' && item.details.trigger === 'retire_l3_fail_fast'), true);
+});
+
+test('l3 fail-fast retirement should not trigger on non-l3 stage', () => {
+    const cfg = baseConfig();
+    cfg.policy.retirement.l3ConsecutiveFailThreshold = 3;
+    cfg.policy.retirement.l3FailFastEligibleLifecycles = ['candidate'];
+    const now = new Date().toISOString();
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'candidate',
+        consecutive_fail: 2,
+        total_samples: 2,
+        success_count: 0,
+    };
+
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'network_error',
+        latencyMs: 1200,
+        nowIso: now,
+        config: cfg,
+        stage: 'l2',
+        retirementStage: 'l2',
+    });
+
+    assert.equal(result.updates.lifecycle, 'candidate');
+    assert.equal(result.updates.retired_type, null);
+});
+
+test('l3 fail-fast retirement should skip when lifecycle is not eligible', () => {
+    const cfg = baseConfig();
+    cfg.policy.retirement.l3ConsecutiveFailThreshold = 3;
+    cfg.policy.retirement.l3FailFastEligibleLifecycles = ['reserve'];
+    const now = new Date().toISOString();
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'candidate',
+        consecutive_fail: 2,
+        total_samples: 2,
+        success_count: 0,
+    };
+
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'network_error',
+        latencyMs: 1200,
+        nowIso: now,
+        config: cfg,
+        stage: 'l2',
+        retirementStage: 'l3',
+    });
+
+    assert.equal(result.updates.lifecycle, 'candidate');
+    assert.equal(result.updates.retired_type, null);
+});
+
+test('retirement event should keep empty retirement stage text when stage inputs are empty', () => {
+    const cfg = baseConfig();
+    cfg.policy.retirement.disciplineThreshold = 100;
+    const now = new Date().toISOString();
+    const proxy = {
+        ...baseProxy(),
+        lifecycle: 'candidate',
+        discipline_score: 0,
+    };
+
+    const result = evaluateCombat({
+        proxy,
+        outcome: 'invalid_feedback',
+        latencyMs: 0,
+        nowIso: now,
+        config: cfg,
+        stage: '',
+        retirementStage: '',
+    });
+
+    const retirementEvent = result.events.find((item) => item.event_type === 'retirement');
+    assert.equal(Boolean(retirementEvent), true);
+    assert.equal(retirementEvent.details.metrics.retirementStage, '');
+});
+
 test('honor retirement should trigger when contribution is high', () => {
     const cfg = baseConfig();
     const proxy = {
@@ -1119,6 +1226,34 @@ test('combat should fallback to empty honors when legacy and primary honors are 
 
     assert.equal(result.awards.length, 0);
     assert.deepEqual(JSON.parse(result.updates.honor_active_json), []);
+});
+
+test('discipline guard fallback thresholds should keep guard honor inactive', () => {
+    const cfg = baseConfig();
+    cfg.policy.honors.disciplineGuardMinScore = 0;
+    delete cfg.policy.honors.disciplineGuardMaxInvalid;
+    delete cfg.policy.honors.disciplineGuardMinSamples;
+    const nowIso = '2026-03-16T12:00:00.000Z';
+
+    const result = evaluateCombat({
+        proxy: {
+            ...baseProxy(),
+            lifecycle: 'active',
+            discipline_score: 100,
+            invalid_feedback_count: -2,
+            total_samples: 5,
+            success_count: 5,
+            honor_history_json: JSON.stringify(['铁纪标兵']),
+        },
+        outcome: 'success',
+        latencyMs: 800,
+        nowIso,
+        config: cfg,
+        stage: 'l2',
+    });
+
+    const active = JSON.parse(result.updates.honor_active_json);
+    assert.equal(active.includes('铁纪标兵'), false);
 });
 
 test('combat should cover severe-window and health-threshold fallback branches', () => {
