@@ -292,7 +292,7 @@ test('writeFinalReport should produce markdown file', async () => {
             { display_name: '价值-2' },
         ]);
         const content = fs.readFileSync(runtime.reportFile, 'utf8');
-        assert.equal(content.includes('ProxyHub V1 10h Soak 报告'), true);
+    assert.equal(content.includes('ProxyHub V2 10h Soak 报告'), true);
         assert.equal(content.includes('IP价值榜 Top 10'), true);
         assert.equal(content.includes('价值分 0.00'), true);
     });

@@ -52,7 +52,7 @@ function createConfig(port = 0) {
         },
         validation: { allowedProtocols: ['http'], maxTimeoutMs: 1000 },
         rollout: {
-            version: 'v1.1',
+            version: 'v2',
             activeProfile: 'production',
             features: {
                 stageWeighting: true,

@@ -515,7 +515,7 @@ test('l2 mastery and discipline guard honors should be awarded and active', () =
     assert.equal(activeHonors.includes('铁纪标兵'), true);
 });
 
-test('combat events should include v1.1 details version', () => {
+test('combat events should include v2 details version', () => {
     const cfg = baseConfig();
     const nowIso = new Date().toISOString();
     const proxy = {
@@ -535,7 +535,7 @@ test('combat events should include v1.1 details version', () => {
 
     const promotion = result.events.find((item) => item.event_type === 'promotion');
     assert.equal(Boolean(promotion), true);
-    assert.equal(promotion.details.version, 'v1.1');
+    assert.equal(promotion.details.version, 'v2');
 });
 
 test('invalid json in history fields should fallback safely', () => {

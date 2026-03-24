@@ -833,6 +833,8 @@ test('battle APIs should persist run details and support L1/L2/L3 candidate sele
     assert.equal(l3WithNullableProtocol.some((item) => item.id === all[1].id), true);
     const l3AllCandidates = h.db.listProxiesForBattleL3(5, 10, []);
     assert.equal(l3AllCandidates.some((item) => item.id === all[2].id), true);
+    const l3WithoutL2Gate = h.db.listProxiesForBattleL3(5, 10, ['http'], now, { requireRecentL2Success: false });
+    assert.equal(l3WithoutL2Gate.some((item) => item.id === all[0].id), true);
     const l3FallbackArgs = h.db.listProxiesForBattleL3(5, 'bad', null, 'invalid-now');
     assert.equal(Array.isArray(l3FallbackArgs), true);
     assert.deepEqual(h.db.listProxiesForBattleL3(0, 10, ['http']), []);

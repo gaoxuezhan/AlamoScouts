@@ -1,7 +1,7 @@
 ﻿const { RANKS, RETIREMENT_TYPES, HONOR_TYPES } = require('./constants');
 const { computeProxyValue } = require('./value-model');
 
-const EVENT_VERSION = 'v1.1';
+const EVENT_VERSION = 'v2';
 
 // 0081_clamp_限制逻辑
 function clamp(value, min, max) {

@@ -28,7 +28,7 @@ function ensureRolloutConfig(config = {}) {
         config.rollout = {};
     }
 
-    config.rollout.version = String(config.rollout.version || 'v1.1');
+    config.rollout.version = String(config.rollout.version || 'v2');
     config.rollout.activeProfile = String(config.rollout.activeProfile || 'production');
     config.rollout.features = {
         ...DEFAULT_FEATURES,

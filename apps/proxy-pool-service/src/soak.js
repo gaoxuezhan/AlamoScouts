@@ -624,7 +624,7 @@ function createSoakRuntime(options = {}) {
     function writeFinalReport(endAt, valueBoard = []) {
         const uptimeRatio = state.samples > 0 ? (state.healthOkSamples / state.samples) * 100 : 0;
         const lines = [
-            `# ProxyHub V1 ${durationHours}h Soak 报告`,
+            `# ProxyHub V2 ${durationHours}h Soak 报告`,
             '',
             `- 启动时间: ${startedAt.toISOString()}`,
             `- 结束时间: ${endAt.toISOString()}`,
@@ -656,7 +656,7 @@ function createSoakRuntime(options = {}) {
             '## 残留风险清单',
             '- 若代理来源波动较大，抓源可能出现短期失败。',
             '- 校验当前为 TCP 连通性，未做全协议端到端可用性验证。',
-            '- V1 未对接抓取端 lease/feedback，实战画像依赖模拟评分。',
+            '- V2 当前仍未对接抓取端 lease/feedback，实战画像依赖模拟评分。',
         ];
 
         fsImpl.writeFileSync(reportFile, lines.join('\n'), 'utf8');
