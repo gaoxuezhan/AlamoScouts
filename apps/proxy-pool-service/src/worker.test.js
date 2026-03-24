@@ -26,6 +26,7 @@ const {
     isFallbackContentValid,
     runBattleL2Task,
     runBattleL3BrowserTask,
+    runBattleL4BrowserTask,
     handleTask,
     attachWorkerListener,
 } = require('./worker');
@@ -901,6 +902,22 @@ test('battle L3 browser task should cover fallback branch paths', async () => {
     assert.equal(invalidTargetsType.reason, 'missing_targets');
 });
 
+test('battle L4 browser task should reuse browser checker but mark stage as l4', async () => {
+    const result = await runBattleL4BrowserTask({
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 'ly-browser', url: 'https://www.ly.com/flights/home' }],
+        timeoutMs: 50,
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { statusCode: 200, body: 'ly browser content long enough for assert' },
+        ]),
+    });
+    assert.equal(result.stage, 'l4');
+    assert.equal(result.outcome, 'success');
+    assert.equal(result.runs[0].target, 'ly-browser');
+});
+
 test('stateTransitionTask should return ok', () => {
     assert.deepEqual(stateTransitionTask(), { ok: true });
 });
@@ -955,6 +972,17 @@ test('handleTask should dispatch all task types and throw on unknown type', asyn
         ]),
     });
     assert.equal(l3Result.stage, 'l3');
+
+    const l4Result = await handleTask('battle-l4-browser', {
+        proxy: { protocol: 'http', ip: '1.1.1.1', port: 80 },
+        targets: [{ name: 'ly', url: 'https://www.ly.com' }],
+        allowedProtocols: ['http'],
+    }, {
+        launchBrowser: createFakeBrowserLauncher([
+            { statusCode: 200, body: 'ly browser content long enough for assert' },
+        ]),
+    });
+    assert.equal(l4Result.stage, 'l4');
 
     const transResult = await handleTask('state-transition', {});
     assert.equal(transResult.ok, true);

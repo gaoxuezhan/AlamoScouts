@@ -702,6 +702,17 @@ test('value board API should sort by value and parse breakdown and honor fields'
         reason: 'err',
         details: {},
     });
+    h.db.insertBattleTestRun({
+        timestamp: now,
+        proxy_id: all[0].id,
+        stage: 'l4',
+        target: 'l4-a',
+        outcome: 'success',
+        status_code: 200,
+        latency_ms: 55,
+        reason: 'ok',
+        details: {},
+    });
 
     const board = h.db.getValueBoard(10);
     assert.equal(board.length, 2);
@@ -719,6 +730,8 @@ test('value board API should sort by value and parse breakdown and honor fields'
     assert.equal(board[0].l2_fail_count, 1);
     assert.equal(board[0].l3_success_count, 0);
     assert.equal(board[0].l3_fail_count, 1);
+    assert.equal(board[0].l4_success_count, 1);
+    assert.equal(board[0].l4_fail_count, 0);
     assert.equal(board[0].native_place, '未知');
     assert.equal(board[0].native_lookup_status, 'pending');
     assert.equal(board[1].l0_success_count, 0);
@@ -729,6 +742,8 @@ test('value board API should sort by value and parse breakdown and honor fields'
     assert.equal(board[1].l2_fail_count, 0);
     assert.equal(board[1].l3_success_count, 0);
     assert.equal(board[1].l3_fail_count, 0);
+    assert.equal(board[1].l4_success_count, 0);
+    assert.equal(board[1].l4_fail_count, 0);
     assert.equal(board[1].native_place, '中国-北京');
     assert.equal(board[1].native_lookup_status, 'resolved');
     assert.equal(board[1].native_lookup_raw_json.includes('"country":"中国"'), true);

@@ -162,9 +162,8 @@ function getValueBoardHeaders(rankHelp) {
     { label: '成功率', help: '历史成功次数除以总样本数，反映总体能不能跑通。' },
     { label: '战场胜率', help: '战场测试里成功次数除以战场总次数，反映真实战场好不好用。' },
     { label: 'L0', help: 'L0' },
-    { label: 'L1', help: 'L1' },
-    { label: 'L2', help: 'L2' },
     { label: 'L3', help: 'L3' },
+    { label: 'L4', help: 'L4' },
     { label: '激活荣誉', help: '当前生效中的荣誉标签，代表这个IP最近在某些维度表现突出。' },
     { label: '地址', help: 'IP、端口和协议组合地址，排障和复现问题时最直接。' },
     { label: '来源', help: '这个IP来自哪个抓取源，可用来判断源质量。' },
@@ -260,9 +259,8 @@ function renderValueBoardTable() {
       ? '未知'
       : normalizeNativeTooltipText(sanitizeNativeReadableText(x.native_lookup_readable_text));
     const l0Total = Number(x.l0_success_count || 0) + Number(x.l0_fail_count || 0);
-    const l1Total = Number(x.l1_success_count || 0) + Number(x.l1_fail_count || 0);
-    const l2Total = Number(x.l2_success_count || 0) + Number(x.l2_fail_count || 0);
     const l3Total = Number(x.l3_success_count || 0) + Number(x.l3_fail_count || 0);
+    const l4Total = Number(x.l4_success_count || 0) + Number(x.l4_fail_count || 0);
     return ''
       + '<tr>'
       + '<td>' + entry.rank + '</td>'
@@ -275,9 +273,8 @@ function renderValueBoardTable() {
       + '<td>' + fmtPercent(x.success_ratio) + '</td>'
       + '<td>' + fmtPercent(x.battle_ratio) + '</td>'
       + '<td class="mono">' + fmtSuccessTotalPercent(x.l0_success_count, l0Total) + '</td>'
-      + '<td class="mono">' + fmtSuccessTotalPercent(x.l1_success_count, l1Total) + '</td>'
-      + '<td class="mono">' + fmtSuccessTotalPercent(x.l2_success_count, l2Total) + '</td>'
       + '<td class="mono">' + fmtSuccessTotalPercent(x.l3_success_count, l3Total) + '</td>'
+      + '<td class="mono">' + fmtSuccessTotalPercent(x.l4_success_count, l4Total) + '</td>'
       + '<td>' + esc(honorText) + '</td>'
       + '<td class="mono">' + esc(address) + '</td>'
       + '<td>' + esc(x.source) + '</td>'

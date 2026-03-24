@@ -771,6 +771,15 @@ async function runBattleL3BrowserTask(payload, deps = {}) {
     };
 }
 
+// 0312_runBattleL4BrowserTask_执行战场L4浏览器实战逻辑
+async function runBattleL4BrowserTask(payload, deps = {}) {
+    const l3Result = await runBattleL3BrowserTask(payload, deps);
+    return {
+        ...l3Result,
+        stage: 'l4',
+    };
+}
+
 // 0158_handleTask_处理任务逻辑
 async function handleTask(type, payload, deps = {}) {
     if (type === 'fetch-source') {
@@ -790,6 +799,9 @@ async function handleTask(type, payload, deps = {}) {
     }
     if (type === 'battle-l3-browser') {
         return runBattleL3BrowserTask(payload, deps);
+    }
+    if (type === 'battle-l4-browser') {
+        return runBattleL4BrowserTask(payload, deps);
     }
     if (type === 'state-transition') {
         return stateTransitionTask(payload, deps);
@@ -841,6 +853,7 @@ module.exports = {
     isFallbackContentValid,
     runBattleL2Task,
     runBattleL3BrowserTask,
+    runBattleL4BrowserTask,
     handleTask,
     attachWorkerListener,
 };

@@ -1299,7 +1299,9 @@ class ProxyHubDb {
                 COALESCE(stage_stats.l2_success_count, 0) AS l2_success_count,
                 COALESCE(stage_stats.l2_fail_count, 0) AS l2_fail_count,
                 COALESCE(stage_stats.l3_success_count, 0) AS l3_success_count,
-                COALESCE(stage_stats.l3_fail_count, 0) AS l3_fail_count
+                COALESCE(stage_stats.l3_fail_count, 0) AS l3_fail_count,
+                COALESCE(stage_stats.l4_success_count, 0) AS l4_success_count,
+                COALESCE(stage_stats.l4_fail_count, 0) AS l4_fail_count
             FROM proxies
             AS p
             LEFT JOIN (
@@ -1310,7 +1312,9 @@ class ProxyHubDb {
                     SUM(CASE WHEN stage = 'l2' AND outcome = 'success' THEN 1 ELSE 0 END) AS l2_success_count,
                     SUM(CASE WHEN stage = 'l2' AND outcome IN ('blocked', 'timeout', 'network_error', 'invalid_feedback') THEN 1 ELSE 0 END) AS l2_fail_count,
                     SUM(CASE WHEN stage = 'l3' AND outcome = 'success' THEN 1 ELSE 0 END) AS l3_success_count,
-                    SUM(CASE WHEN stage = 'l3' AND outcome IN ('blocked', 'timeout', 'network_error', 'invalid_feedback') THEN 1 ELSE 0 END) AS l3_fail_count
+                    SUM(CASE WHEN stage = 'l3' AND outcome IN ('blocked', 'timeout', 'network_error', 'invalid_feedback') THEN 1 ELSE 0 END) AS l3_fail_count,
+                    SUM(CASE WHEN stage = 'l4' AND outcome = 'success' THEN 1 ELSE 0 END) AS l4_success_count,
+                    SUM(CASE WHEN stage = 'l4' AND outcome IN ('blocked', 'timeout', 'network_error', 'invalid_feedback') THEN 1 ELSE 0 END) AS l4_fail_count
                 FROM battle_test_runs
                 GROUP BY proxy_id
             ) AS stage_stats

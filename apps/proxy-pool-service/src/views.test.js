@@ -48,19 +48,22 @@ test('renderProxyAdminPage should inject refresh interval', () => {
     assert.equal(html.includes("原始JSON"), false);
     assert.equal(html.includes("'<td title=\"' + esc(nativeTip) + '\">' + esc(nativePlace) + '</td>'"), true);
     assert.equal(html.includes("label: 'L0'"), true);
-    assert.equal(html.includes("label: 'L1'"), true);
-    assert.equal(html.includes("label: 'L2'"), true);
     assert.equal(html.includes("label: 'L3'"), true);
+    assert.equal(html.includes("label: 'L4'"), true);
+    assert.equal(html.includes("label: 'L1'"), false);
+    assert.equal(html.includes("label: 'L2'"), false);
     assert.equal(html.includes("help: 'L0'"), true);
-    assert.equal(html.includes("help: 'L1'"), true);
-    assert.equal(html.includes("help: 'L2'"), true);
     assert.equal(html.includes("help: 'L3'"), true);
+    assert.equal(html.includes("help: 'L4'"), true);
+    assert.equal(html.includes("help: 'L1'"), false);
+    assert.equal(html.includes("help: 'L2'"), false);
     assert.equal(html.includes('function fmtSuccessTotalPercent(success, total)'), true);
     assert.equal(html.includes("toFixed(1)"), true);
     assert.equal(html.includes("fmtSuccessTotalPercent(x.l0_success_count, l0Total)"), true);
-    assert.equal(html.includes("fmtSuccessTotalPercent(x.l1_success_count, l1Total)"), true);
-    assert.equal(html.includes("fmtSuccessTotalPercent(x.l2_success_count, l2Total)"), true);
     assert.equal(html.includes("fmtSuccessTotalPercent(x.l3_success_count, l3Total)"), true);
+    assert.equal(html.includes("fmtSuccessTotalPercent(x.l4_success_count, l4Total)"), true);
+    assert.equal(html.includes("fmtSuccessTotalPercent(x.l1_success_count, l1Total)"), false);
+    assert.equal(html.includes("fmtSuccessTotalPercent(x.l2_success_count, l2Total)"), false);
 });
 
 test('renderRuntimeLogsPage should return static html', () => {

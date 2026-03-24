@@ -244,9 +244,9 @@ function resolveSourceFeeds(config = {}) {
 const DEFAULT_BRANCH_FAIL_OUTCOMES = ['blocked', 'timeout', 'network_error', 'invalid_feedback'];
 const DEFAULT_BRANCHING_RULES = [
     {
-        id: 'l2_promote_navy',
+        id: 'l3_promote_navy',
         priority: 10,
-        stage: 'l2',
+        stage: 'l3',
         outcomes: ['success'],
         from: ['陆军'],
         to: '海军',
@@ -254,18 +254,18 @@ const DEFAULT_BRANCHING_RULES = [
         eventType: 'branch_transfer',
     },
     {
-        id: 'l2_reset_navy_streak',
+        id: 'l3_reset_navy_streak',
         priority: 20,
-        stage: 'l2',
+        stage: 'l3',
         outcomes: ['success'],
         from: ['海军'],
         failStreakOp: 'reset',
         eventType: 'branch_streak_reset',
     },
     {
-        id: 'l2_fail_navy_fallback',
+        id: 'l3_fail_navy_fallback',
         priority: 30,
-        stage: 'l2',
+        stage: 'l3',
         outcomes: DEFAULT_BRANCH_FAIL_OUTCOMES,
         from: ['海军'],
         failStreakOp: 'increment',
@@ -274,9 +274,9 @@ const DEFAULT_BRANCHING_RULES = [
         eventType: 'branch_fallback',
     },
     {
-        id: 'l3_promote_seal',
+        id: 'l4_promote_seal',
         priority: 40,
-        stage: 'l3',
+        stage: 'l4',
         outcomes: ['success'],
         from: ['陆军', '海军', '海豹突击队'],
         to: '海豹突击队',
@@ -284,9 +284,9 @@ const DEFAULT_BRANCHING_RULES = [
         eventType: 'branch_transfer',
     },
     {
-        id: 'l3_fail_seal_fallback',
+        id: 'l4_fail_seal_fallback',
         priority: 50,
-        stage: 'l3',
+        stage: 'l4',
         outcomes: DEFAULT_BRANCH_FAIL_OUTCOMES,
         from: ['海豹突击队'],
         failStreakOp: 'increment',
@@ -700,6 +700,11 @@ class ProxyHubEngine extends EventEmitter {
     // 0304_isBattleL3ImmediateOnL0Success_判断L0成功后立即执行L3开关逻辑
     isBattleL3ImmediateOnL0Success() {
         return this.isBattleL3Enabled() && this.config?.battle?.l3?.immediateOnL0Success === true;
+    }
+
+    // 0313_isBattleL4Enabled_判断战场L4开关逻辑
+    isBattleL4Enabled() {
+        return this.isBattleEnabled() && this.config?.battle?.l4?.enabled === true;
     }
 
     // 0298_setSourceCycleThrottleFactor_设置抓源节流倍率逻辑
@@ -1640,6 +1645,60 @@ class ProxyHubEngine extends EventEmitter {
         });
     }
 
+    // 0315_applyBranchingOutcomeOnly_仅应用编制流转逻辑
+    async applyBranchingOutcomeOnly({
+        proxyId,
+        sourceName,
+        outcome,
+        nowIso,
+        stage = '编制',
+        branchingStage = 'l4',
+    }) {
+        const currentProxy = this.db.getProxyById(proxyId);
+        if (!currentProxy) {
+            return { ok: false, reason: 'proxy-missing' };
+        }
+
+        const branchTransition = resolveBranchingTransition({
+            proxy: currentProxy,
+            stage: branchingStage,
+            outcome,
+            config: this.config,
+        });
+        if (Object.keys(branchTransition.updates).length > 0) {
+            this.db.updateProxyById(proxyId, {
+                ...branchTransition.updates,
+                updated_at: nowIso,
+            });
+        }
+        const updatedProxy = this.db.getProxyById(proxyId) || currentProxy;
+
+        for (const event of branchTransition.events) {
+            this.db.insertProxyEvent({
+                timestamp: nowIso,
+                proxy_id: proxyId,
+                display_name: updatedProxy.display_name,
+                event_type: event.event_type,
+                level: EVENT_LEVEL.INFO,
+                message: event.message,
+                details: event.details,
+            });
+            this.logger.write({
+                event: '编制流转',
+                proxyName: updatedProxy.display_name,
+                ipSource: sourceName,
+                stage: '编制',
+                result: event.message,
+                reason: `${event.details.branchBefore} -> ${event.details.branchAfter}`,
+                action: '按规则自动调整',
+                details: event.details,
+            });
+        }
+
+        this.scheduleNativeLookup(updatedProxy, sourceName, nowIso);
+        return { ok: true, applied: branchTransition.events.length > 0 };
+    }
+
     // 0033_processProxy_处理代理逻辑
     async processProxy(proxy, sourceName) {
         const cycleStart = Date.now();
@@ -2009,6 +2068,9 @@ class ProxyHubEngine extends EventEmitter {
                 branchingStage: 'l3',
                 extraUpdates: battleUpdates,
             });
+            if (result.outcome === 'success' && this.isBattleL4Enabled()) {
+                await this.runBattleL4TaskForProxy(proxy, 'battle-l4-browser', this.config?.battle?.l4 || {});
+            }
             return { ok: true, outcome: result.outcome };
         } catch (error) {
             const latest = this.db.getProxyById(proxy.id) || proxy;
@@ -2035,6 +2097,62 @@ class ProxyHubEngine extends EventEmitter {
                 action: '已触发失败退避',
             });
             return { ok: false, reason: error?.message || 'battle-l3-task-error' };
+        }
+    }
+
+    // 0314_runBattleL4TaskForProxy_执行单代理L4测试逻辑（仅记录，不计分）
+    async runBattleL4TaskForProxy(proxy, sourceName = 'battle-l4-browser', l4Config = this.config?.battle?.l4 || {}) {
+        if (!this.isBattleL4Enabled()) {
+            return { ok: false, reason: 'battle-l4-disabled' };
+        }
+        const nowIso = this.now().toISOString();
+        try {
+            const result = await this.workerPool.runTask('battle-l4-browser', {
+                proxy: {
+                    ip: proxy.ip,
+                    port: proxy.port,
+                    protocol: proxy.protocol,
+                },
+                targets: l4Config.targets,
+                timeoutMs: l4Config.timeoutMs,
+                blockedStatusCodes: this.config.battle.blockedStatusCodes,
+                blockSignals: this.config.battle.blockSignals,
+                allowedProtocols: l4Config.allowedProtocols,
+            });
+
+            for (const run of result.runs || []) {
+                this.db.insertBattleTestRun({
+                    timestamp: nowIso,
+                    proxy_id: proxy.id,
+                    stage: 'l4',
+                    target: run.target,
+                    outcome: run.outcome,
+                    status_code: run.statusCode,
+                    latency_ms: run.latencyMs,
+                    reason: run.reason,
+                    details: run.details,
+                });
+            }
+            await this.applyBranchingOutcomeOnly({
+                proxyId: proxy.id,
+                sourceName,
+                outcome: result.outcome,
+                nowIso,
+                stage: '编制(L4)',
+                branchingStage: 'l4',
+            });
+            return { ok: true, outcome: result.outcome };
+        } catch (error) {
+            this.logger.write({
+                event: '战场测试L4失败',
+                proxyName: proxy.display_name,
+                ipSource: sourceName,
+                stage: '战场测试L4',
+                result: '异常',
+                reason: error?.message || 'battle-l4-task-error',
+                action: '仅记录，不计分',
+            });
+            return { ok: false, reason: error?.message || 'battle-l4-task-error' };
         }
     }
 
