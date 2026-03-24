@@ -36,6 +36,7 @@ function createConfig(dbPath) {
         scheduler: { sourceSyncMs: 10000, stateReviewMs: 10000, snapshotPersistMs: 10000, maxValidationPerCycle: 5 },
         battle: {
             enabled: false,
+            l3Only: false,
             l1SyncMs: 300000,
             l2SyncMs: 1800000,
             maxBattleL1PerCycle: 60,
@@ -45,6 +46,9 @@ function createConfig(dbPath) {
             timeoutMs: { l1: 5000, l2: 8000 },
             l3: {
                 enabled: true,
+                requireRecentL2Success: true,
+                immediateOnL0Success: false,
+                timerEnabled: true,
                 syncMs: 2700000,
                 maxPerCycle: 12,
                 concurrency: 3,
@@ -1421,6 +1425,75 @@ test('engine start should schedule battle timers when enabled', async () => {
     cleanupDb(h);
 });
 
+test('engine start should disable l3 timer in l3-only immediate mode', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.source.monosans.enabled = false;
+    h.config.battle.enabled = true;
+    h.config.battle.l3Only = true;
+    h.config.battle.l3.enabled = true;
+    h.config.battle.l3.timerEnabled = false;
+    h.config.battle.l3.immediateOnL0Success = true;
+
+    const workerPool = {
+        async runTask() {
+            return { ok: true };
+        },
+        getStatus() {
+            return {
+                workersTotal: 1,
+                workersBusy: 0,
+                queueSize: 0,
+                runningTasks: 0,
+                completedTasks: 0,
+                failedTasks: 0,
+                restartedWorkers: 0,
+                workers: [],
+            };
+        },
+    };
+
+    const oldSetInterval = global.setInterval;
+    const oldClearInterval = global.clearInterval;
+    const timers = [];
+    global.setInterval = (fn) => {
+        fn();
+        const timer = { id: timers.length + 1 };
+        timers.push(timer);
+        return timer;
+    };
+    global.clearInterval = () => {};
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T00:00:00.000Z') });
+    let l1Calls = 0;
+    let l2Calls = 0;
+    let l3Calls = 0;
+    engine.runBattleL1Cycle = async () => {
+        l1Calls += 1;
+    };
+    engine.runBattleL2Cycle = async () => {
+        l2Calls += 1;
+    };
+    engine.runBattleL3Cycle = async () => {
+        l3Calls += 1;
+    };
+
+    await engine.start();
+    await engine.stop();
+
+    global.setInterval = oldSetInterval;
+    global.clearInterval = oldClearInterval;
+
+    assert.equal(timers.length, 4);
+    assert.equal(l1Calls, 0);
+    assert.equal(l2Calls, 0);
+    assert.equal(l3Calls, 0);
+    assert.equal(logger.entries.some((item) => String(item.action || '').includes('L1')), false);
+    assert.equal(logger.entries.some((item) => String(item.action || '').includes('L2')), false);
+    assert.equal(logger.entries.some((item) => String(item.action || '').includes('L3 跟随L0串行触发')), true);
+    cleanupDb(h);
+});
+
 test('runSourceCycle should handle fetch errors', async () => {
     const h = createDbHandle();
     const logger = createLogger();
@@ -1744,6 +1817,59 @@ test('processProxy success should fallback latency to zero when missing', async 
     const latest = h.db.getProxyById(proxy.id);
     assert.equal(latest.success_count >= 1, true);
     assert.equal(logger.entries.some((e) => e.stage === '评分(L0回退)'), true);
+    cleanupDb(h);
+});
+
+test('processProxy should trigger L3 immediately after L0 success when enabled', async () => {
+    const h = createDbHandle();
+    const logger = createLogger();
+    h.config.battle.enabled = true;
+    h.config.battle.l3.enabled = true;
+    h.config.battle.l3.immediateOnL0Success = true;
+    h.config.battle.l3.requireRecentL2Success = false;
+
+    const now = new Date('2026-03-14T07:40:00.000Z').toISOString();
+    h.db.upsertSourceBatch(
+        [{ ip: '10.0.0.77', port: 8082, protocol: 'http' }],
+        () => '苍隼-直达L3-77',
+        'src',
+        'batch',
+        now,
+    );
+    const proxy = h.db.getProxyList({ limit: 1 })[0];
+
+    const callTypes = [];
+    const workerPool = {
+        async runTask(type) {
+            callTypes.push(type);
+            if (type === 'validate-proxy') {
+                return { ok: true, reason: 'connect_ok', latencyMs: 9 };
+            }
+            if (type === 'battle-l3-browser') {
+                return {
+                    stage: 'l3',
+                    outcome: 'success',
+                    latencyMs: 35,
+                    runs: [{ target: 'ly-browser', outcome: 'success', statusCode: 200, latencyMs: 35, reason: 'ok', details: {} }],
+                };
+            }
+            return { ok: true };
+        },
+        getStatus() {
+            return { workersTotal: 2, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config: h.config, db: h.db, workerPool, logger, now: () => new Date('2026-03-14T07:41:00.000Z') });
+    await engine.processProxy(proxy, 'src');
+
+    const runs = h.db.getBattleTestRuns(10);
+    assert.equal(callTypes.includes('validate-proxy'), true);
+    assert.equal(callTypes.includes('battle-l3-browser'), true);
+    assert.equal(runs.some((run) => run.stage === 'l3'), true);
+    assert.equal(logger.entries.some((e) => e.action === 'L0成功后立即执行L3'), true);
+    assert.equal(logger.entries.some((e) => e.stage === '评分(L0回退)'), false);
+
     cleanupDb(h);
 });
 
@@ -3176,6 +3302,51 @@ test('runBattleL3Cycle should return early when disabled or there are no candida
 
     assert.equal(runTaskCalls, 0);
     assert.equal(engine.isBattleL3Running, false);
+});
+
+test('runBattleL3Cycle should disable recent L2 dependency in l3-only mode', async () => {
+    const logger = createLogger();
+    const config = createConfig(path.join(os.tmpdir(), 'proxyhub-engine-l3-only-options.db'));
+    config.battle.enabled = true;
+    config.battle.l3Only = true;
+    config.battle.l3.enabled = true;
+
+    let capturedOptions = null;
+    let runTaskCalls = 0;
+    const db = {
+        listProxiesForBattleL3(limit, lookbackMinutes, protocols, nowIso, options) {
+            capturedOptions = options;
+            return [{ id: 1, ip: '10.0.0.9', port: 8080, protocol: 'http', display_name: 'L3-Only-1' }];
+        },
+        getProxyById() {
+            return { id: 1, battle_success_count: 0, battle_fail_count: 0 };
+        },
+        insertBattleTestRun() {},
+    };
+    const workerPool = {
+        async runTask(type) {
+            assert.equal(type, 'battle-l3-browser');
+            runTaskCalls += 1;
+            return {
+                stage: 'l3',
+                outcome: 'success',
+                latencyMs: 11,
+                runs: [],
+            };
+        },
+        getStatus() {
+            return { workersTotal: 1, workersBusy: 0, queueSize: 0, runningTasks: 0, completedTasks: 0, failedTasks: 0, restartedWorkers: 0, workers: [] };
+        },
+    };
+
+    const engine = new ProxyHubEngine({ config, db, workerPool, logger, now: () => new Date('2026-03-14T08:00:00.000Z') });
+    engine.started = true;
+    engine.applyCombatOutcome = async () => {};
+
+    await engine.runBattleL3Cycle();
+
+    assert.equal(runTaskCalls, 1);
+    assert.deepEqual(capturedOptions, { requireRecentL2Success: false });
 });
 
 test('runBattleL3Cycle should fallback l3 config object and concurrency defaults', async () => {

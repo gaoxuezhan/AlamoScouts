@@ -758,10 +758,17 @@ class ProxyHubDb {
     }
 
     // 0276_listProxiesForBattleL3_列出战场L3候选逻辑
-    listProxiesForBattleL3(limit, lookbackMinutes = 20, allowedProtocols = [], nowIso = new Date().toISOString()) {
+    listProxiesForBattleL3(
+        limit,
+        lookbackMinutes = 20,
+        allowedProtocols = [],
+        nowIso = new Date().toISOString(),
+        options = {},
+    ) {
         const safeLimit = Math.max(0, Number(limit) || 0);
         if (safeLimit === 0) return [];
         const safeNowIso = normalizeIso(nowIso);
+        const requireRecentL2Success = options?.requireRecentL2Success !== false;
 
         const cutoffIso = new Date(Date.parse(safeNowIso) - Math.max(1, Number(lookbackMinutes) || 1) * 60_000).toISOString();
         const protocolList = Array.isArray(allowedProtocols)
@@ -773,24 +780,39 @@ class ProxyHubDb {
             ? ` AND p.protocol IN (${protocolList.map(() => '?').join(',')})`
             : '';
 
+        if (requireRecentL2Success) {
+            return this.db.prepare(`
+                SELECT p.*
+                FROM proxies p
+                INNER JOIN (
+                    SELECT proxy_id, MAX(timestamp) AS latest_l2_success_at
+                    FROM battle_test_runs
+                    WHERE stage = 'l2' AND outcome = 'success' AND timestamp >= ?
+                    GROUP BY proxy_id
+                ) l2 ON l2.proxy_id = p.id
+                WHERE p.lifecycle != 'retired'
+                  AND (p.backoff_until IS NULL OR p.backoff_until <= ?)
+                  ${protocolFilterSql}
+                ORDER BY
+                    COALESCE(p.last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
+                    CASE p.lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC,
+                    l2.latest_l2_success_at DESC
+                LIMIT ?
+            `).all(cutoffIso, safeNowIso, ...protocolList, safeLimit);
+        }
+
         return this.db.prepare(`
             SELECT p.*
             FROM proxies p
-            INNER JOIN (
-                SELECT proxy_id, MAX(timestamp) AS latest_l2_success_at
-                FROM battle_test_runs
-                WHERE stage = 'l2' AND outcome = 'success' AND timestamp >= ?
-                GROUP BY proxy_id
-            ) l2 ON l2.proxy_id = p.id
             WHERE p.lifecycle != 'retired'
               AND (p.backoff_until IS NULL OR p.backoff_until <= ?)
               ${protocolFilterSql}
             ORDER BY
                 COALESCE(p.last_battle_checked_at, '1970-01-01T00:00:00.000Z') ASC,
                 CASE p.lifecycle WHEN 'active' THEN 0 WHEN 'reserve' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC,
-                l2.latest_l2_success_at DESC
+                p.updated_at ASC
             LIMIT ?
-        `).all(cutoffIso, safeNowIso, ...protocolList, safeLimit);
+        `).all(safeNowIso, ...protocolList, safeLimit);
     }
 
     // 0009_listProxiesForStateReview_列出状态巡检逻辑

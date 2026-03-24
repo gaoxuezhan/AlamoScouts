@@ -669,9 +669,37 @@ class ProxyHubEngine extends EventEmitter {
         return this.config?.battle?.enabled === true;
     }
 
+    // 0301_isBattleL1Enabled_判断战场L1开关逻辑
+    isBattleL1Enabled() {
+        return this.isBattleEnabled() && this.config?.battle?.l3Only !== true;
+    }
+
+    // 0302_isBattleL2Enabled_判断战场L2开关逻辑
+    isBattleL2Enabled() {
+        return this.isBattleEnabled() && this.config?.battle?.l3Only !== true;
+    }
+
     // 0278_isBattleL3Enabled_判断战场L3开关逻辑
     isBattleL3Enabled() {
         return this.isBattleEnabled() && this.config?.battle?.l3?.enabled === true;
+    }
+
+    // 0306_isBattleL3TimerEnabled_判断战场L3定时轮询开关逻辑
+    isBattleL3TimerEnabled() {
+        return this.isBattleL3Enabled() && this.config?.battle?.l3?.timerEnabled === true;
+    }
+
+    // 0303_isBattleL3RequireRecentL2Success_判断战场L3是否依赖近期L2成功逻辑
+    isBattleL3RequireRecentL2Success() {
+        if (this.config?.battle?.l3Only === true) {
+            return false;
+        }
+        return this.config?.battle?.l3?.requireRecentL2Success !== false;
+    }
+
+    // 0304_isBattleL3ImmediateOnL0Success_判断L0成功后立即执行L3开关逻辑
+    isBattleL3ImmediateOnL0Success() {
+        return this.isBattleL3Enabled() && this.config?.battle?.l3?.immediateOnL0Success === true;
     }
 
     // 0298_setSourceCycleThrottleFactor_设置抓源节流倍率逻辑
@@ -1040,12 +1068,14 @@ class ProxyHubEngine extends EventEmitter {
         await this.runSourceCycle();
         await this.runStateReviewCycle();
         await this.runCandidateSweepCycle();
-        if (this.isBattleEnabled()) {
+        if (this.isBattleL1Enabled()) {
             await this.runBattleL1Cycle();
+        }
+        if (this.isBattleL2Enabled()) {
             await this.runBattleL2Cycle();
-            if (this.isBattleL3Enabled()) {
-                await this.runBattleL3Cycle();
-            }
+        }
+        if (this.isBattleL3TimerEnabled()) {
+            await this.runBattleL3Cycle();
         }
         this.persistSnapshot();
 
@@ -1062,33 +1092,50 @@ class ProxyHubEngine extends EventEmitter {
             void this.runCandidateSweepCycle();
         }, candidateControl.sweepMs);
 
-        if (this.isBattleEnabled()) {
+        if (this.isBattleL1Enabled()) {
             this.battleL1Timer = setInterval(() => {
                 void this.runBattleL1Cycle();
             }, this.config.battle.l1SyncMs);
+        }
 
+        if (this.isBattleL2Enabled()) {
             this.battleL2Timer = setInterval(() => {
                 void this.runBattleL2Cycle();
             }, this.config.battle.l2SyncMs);
-            if (this.isBattleL3Enabled()) {
-                this.battleL3Timer = setInterval(() => {
-                    void this.runBattleL3Cycle();
-                }, this.config.battle.l3.syncMs);
-            }
+        }
+        if (this.isBattleL3TimerEnabled()) {
+            this.battleL3Timer = setInterval(() => {
+                void this.runBattleL3Cycle();
+            }, this.config.battle.l3.syncMs);
         }
 
         this.snapshotTimer = setInterval(() => {
             this.persistSnapshot();
         }, this.config.scheduler.snapshotPersistMs);
 
+        let battleAction = '调度循环启动';
+        if (this.isBattleEnabled()) {
+            const stageSchedules = [];
+            if (this.isBattleL1Enabled()) {
+                stageSchedules.push(`L1 ${Math.round(this.config.battle.l1SyncMs / 1000)} 秒`);
+            }
+            if (this.isBattleL2Enabled()) {
+                stageSchedules.push(`L2 ${Math.round(this.config.battle.l2SyncMs / 1000)} 秒`);
+            }
+            if (this.isBattleL3TimerEnabled()) {
+                stageSchedules.push(`L3 ${Math.round(this.config.battle.l3.syncMs / 1000)} 秒`);
+            } else if (this.isBattleL3ImmediateOnL0Success()) {
+                stageSchedules.push('L3 跟随L0串行触发');
+            }
+            battleAction = stageSchedules.length > 0 ? stageSchedules.join(', ') : '战场测试已禁用';
+        }
+
         this.logger.write({
             event: '等待下一轮',
             stage: '调度',
             result: 'ProxyHub 已启动',
             reason: `抓源间隔 ${Math.round(this.config.scheduler.sourceSyncMs / 1000)} 秒`,
-            action: this.isBattleEnabled()
-                ? `L1 ${Math.round(this.config.battle.l1SyncMs / 1000)} 秒, L2 ${Math.round(this.config.battle.l2SyncMs / 1000)} 秒${this.isBattleL3Enabled() ? `, L3 ${Math.round(this.config.battle.l3.syncMs / 1000)} 秒` : ''}`
-                : '调度循环启动',
+            action: battleAction,
         });
     }
 
@@ -1634,6 +1681,20 @@ class ProxyHubEngine extends EventEmitter {
             });
 
             if (validation.ok) {
+                if (this.isBattleL3ImmediateOnL0Success()) {
+                    const latestProxy = this.db.getProxyById(proxy.id) || proxy;
+                    await this.runBattleL3TaskForProxy(latestProxy, 'battle-l3-browser', this.config?.battle?.l3 || {});
+                    this.logger.write({
+                        event: '写数据库成功',
+                        proxyName: proxy.display_name,
+                        ipSource: sourceName,
+                        stage: '入库',
+                        result: 'L0通过并已触发L3',
+                        durationMs: Date.now() - cycleStart,
+                        action: 'L0成功后立即执行L3',
+                    });
+                    return;
+                }
                 if (!this.isBattleEnabled()) {
                     await this.applyCombatOutcome({
                         proxyId: proxy.id,
@@ -1708,7 +1769,7 @@ class ProxyHubEngine extends EventEmitter {
 
     // 0212_runBattleL1Cycle_执行战场L1轮次逻辑
     async runBattleL1Cycle() {
-        if (!this.started || !this.isBattleEnabled() || this.isBattleL1Running) {
+        if (!this.started || !this.isBattleL1Enabled() || this.isBattleL1Running) {
             return;
         }
 
@@ -1806,7 +1867,7 @@ class ProxyHubEngine extends EventEmitter {
 
     // 0213_runBattleL2Cycle_执行战场L2轮次逻辑
     async runBattleL2Cycle() {
-        if (!this.started || !this.isBattleEnabled() || this.isBattleL2Running) {
+        if (!this.started || !this.isBattleL2Enabled() || this.isBattleL2Running) {
             return;
         }
 
@@ -1903,6 +1964,79 @@ class ProxyHubEngine extends EventEmitter {
         }
     }
 
+    // 0305_runBattleL3TaskForProxy_执行单代理L3测试逻辑
+    async runBattleL3TaskForProxy(proxy, sourceName = 'battle-l3-browser', l3Config = this.config?.battle?.l3 || {}) {
+        const nowIso = this.now().toISOString();
+        try {
+            const result = await this.workerPool.runTask('battle-l3-browser', {
+                proxy: {
+                    ip: proxy.ip,
+                    port: proxy.port,
+                    protocol: proxy.protocol,
+                },
+                targets: l3Config.targets,
+                timeoutMs: l3Config.timeoutMs,
+                blockedStatusCodes: this.config.battle.blockedStatusCodes,
+                blockSignals: this.config.battle.blockSignals,
+                allowedProtocols: l3Config.allowedProtocols,
+            });
+
+            for (const run of result.runs || []) {
+                this.db.insertBattleTestRun({
+                    timestamp: nowIso,
+                    proxy_id: proxy.id,
+                    stage: 'l3',
+                    target: run.target,
+                    outcome: run.outcome,
+                    status_code: run.statusCode,
+                    latency_ms: run.latencyMs,
+                    reason: run.reason,
+                    details: run.details,
+                });
+            }
+
+            const latest = this.db.getProxyById(proxy.id);
+            const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l2');
+            await this.applyCombatOutcome({
+                proxyId: proxy.id,
+                sourceName,
+                outcome: result.outcome,
+                latencyMs: result.latencyMs || 0,
+                nowIso,
+                stage: '评分(L3)',
+                combatStage: 'l2',
+                branchingStage: 'l3',
+                extraUpdates: battleUpdates,
+            });
+            return { ok: true, outcome: result.outcome };
+        } catch (error) {
+            const latest = this.db.getProxyById(proxy.id) || proxy;
+            const battleUpdates = buildBattleCounterUpdates(latest, nowIso, 'network_error', 'l2');
+            await this.applyCombatOutcome({
+                proxyId: proxy.id,
+                sourceName,
+                outcome: 'network_error',
+                latencyMs: 0,
+                nowIso,
+                stage: '评分(L3-异常)',
+                combatStage: 'l2',
+                branchingStage: 'l3',
+                extraUpdates: battleUpdates,
+            });
+
+            this.logger.write({
+                event: '战场测试L3失败',
+                proxyName: proxy.display_name,
+                ipSource: sourceName,
+                stage: '战场测试L3',
+                result: '异常',
+                reason: error?.message || 'battle-l3-task-error',
+                action: '已触发失败退避',
+            });
+            return { ok: false, reason: error?.message || 'battle-l3-task-error' };
+        }
+    }
+
     // 0279_runBattleL3Cycle_执行战场L3轮次逻辑
     async runBattleL3Cycle() {
         if (!this.started || !this.isBattleL3Enabled() || this.isBattleL3Running) {
@@ -1918,6 +2052,10 @@ class ProxyHubEngine extends EventEmitter {
                 l3Config.maxPerCycle,
                 l3Config.lookbackMinutes,
                 l3Config.allowedProtocols,
+                undefined,
+                {
+                    requireRecentL2Success: this.isBattleL3RequireRecentL2Success(),
+                },
             );
             if (candidates.length === 0) {
                 return;
@@ -1925,73 +2063,7 @@ class ProxyHubEngine extends EventEmitter {
 
             const concurrency = Math.max(1, Math.min(Number(l3Config.concurrency) || 1, 6));
             await runWithConcurrency(candidates, concurrency, async (proxy) => {
-                const nowIso = this.now().toISOString();
-                try {
-                    const result = await this.workerPool.runTask('battle-l3-browser', {
-                        proxy: {
-                            ip: proxy.ip,
-                            port: proxy.port,
-                            protocol: proxy.protocol,
-                        },
-                        targets: l3Config.targets,
-                        timeoutMs: l3Config.timeoutMs,
-                        blockedStatusCodes: this.config.battle.blockedStatusCodes,
-                        blockSignals: this.config.battle.blockSignals,
-                        allowedProtocols: l3Config.allowedProtocols,
-                    });
-
-                    for (const run of result.runs || []) {
-                        this.db.insertBattleTestRun({
-                            timestamp: nowIso,
-                            proxy_id: proxy.id,
-                            stage: 'l3',
-                            target: run.target,
-                            outcome: run.outcome,
-                            status_code: run.statusCode,
-                            latency_ms: run.latencyMs,
-                            reason: run.reason,
-                            details: run.details,
-                        });
-                    }
-
-                    const latest = this.db.getProxyById(proxy.id);
-                    const battleUpdates = buildBattleCounterUpdates(latest || proxy, nowIso, result.outcome, 'l2');
-                    await this.applyCombatOutcome({
-                        proxyId: proxy.id,
-                        sourceName,
-                        outcome: result.outcome,
-                        latencyMs: result.latencyMs || 0,
-                        nowIso,
-                        stage: '评分(L3)',
-                        combatStage: 'l2',
-                        branchingStage: 'l3',
-                        extraUpdates: battleUpdates,
-                    });
-                } catch (error) {
-                    const latest = this.db.getProxyById(proxy.id) || proxy;
-                    const battleUpdates = buildBattleCounterUpdates(latest, nowIso, 'network_error', 'l2');
-                    await this.applyCombatOutcome({
-                        proxyId: proxy.id,
-                        sourceName,
-                        outcome: 'network_error',
-                        latencyMs: 0,
-                        nowIso,
-                        stage: '评分(L3-异常)',
-                        combatStage: 'l2',
-                        branchingStage: 'l3',
-                        extraUpdates: battleUpdates,
-                    });
-
-                    this.logger.write({
-                        event: '战场测试L3失败',
-                        proxyName: proxy.display_name,
-                        ipSource: sourceName,
-                        stage: '战场测试L3',
-                        result: '异常',
-                        reason: error?.message || 'battle-l3-task-error',
-                        action: '已触发失败退避',
-                    });
-                }
+                await this.runBattleL3TaskForProxy(proxy, sourceName, l3Config);
             });
         } catch (error) {
             this.logger.write({

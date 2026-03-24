@@ -18,7 +18,7 @@ test('median should handle empty odd and even inputs', () => {
 test('ensureRolloutConfig should backfill rollout defaults', () => {
     const config = {};
     const rollout = ensureRolloutConfig(config);
-    assert.equal(rollout.version, 'v1.1');
+    assert.equal(rollout.version, 'v2');
     assert.equal(rollout.activeProfile, 'production');
     assert.equal(rollout.features.stageWeighting, true);
     assert.equal(rollout.features.lifecycleHysteresis, true);

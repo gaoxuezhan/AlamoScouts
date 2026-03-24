@@ -15,6 +15,10 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_BATTLE_L3_TIMEOUT_MS',
         'PROXY_HUB_BATTLE_L3_ALLOWED_PROTOCOLS',
         'PROXY_HUB_BATTLE_L3_TARGETS_JSON',
+        'PROXY_HUB_BATTLE_L3_ONLY',
+        'PROXY_HUB_BATTLE_L3_REQUIRE_L2_SUCCESS',
+        'PROXY_HUB_BATTLE_L3_IMMEDIATE_ON_L0_SUCCESS',
+        'PROXY_HUB_BATTLE_L3_TIMER_ENABLED',
         'PROXY_HUB_BATTLE_L2_MS',
         'PROXY_HUB_FEATURE_STAGE_WEIGHTING',
         'PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS',
@@ -35,6 +39,7 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_CANDIDATE_STALE_MIN_SAMPLES',
         'PROXY_HUB_CANDIDATE_TIMEOUT_HOURS',
         'PROXY_HUB_CANDIDATE_SWEEP_MAX_RETIRE',
+        'PROXY_HUB_TASK_TIMEOUT_MS',
         'PROXY_HUB_FAILURE_BACKOFF_ENABLED',
         'PROXY_HUB_FAILURE_BACKOFF_L0_MS',
         'PROXY_HUB_FAILURE_BACKOFF_L1_MS',
@@ -112,6 +117,7 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.battle.l2SyncMsByProfile.soak, 600000);
     assert.equal(config.battle.maxBattleL1PerCycle, 60);
     assert.equal(config.battle.maxBattleL2PerCycle, 20);
+    assert.equal(config.battle.l3Only, false);
     assert.equal(config.battle.candidateQuota, 0.15);
     assert.deepEqual(config.scheduler.stateReviewLifecycleQuota, { active: 0.45, reserve: 0.35, candidate: 0.20 });
     assert.equal(config.candidateControl.max, 1500);
@@ -120,12 +126,15 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.candidateControl.staleHours, 18);
     assert.equal(config.candidateControl.timeoutHours, 48);
     assert.equal(config.battle.l3.enabled, true);
+    assert.equal(config.battle.l3.requireRecentL2Success, true);
+    assert.equal(config.battle.l3.immediateOnL0Success, false);
+    assert.equal(config.battle.l3.timerEnabled, true);
     assert.equal(config.battle.l3.syncMs, 1200000);
     assert.equal(config.battle.l3.syncMsByProfile.production, 1200000);
     assert.equal(config.battle.l3.syncMsByProfile.soak, 600000);
     assert.equal(config.battle.l3.maxPerCycle, 12);
     assert.equal(config.battle.l3.concurrency, 3);
-    assert.equal(config.battle.l3.timeoutMs, 40000);
+    assert.equal(config.battle.l3.timeoutMs, 120000);
     assert.deepEqual(config.battle.l3.allowedProtocols, ['http', 'https', 'socks5']);
     assert.equal(config.battle.l3.targets.length >= 2, true);
     assert.equal(config.battle.l3.targets[0].url, 'https://www.ly.com/flights/home');
@@ -160,6 +169,9 @@ test('config should support env override for L2 primary target', { concurrency: 
 test('config should support battle l3 env overrides', { concurrency: false }, () => {
     const config = loadConfigWithEnv({
         PROXY_HUB_BATTLE_L3_ENABLED: 'false',
+        PROXY_HUB_BATTLE_L3_REQUIRE_L2_SUCCESS: 'false',
+        PROXY_HUB_BATTLE_L3_IMMEDIATE_ON_L0_SUCCESS: 'true',
+        PROXY_HUB_BATTLE_L3_TIMER_ENABLED: 'false',
         PROXY_HUB_BATTLE_L3_MS: '600000',
         PROXY_HUB_BATTLE_L3_MAX: '8',
         PROXY_HUB_BATTLE_L3_CONCURRENCY: '2',
@@ -172,6 +184,9 @@ test('config should support battle l3 env overrides', { concurrency: false }, ()
         ]),
     });
     assert.equal(config.battle.l3.enabled, false);
+    assert.equal(config.battle.l3.requireRecentL2Success, false);
+    assert.equal(config.battle.l3.immediateOnL0Success, true);
+    assert.equal(config.battle.l3.timerEnabled, false);
     assert.equal(config.battle.l3.syncMs, 600000);
     assert.equal(config.battle.l3.maxPerCycle, 8);
     assert.equal(config.battle.l3.concurrency, 2);
@@ -180,6 +195,29 @@ test('config should support battle l3 env overrides', { concurrency: false }, ()
     assert.deepEqual(config.battle.l3.allowedProtocols, ['https', 'socks5']);
     assert.equal(config.battle.l3.targets.length, 2);
     assert.equal(config.battle.l3.targets[0].name, 'l3-one');
+});
+
+test('config should disable l1/l2 dependency when l3-only mode is enabled', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L3_ONLY: 'true',
+    });
+    assert.equal(config.battle.l3Only, true);
+    assert.equal(config.battle.l3.requireRecentL2Success, false);
+    assert.equal(config.battle.l3.immediateOnL0Success, true);
+    assert.equal(config.battle.l3.timerEnabled, false);
+});
+
+test('config should allow explicit l3 recent l2 dependency override in l3-only mode', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L3_ONLY: 'true',
+        PROXY_HUB_BATTLE_L3_REQUIRE_L2_SUCCESS: 'true',
+        PROXY_HUB_BATTLE_L3_IMMEDIATE_ON_L0_SUCCESS: 'false',
+        PROXY_HUB_BATTLE_L3_TIMER_ENABLED: 'true',
+    });
+    assert.equal(config.battle.l3Only, true);
+    assert.equal(config.battle.l3.requireRecentL2Success, true);
+    assert.equal(config.battle.l3.immediateOnL0Success, false);
+    assert.equal(config.battle.l3.timerEnabled, true);
 });
 
 test('config should use soak l3 sync default when soak profile is enabled', { concurrency: false }, () => {
@@ -395,6 +433,13 @@ test('config should parse candidate control env values', { concurrency: false },
     assert.equal(config.candidateControl.staleMinSamples, 2);
     assert.equal(config.candidateControl.timeoutHours, 60);
     assert.equal(config.candidateControl.maxRetirePerCycle, 333);
+});
+
+test('config should parse thread pool timeout env value', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_TASK_TIMEOUT_MS: '360000',
+    });
+    assert.equal(config.threadPool.taskTimeoutMs, 360000);
 });
 
 test('config should parse failure backoff env values', { concurrency: false }, () => {

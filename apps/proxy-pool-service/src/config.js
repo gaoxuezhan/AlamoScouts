@@ -198,11 +198,23 @@ const policyProfiles = {
         },
         demotion: {
             ...deepClone(basePolicyTemplate.demotion),
-            regularFailRatio: 0.70,
+            regularWindowSize: 20,
+            regularMinSamples: 8,
+            regularFailRatio: 0.60,
+            severeMinSamples: 6,
+            severeFailRatio: 0.80,
+            healthThreshold: 45,
+            lowHealthRetireThreshold: 30,
         },
         retirement: {
             ...deepClone(basePolicyTemplate.retirement),
-            disciplineThreshold: 35,
+            disciplineThreshold: 45,
+            disciplineInvalidCount: 2,
+            technicalMinSamples: 12,
+            technicalSuccessRatio: 0.20,
+            technicalEligibleLifecycles: ['active', 'reserve', 'candidate'],
+            battleDamageFailRatio: 0.72,
+            battleDamageMinSamples: 8,
         },
     },
 };
@@ -436,6 +448,19 @@ if (hasLegacySourceOverride) {
 
 const defaultStorageDbPath = selectedSourceProfile.dbPath;
 const resolvedStorageDbPath = process.env.PROXY_HUB_DB_PATH || defaultStorageDbPath;
+const battleL3Only = toBool(process.env.PROXY_HUB_BATTLE_L3_ONLY, false);
+const battleL3RequireRecentL2Success = toBool(
+    process.env.PROXY_HUB_BATTLE_L3_REQUIRE_L2_SUCCESS,
+    !battleL3Only,
+);
+const battleL3ImmediateOnL0Success = toBool(
+    process.env.PROXY_HUB_BATTLE_L3_IMMEDIATE_ON_L0_SUCCESS,
+    battleL3Only,
+);
+const battleL3TimerEnabled = toBool(
+    process.env.PROXY_HUB_BATTLE_L3_TIMER_ENABLED,
+    !battleL3Only,
+);
 
 module.exports = {
     service: {
@@ -451,7 +476,7 @@ module.exports = {
     },
     threadPool: {
         workers: Number(process.env.PROXY_HUB_WORKERS || 6),
-        taskTimeoutMs: 120_000,
+        taskTimeoutMs: Number(process.env.PROXY_HUB_TASK_TIMEOUT_MS || 120_000),
     },
     scheduler: {
         sourceSyncMs: Number(process.env.PROXY_HUB_SOURCE_SYNC_MS || 120_000),
@@ -480,7 +505,7 @@ module.exports = {
         maxMs: Number(process.env.PROXY_HUB_FAILURE_BACKOFF_MAX_MS || 21_600_000),
     },
     rollout: {
-        version: 'v1.1',
+        version: 'v2',
         activeProfile,
         features: {
             stageWeighting: toBool(process.env.PROXY_HUB_FEATURE_STAGE_WEIGHTING, true),
@@ -509,6 +534,7 @@ module.exports = {
     },
     battle: {
         enabled: String(process.env.PROXY_HUB_BATTLE_ENABLED || 'true') === 'true',
+        l3Only: battleL3Only,
         l1SyncMs: Number(process.env.PROXY_HUB_BATTLE_L1_MS || 300_000),
         l2SyncMs: Number(process.env.PROXY_HUB_BATTLE_L2_MS || battleL2SyncMsByProfile[activeProfile]),
         l2SyncMsByProfile: deepClone(battleL2SyncMsByProfile),
@@ -523,11 +549,14 @@ module.exports = {
         },
         l3: {
             enabled: toBool(process.env.PROXY_HUB_BATTLE_L3_ENABLED, true),
+            requireRecentL2Success: battleL3RequireRecentL2Success,
+            immediateOnL0Success: battleL3ImmediateOnL0Success,
+            timerEnabled: battleL3TimerEnabled,
             syncMs: Number(process.env.PROXY_HUB_BATTLE_L3_MS || battleL3SyncMsByProfile[activeProfile]),
             maxPerCycle: Number(process.env.PROXY_HUB_BATTLE_L3_MAX || 12),
             concurrency: Number(process.env.PROXY_HUB_BATTLE_L3_CONCURRENCY || 3),
             lookbackMinutes: Number(process.env.PROXY_HUB_BATTLE_L3_LOOKBACK_MINUTES || l2LookbackByProfile[activeProfile]),
-            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 40_000),
+            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 120_000),
             allowedProtocols: deepClone(resolvedBattleL3Protocols),
             targets: deepClone(resolvedBattleL3Targets),
             syncMsByProfile: deepClone(battleL3SyncMsByProfile),
