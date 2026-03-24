@@ -254,16 +254,19 @@ const battleL3SyncMsByProfile = {
 
 const defaultBattleL3Targets = [
     {
-        name: 'ly-flight-browser',
-        url: process.env.PROXY_HUB_BATTLE_L3_PRIMARY_URL
-            || process.env.PROXY_HUB_BATTLE_L2_PRIMARY_URL
-            || 'https://www.ly.com/flights/home',
-    },
-    {
         name: 'baidu-browser',
-        url: process.env.PROXY_HUB_BATTLE_L3_SECONDARY_URL
+        url: process.env.PROXY_HUB_BATTLE_L3_PRIMARY_URL
+            || process.env.PROXY_HUB_BATTLE_L3_SECONDARY_URL
             || process.env.PROXY_HUB_BATTLE_L2_FALLBACK_URL
             || 'https://www.baidu.com',
+    },
+];
+const defaultBattleL4Targets = [
+    {
+        name: 'ly-flight-browser',
+        url: process.env.PROXY_HUB_BATTLE_L4_PRIMARY_URL
+            || process.env.PROXY_HUB_BATTLE_L2_PRIMARY_URL
+            || 'https://www.ly.com/flights/home',
     },
 ];
 const resolvedBattleL3Targets = parseJsonArrayEnv(
@@ -274,6 +277,17 @@ const resolvedBattleL3Targets = parseJsonArrayEnv(
     url: String(target?.url || ''),
 })).filter((target) => target.url.length > 0);
 const resolvedBattleL3Protocols = String(process.env.PROXY_HUB_BATTLE_L3_ALLOWED_PROTOCOLS || 'http,https,socks5')
+    .split(',')
+    .map((protocol) => String(protocol || '').trim().toLowerCase())
+    .filter((protocol, index, list) => protocol.length > 0 && list.indexOf(protocol) === index);
+const resolvedBattleL4Targets = parseJsonArrayEnv(
+    process.env.PROXY_HUB_BATTLE_L4_TARGETS_JSON,
+    defaultBattleL4Targets,
+).map((target) => ({
+    name: String(target?.name || target?.url || 'l4-target'),
+    url: String(target?.url || ''),
+})).filter((target) => target.url.length > 0);
+const resolvedBattleL4Protocols = String(process.env.PROXY_HUB_BATTLE_L4_ALLOWED_PROTOCOLS || 'http,https,socks5')
     .split(',')
     .map((protocol) => String(protocol || '').trim().toLowerCase())
     .filter((protocol, index, list) => protocol.length > 0 && list.indexOf(protocol) === index);
@@ -316,9 +330,9 @@ const resolvedStateReviewLifecycleQuota = parseLifecycleQuota(
 
 const defaultBranchingRules = [
     {
-        id: 'l2_promote_navy',
+        id: 'l3_promote_navy',
         priority: 10,
-        stage: 'l2',
+        stage: 'l3',
         outcomes: ['success'],
         from: ['陆军'],
         to: '海军',
@@ -326,18 +340,18 @@ const defaultBranchingRules = [
         eventType: 'branch_transfer',
     },
     {
-        id: 'l2_reset_navy_streak',
+        id: 'l3_reset_navy_streak',
         priority: 20,
-        stage: 'l2',
+        stage: 'l3',
         outcomes: ['success'],
         from: ['海军'],
         failStreakOp: 'reset',
         eventType: 'branch_streak_reset',
     },
     {
-        id: 'l2_fail_navy_fallback',
+        id: 'l3_fail_navy_fallback',
         priority: 30,
-        stage: 'l2',
+        stage: 'l3',
         outcomes: ['blocked', 'timeout', 'network_error', 'invalid_feedback'],
         from: ['海军'],
         failStreakOp: 'increment',
@@ -346,9 +360,9 @@ const defaultBranchingRules = [
         eventType: 'branch_fallback',
     },
     {
-        id: 'l3_promote_seal',
+        id: 'l4_promote_seal',
         priority: 40,
-        stage: 'l3',
+        stage: 'l4',
         outcomes: ['success'],
         from: ['陆军', '海军', '海豹突击队'],
         to: '海豹突击队',
@@ -356,9 +370,9 @@ const defaultBranchingRules = [
         eventType: 'branch_transfer',
     },
     {
-        id: 'l3_fail_seal_fallback',
+        id: 'l4_fail_seal_fallback',
         priority: 50,
-        stage: 'l3',
+        stage: 'l4',
         outcomes: ['blocked', 'timeout', 'network_error', 'invalid_feedback'],
         from: ['海豹突击队'],
         failStreakOp: 'increment',
@@ -570,6 +584,12 @@ module.exports = {
             allowedProtocols: deepClone(resolvedBattleL3Protocols),
             targets: deepClone(resolvedBattleL3Targets),
             syncMsByProfile: deepClone(battleL3SyncMsByProfile),
+        },
+        l4: {
+            enabled: toBool(process.env.PROXY_HUB_BATTLE_L4_ENABLED, true),
+            timeoutMs: Number(process.env.PROXY_HUB_BATTLE_L4_TIMEOUT_MS || process.env.PROXY_HUB_BATTLE_L3_TIMEOUT_MS || 120_000),
+            allowedProtocols: deepClone(resolvedBattleL4Protocols),
+            targets: deepClone(resolvedBattleL4Targets),
         },
         blockedStatusCodes: [401, 403, 429, 503],
         blockSignals: [

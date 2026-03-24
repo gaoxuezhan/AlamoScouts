@@ -149,6 +149,8 @@ function createStubs() {
             l2_fail_count: 1,
             l3_success_count: 2,
             l3_fail_count: 1,
+            l4_success_count: 1,
+            l4_fail_count: 0,
         }],
         getRankBoard: () => [{ rank: '新兵', count: 1 }],
         getServiceBranchDistribution: () => [{ service_branch: '陆军', count: 1 }],
@@ -326,6 +328,8 @@ test('server runtime should expose all REST endpoints and shutdown cleanly', asy
     assert.equal(typeof valueBoardPayload.items[0].l2_fail_count, 'number');
     assert.equal(typeof valueBoardPayload.items[0].l3_success_count, 'number');
     assert.equal(typeof valueBoardPayload.items[0].l3_fail_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l4_success_count, 'number');
+    assert.equal(typeof valueBoardPayload.items[0].l4_fail_count, 'number');
     assert.equal(typeof valueBoardPayload.items[0].native_place, 'string');
     assert.equal(typeof valueBoardPayload.items[0].native_lookup_raw_json, 'string');
     assert.equal(typeof valueBoardPayload.items[0].native_lookup_readable_text, 'string');

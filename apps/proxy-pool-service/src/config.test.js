@@ -6,6 +6,7 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_BATTLE_L2_PRIMARY_URL',
         'PROXY_HUB_BATTLE_L3_PRIMARY_URL',
         'PROXY_HUB_BATTLE_L3_SECONDARY_URL',
+        'PROXY_HUB_BATTLE_L4_PRIMARY_URL',
         'PROXY_HUB_BATTLE_L2_FALLBACK_URL',
         'PROXY_HUB_BATTLE_L3_ENABLED',
         'PROXY_HUB_BATTLE_L3_MS',
@@ -19,6 +20,10 @@ function loadConfigWithEnv(overrides = {}) {
         'PROXY_HUB_BATTLE_L3_REQUIRE_L2_SUCCESS',
         'PROXY_HUB_BATTLE_L3_IMMEDIATE_ON_L0_SUCCESS',
         'PROXY_HUB_BATTLE_L3_TIMER_ENABLED',
+        'PROXY_HUB_BATTLE_L4_ENABLED',
+        'PROXY_HUB_BATTLE_L4_TIMEOUT_MS',
+        'PROXY_HUB_BATTLE_L4_ALLOWED_PROTOCOLS',
+        'PROXY_HUB_BATTLE_L4_TARGETS_JSON',
         'PROXY_HUB_BATTLE_L2_MS',
         'PROXY_HUB_FEATURE_STAGE_WEIGHTING',
         'PROXY_HUB_FEATURE_LIFECYCLE_HYSTERESIS',
@@ -138,8 +143,13 @@ test('config should expose required default values', { concurrency: false }, () 
     assert.equal(config.battle.l3.concurrency, 3);
     assert.equal(config.battle.l3.timeoutMs, 120000);
     assert.deepEqual(config.battle.l3.allowedProtocols, ['http', 'https', 'socks5']);
-    assert.equal(config.battle.l3.targets.length >= 2, true);
-    assert.equal(config.battle.l3.targets[0].url, 'https://www.ly.com/flights/home');
+    assert.equal(config.battle.l3.targets.length >= 1, true);
+    assert.equal(config.battle.l3.targets[0].url, 'https://www.baidu.com');
+    assert.equal(config.battle.l4.enabled, true);
+    assert.equal(config.battle.l4.timeoutMs, 120000);
+    assert.deepEqual(config.battle.l4.allowedProtocols, ['http', 'https', 'socks5']);
+    assert.equal(config.battle.l4.targets.length >= 1, true);
+    assert.equal(config.battle.l4.targets[0].url, 'https://www.ly.com/flights/home');
     assert.equal(config.failureBackoff.enabled, true);
     assert.equal(config.failureBackoff.maxMs, 21600000);
     assert.equal(Array.isArray(config.battle.targets.l1), true);
@@ -261,9 +271,26 @@ test('config should normalize battle l3 target and protocol env fallbacks', { co
     assert.deepEqual(config.battle.l3.allowedProtocols, ['https', 'socks5']);
 });
 
-test('config should include default l3 secondary browser target', { concurrency: false }, () => {
+test('config should include default l3/l4 browser targets', { concurrency: false }, () => {
     const config = loadConfigWithEnv();
     assert.equal(config.battle.l3.targets.some((item) => item.name === 'baidu-browser' && item.url === 'https://www.baidu.com'), true);
+    assert.equal(config.battle.l4.targets.some((item) => item.name === 'ly-flight-browser' && item.url === 'https://www.ly.com/flights/home'), true);
+});
+
+test('config should support battle l4 env overrides', { concurrency: false }, () => {
+    const config = loadConfigWithEnv({
+        PROXY_HUB_BATTLE_L4_ENABLED: 'false',
+        PROXY_HUB_BATTLE_L4_TIMEOUT_MS: '66000',
+        PROXY_HUB_BATTLE_L4_ALLOWED_PROTOCOLS: 'https,socks5',
+        PROXY_HUB_BATTLE_L4_TARGETS_JSON: JSON.stringify([
+            { name: 'l4-one', url: 'https://example.com/l4-1' },
+        ]),
+    });
+    assert.equal(config.battle.l4.enabled, false);
+    assert.equal(config.battle.l4.timeoutMs, 66000);
+    assert.deepEqual(config.battle.l4.allowedProtocols, ['https', 'socks5']);
+    assert.equal(config.battle.l4.targets.length, 1);
+    assert.equal(config.battle.l4.targets[0].name, 'l4-one');
 });
 
 test('config should support source override for line-based lists', { concurrency: false }, () => {
